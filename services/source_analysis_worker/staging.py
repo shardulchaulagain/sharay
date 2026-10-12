@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 from services.scanner_worker import remove_tree
@@ -73,7 +74,8 @@ def validate_staged_tree(
                 path = os.path.join(parent, name)
                 if not stat.S_ISDIR(os.lstat(path).st_mode):
                     raise ValueError("The staged tree contains a link or special entry.")
-                os.chflags(path, 0, follow_symlinks=False)
+                if sys.platform == "darwin":  # file flags are macOS/BSD only
+                    os.chflags(path, 0, follow_symlinks=False)
                 os.chmod(path, stat.S_IRWXU, follow_symlinks=False)
                 folders += 1
             for name in file_names:
@@ -85,7 +87,8 @@ def validate_staged_tree(
                 total += status.st_size
                 if status.st_size > max_file_bytes or total > max_total_bytes:
                     raise ValueError("The staged tree is larger than the size budget.")
-                os.chflags(path, 0, follow_symlinks=False)
+                if sys.platform == "darwin":
+                    os.chflags(path, 0, follow_symlinks=False)
                 os.chmod(path, 0o600, follow_symlinks=False)
                 digest = hashlib.sha256()
                 # Hash exactly as many bytes as lstat reported; O_NOFOLLOW in case of a swap.

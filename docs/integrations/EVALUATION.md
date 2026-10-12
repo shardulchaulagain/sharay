@@ -1,6 +1,6 @@
 # Evaluation (L8) — measured results, narrowly scoped
 
-Two corpora exist. Their numbers describe those corpora only and are not a general accuracy claim for SHARAY or any scanner.
+Four corpus files exist (two subjects, two versions each). Their numbers describe those corpora only and are not a general accuracy claim for SHARAY or any scanner.
 
 ## HTTP configuration corpus v1
 
@@ -24,6 +24,26 @@ Measured October 12, 2026; all 16 scans completed in both runs:
 Version 1.0.0 missed four checks: an empty `Content-Security-Policy`, an undefined `X-Frame-Options` value, `frame-ancestors *`, and an unrecognised `Referrer-Policy` token, because three of its checks tested that a header was present, not that its value was effective (`entry-fc99b79d3abc44ee`). Version 1.1.0 checks effectiveness. That change was made by Claude in Codex's file while Codex was offline, at the human's instruction, and awaits Codex's review (`drafts/codex-review/header-checks.diff`). `tests/evaluation/test_http_configuration.py` now fails on any miss or false alarm. A perfect score on a 16-case corpus the fix was written against says the known gaps are closed, not that the checker is complete.
 
 The labels are one reviewer's judgement of how browsers treat each value; each `ineffective-value` case carries its reason in a `basis` field and is open to challenge. HTTPS-only checks, redirects and every other scanner are not covered. No AI or third-party tool has been evaluated.
+
+## HTTP configuration corpus v2
+
+`tests/evaluation/corpus/http_configuration.v2.json` holds 36 cases. Gemini wrote 30 (`drafts/gemini/http_configuration.v2-candidates.json`) and reported a perfect score. Claude checked every label against browser behaviour before adopting it: 27 stood, and 3 described what this adapter's parser does instead of what a browser does. Those 3 were corrected and 6 further cases added, all in a new subset `browser-parsing`, each citing its source in `basis`.
+
+Measured October 12, 2026 on adapter 1.1.1; all 36 scans completed:
+
+| Subset | Cases | Correct | False alarms | Missed | Precision | Recall |
+| --- | --- | --- | --- | --- | --- | --- |
+| `clear` | 9 | 6 | 0 | 0 | 1.0 | 1.0 |
+| `ineffective-value` | 18 | 16 | 0 | 0 | 1.0 | 1.0 |
+| `browser-parsing`: effect depends on how browsers split or parse the header | 9 | 1 | 2 | 6 | 0.33 | 0.14 |
+| All | 36 | 23 | 2 | 6 | 0.92 | 0.79 |
+
+The eight disagreements are two causes, both in `packages/scanner_adapters/__init__.py` (Codex's file, not changed here):
+
+- **`X-Content-Type-Options` is compared as one whole string, and only the last header is read.** The Fetch standard joins the values, splits on commas and tests the first. So `nosniff, nosniff` and `nosniff, other` are reported as missing although sniffing is disabled (2 false alarms), and a header `other` followed by a header `nosniff` is accepted although sniffing is not disabled (1 miss).
+- **A cookie Python's `SimpleCookie` cannot parse is recorded as a parse error and then treated as having HttpOnly.** Browsers follow RFC 6265bis section 5.6 and store cookies with no `=`, an empty name, brackets in the name, a JSON value, or an unknown attribute. Five such cookies without HttpOnly are not reported (5 misses). `SimpleCookie` before Python 3.14 also drops any cookie carrying the `Partitioned` attribute, so the result can differ by Python version.
+
+`tests/evaluation/test_http_configuration.py` holds these eight as two sets that may only shrink: fixing the adapter passes, a new disagreement fails. Until then the adapter's HttpOnly and nosniff results on such responses are not reliable in either direction.
 
 ## Secret detection corpus v1
 

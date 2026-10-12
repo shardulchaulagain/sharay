@@ -17,6 +17,21 @@ CHECKS = {
 # The four ineffective-value misses first measured on this corpus were fixed in the adapter
 # on October 12; none is tolerated now, so any miss fails.
 KNOWN_MISSES: set[tuple[str, str]] = set()
+CORPUS_V2 = CORPUS.with_name("http_configuration.v2.json")
+# Measured on adapter 1.1.1, all in subset 'browser-parsing' and reported to the adapter's owner.
+# These sets may only shrink: a fix passes, a new disagreement fails.
+V2_FALSE_ALARMS = {
+    ("xcto-nosniff-repeated-in-one-header", "missing_nosniff"),
+    ("xcto-nosniff-first-then-other", "missing_nosniff"),
+}
+V2_MISSES = {
+    ("xcto-other-header-before-nosniff-header", "missing_nosniff"),
+    ("cookie-without-equals-sign", "cookie_httponly"),
+    ("cookie-empty-name-without-httponly", "cookie_httponly"),
+    ("cookie-bracket-name-without-httponly", "cookie_httponly"),
+    ("cookie-json-value-without-httponly", "cookie_httponly"),
+    ("cookie-unknown-attribute-without-httponly", "cookie_httponly"),
+}
 
 
 class HarnessTests(unittest.TestCase):
@@ -59,16 +74,17 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(report["cases"][0]["unexpected"], ["z"])
 
     def test_corpus_labels_are_well_formed(self):
-        corpus = json.loads(CORPUS.read_text())
-        identifiers = [case["id"] for case in corpus["cases"]]
-        self.assertEqual(len(identifiers), len(set(identifiers)))
-        for case in corpus["cases"]:
-            with self.subTest(case["id"]):
-                self.assertRegex(case["id"], r"^[a-z0-9-]+$")
-                self.assertLessEqual(set(case["expected"]), CHECKS)
-                self.assertIn(case["subset"], {"clear", "ineffective-value"})
-                # A label that depends on how browsers treat a value must say why.
-                self.assertEqual("basis" in case, case["subset"] == "ineffective-value")
+        for path in (CORPUS, CORPUS_V2):
+            corpus = json.loads(path.read_text())
+            identifiers = [case["id"] for case in corpus["cases"]]
+            self.assertEqual(len(identifiers), len(set(identifiers)))
+            for case in corpus["cases"]:
+                with self.subTest(case["id"]):
+                    self.assertRegex(case["id"], r"^[a-z0-9-]+$")
+                    self.assertLessEqual(set(case["expected"]), CHECKS)
+                    self.assertIn(case["subset"], {"clear", "ineffective-value", "browser-parsing"})
+                    # A label that depends on how browsers treat a value must say why.
+                    self.assertEqual("basis" in case, case["subset"] != "clear")
 
 
 class MeasuredAdapterTests(unittest.TestCase):
@@ -92,6 +108,30 @@ class MeasuredAdapterTests(unittest.TestCase):
     def test_misses_are_limited_to_the_reported_ineffective_value_gaps(self):
         misses = {(case["id"], check) for case in self.report["cases"] for check in case["missed"]}
         self.assertLessEqual(misses, KNOWN_MISSES)
+
+
+class MeasuredAdapterOnCorpusV2Tests(unittest.TestCase):
+    """Thirty cases by another author plus six of ours; three of the thirty labels were corrected."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.report = evaluate(CORPUS_V2)
+
+    def test_every_case_was_actually_scanned(self):
+        self.assertEqual(self.report["incomplete_scans"], [])
+        self.assertEqual(self.report["totals"]["cases"], 36)
+
+    def test_plain_and_ineffective_value_cases_are_classified_exactly(self):
+        for name in ("clear", "ineffective-value"):
+            subset = self.report["by_subset"][name]
+            self.assertEqual((subset["false_positives"], subset["false_negatives"]), (0, 0), name)
+
+    def test_disagreements_are_limited_to_the_reported_browser_parsing_gaps(self):
+        cases = self.report["cases"]
+        self.assertLessEqual({(c["id"], check) for c in cases for check in c["unexpected"]}, V2_FALSE_ALARMS)
+        self.assertLessEqual({(c["id"], check) for c in cases for check in c["missed"]}, V2_MISSES)
+        gaps = {identifier for identifier, _check in V2_FALSE_ALARMS | V2_MISSES}
+        self.assertEqual({c["subset"] for c in cases if c["id"] in gaps}, {"browser-parsing"})
 
 
 if __name__ == "__main__":

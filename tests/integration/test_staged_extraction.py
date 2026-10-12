@@ -213,11 +213,18 @@ class ParentValidationTests(Staging):
     def test_locked_and_immutable_entries_cannot_block_validation_or_cleanup(self):
         frozen = self.output / "tree" / "frozen.txt"
         frozen.write_text("x")
-        os.chflags(frozen, stat.UF_IMMUTABLE)
+
+        def freeze():
+            if (
+                sys.platform == "darwin"
+            ):  # immutable flags are macOS/BSD only; the mode-0 half runs everywhere
+                os.chflags(frozen, stat.UF_IMMUTABLE)
+
+        freeze()
         (self.output / "tree" / "src").chmod(0)
         (self.output / "tree").chmod(0)
         self.assertEqual(validate_staged_tree(self.output)["files"], 2)
-        os.chflags(frozen, stat.UF_IMMUTABLE)
+        freeze()
         (self.output / "tree").chmod(0)
         self.assertTrue(purge(self.output))
         self.assertFalse(self.output.exists())

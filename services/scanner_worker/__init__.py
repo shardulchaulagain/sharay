@@ -174,7 +174,8 @@ def remove_tree(folder: Path | str) -> bool:
     folder = Path(folder)
 
     def unlock_folder(path: str) -> None:
-        os.chflags(path, 0, follow_symlinks=False)
+        if sys.platform == "darwin":  # file flags are macOS/BSD only; modes are enough elsewhere
+            os.chflags(path, 0, follow_symlinks=False)
         os.chmod(path, stat.S_IRWXU, follow_symlinks=False)
 
     try:
@@ -189,7 +190,11 @@ def remove_tree(folder: Path | str) -> bool:
                 status = os.lstat(path)
                 if stat.S_ISDIR(status.st_mode):
                     unlock_folder(path)
-                elif status.st_flags and (stat.S_ISLNK(status.st_mode) or status.st_nlink == 1):
+                elif (
+                    sys.platform == "darwin"
+                    and status.st_flags
+                    and (stat.S_ISLNK(status.st_mode) or status.st_nlink == 1)
+                ):
                     # An immutable flag blocks unlinking; clear it only where no other name shares it.
                     os.chflags(path, 0, follow_symlinks=False)
         shutil.rmtree(folder)
