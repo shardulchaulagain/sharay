@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from packages.reporting import redact
 
@@ -60,6 +61,28 @@ def relative_path(value: Any, what: str, source_root: str = "") -> str:
     if path.startswith("/") or ":" in parts[0] or any(part in ("", "..") for part in parts):
         raise ValueError(f"{what} is absolute, empty or leaves the scanned tree.")
     return "/".join(part for part in parts if part != ".") or "."
+
+
+def port_suffix(value: int | None, what: str) -> str:
+    if value is None:
+        return ""
+    if not 1 <= value <= 65535:
+        raise ValueError(f"{what} has a port outside 1-65535.")
+    return f":{value}"
+
+
+def http_location(value: Any, what: str) -> str:
+    """An http(s) URL rebuilt only from its parsed parts: no credentials, query or fragment."""
+    raw = text(value, what, 1000)
+    try:
+        parsed = urlsplit(raw)
+        host, port = parsed.hostname, parsed.port
+    except ValueError:  # includes an out-of-range or non-numeric port
+        raise ValueError(f"{what} is not a valid URL.") from None
+    if parsed.scheme not in ("http", "https") or not host:
+        raise ValueError(f"{what} is not an http or https URL.")
+    authority = f"[{host}]" if ":" in host else host  # an IPv6 literal keeps its brackets
+    return f"{parsed.scheme}://{authority}{port_suffix(port, what)}{parsed.path or '/'}"
 
 
 def label(value: Any, limit: int = 200) -> str | None:

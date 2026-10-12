@@ -52,12 +52,15 @@ class ProviderConfig(BaseModel):
         if value is None:
             return value
         parsed = urlsplit(value)
+        port = parsed.port  # read here: urlsplit only checks the port when it is asked for
         local = parsed.scheme == "http" and parsed.hostname in _LOOPBACK
         # "@" covers user, password and the empty-user form (https://:secret@host).
         if not (parsed.scheme == "https" or local) or not parsed.hostname or "@" in parsed.netloc:
             raise ValueError("A base URL is https, or http on loopback, without credentials.")
         if parsed.query or parsed.fragment or not value.isprintable() or " " in value:
             raise ValueError("A base URL carries no query, fragment or unprintable text.")
+        if port == 0 or parsed.netloc.endswith(":") or redact_tokens(value, "") != value:
+            raise ValueError("A base URL has a usable port and holds no credential.")
         return value
 
     @model_validator(mode="after")
@@ -118,8 +121,9 @@ def secret(config: ProviderConfig, environment: dict[str, str] | None = None) ->
     """The credential an adapter needs, read from the named variable at call time only."""
     source = os.environ if environment is None else environment
     value = source.get(config.api_key_env or "", "")
-    if not value:
-        raise AIUnavailable("The AI provider's credential variable is not set.")
+    # Whitespace or a line break in a key is a paste accident, and a line break would split an HTTP header.
+    if not value or not value.isprintable() or " " in value:
+        raise AIUnavailable("The AI provider's credential variable is not set to a usable value.")
     return value
 
 

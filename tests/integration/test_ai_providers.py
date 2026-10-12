@@ -91,6 +91,11 @@ class ConfigurationTests(unittest.TestCase):
             "fragment in the base URL": ON | {"base_url": f"https://example.test/#{KEY}"},
             "not a URL": ON | {"base_url": "example.test"},
             "broken IPv6": ON | {"base_url": "https://[::1"},
+            "port out of range": ON | {"base_url": "https://example.test:99999/v1"},
+            "port zero": ON | {"base_url": "https://example.test:0/v1"},
+            "port not a number": ON | {"base_url": "https://example.test:abc/v1"},
+            "empty port": ON | {"base_url": "https://example.test:/v1"},
+            "key pasted into the URL path": ON | {"base_url": f"https://example.test/v1/{KEY}"},
             "timeout as text": ON | {"timeout_seconds": "60"},
             "timeout as a boolean": ON | {"timeout_seconds": True},
             "timeout too long": ON | {"timeout_seconds": 301},
@@ -135,10 +140,16 @@ class ConfigurationTests(unittest.TestCase):
             (parse_config(ON), {"LAB_AI_KEY": KEY}),  # no variable named
             (parse_config(ON | {"api_key_env": "LAB_AI_KEY"}), {}),  # named, not set
             (parse_config(ON | {"api_key_env": "LAB_AI_KEY"}), {"LAB_AI_KEY": ""}),
+            (parse_config(ON | {"api_key_env": "LAB_AI_KEY"}), {"LAB_AI_KEY": "   "}),
+            (parse_config(ON | {"api_key_env": "LAB_AI_KEY"}), {"LAB_AI_KEY": KEY + "\r\n"}),
+            (parse_config(ON | {"api_key_env": "LAB_AI_KEY"}), {"LAB_AI_KEY": KEY + "\nX-Injected: 1"}),
+            (parse_config(ON | {"api_key_env": "LAB_AI_KEY"}), {"LAB_AI_KEY": "two words"}),
         ):
             with self.assertRaises(AIUnavailable) as caught:
                 secret(config, environment)
-            self.assertEqual(str(caught.exception), "The AI provider's credential variable is not set.")
+            self.assertEqual(
+                str(caught.exception), "The AI provider's credential variable is not set to a usable value."
+            )
 
     def test_this_module_brings_in_no_vendor_code_and_no_network_client(self):
         source = open(providers.__file__).read()

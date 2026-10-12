@@ -10,14 +10,15 @@ Structure adapted from Gemini's reviewed draft.
 
 import ipaddress
 import re
-from urllib.parse import urlsplit
 
 from packages.scanner_adapters.integrations._parsing import (
     MAX_FINDINGS,
     MAX_REPORT_BYTES,
     fingerprint,
+    http_location,
     label,
     load_json,
+    port_suffix,
     shown,
     text,
 )
@@ -28,11 +29,7 @@ _BRACKETED = re.compile(r"^\[([0-9A-Fa-f:.]{2,45})\](?::([0-9]{1,5}))?$")
 
 
 def _port(value: int | None) -> str:
-    if value is None:
-        return ""
-    if not 1 <= value <= 65535:
-        raise ValueError("Nuclei matched-at has a port outside 1-65535.")
-    return f":{value}"
+    return port_suffix(value, "Nuclei matched-at")
 
 
 def _location(value: object) -> str:
@@ -57,15 +54,7 @@ def _location(value: object) -> str:
         if not _HOST.match(name) or (":" in raw and not digits.isdigit()):
             raise ValueError("Nuclei matched-at is not a URL or host:port.")
         return name + _port(int(digits) if digits else None)
-    try:
-        parsed = urlsplit(raw)
-        host, port = parsed.hostname, parsed.port
-    except ValueError:  # includes an out-of-range or non-numeric port
-        raise ValueError("Nuclei matched-at is not a valid URL.") from None
-    if parsed.scheme not in ("http", "https") or not host:
-        raise ValueError("Nuclei matched-at is not an http or https URL.")
-    authority = f"[{host}]" if ":" in host else host  # an IPv6 literal keeps its brackets
-    return f"{parsed.scheme}://{authority}{_port(port)}{parsed.path or '/'}"
+    return http_location(raw, "Nuclei matched-at")
 
 
 def parse(data: bytes) -> dict:

@@ -7,7 +7,7 @@ have never been compared with real output.
 import json
 import unittest
 
-from packages.scanner_adapters.integrations import gitleaks, nuclei, semgrep
+from packages.scanner_adapters.integrations import gitleaks, nuclei, semgrep, zap
 from packages.scanner_adapters.integrations._parsing import MAX_FINDINGS, MAX_REPORT_BYTES
 
 SECRET = "synthetic-secret-value"
@@ -49,6 +49,49 @@ NUCLEI = {
     "response": SECRET,
     "curl-command": f"curl -H 'Authorization: {SECRET}' http://127.0.0.1:8080/admin/debug",
 }
+# The shape of ZAP's documented "Traditional JSON Report" sample, with synthetic values.
+ZAP_INSTANCE = {
+    "uri": f"http://user:{SECRET}@127.0.0.1:8080/shop/search.jsp?q={SECRET}#{SECRET}",
+    "nodeName": f"http://127.0.0.1:8080/shop/search.jsp (q) {SECRET}",
+    "method": "GET",
+    "param": "q",
+    "attack": f"</font><script>{SECRET}</script>",
+    "evidence": SECRET,
+    "otherinfo": SECRET,
+}
+ZAP_ALERT = {
+    "pluginid": "40012",
+    "alertRef": "40012",
+    "alert": "Cross Site Scripting (Reflected)",
+    "name": "Cross Site Scripting (Reflected)",
+    "riskcode": "3",
+    "confidence": "2",
+    "riskdesc": "High (Medium)",
+    "desc": f"<p>{SECRET}</p>",
+    "instances": [
+        ZAP_INSTANCE,
+        ZAP_INSTANCE | {"uri": "http://127.0.0.1:8080/shop/contact.jsp", "method": "POST"},
+    ],
+    "count": "2",
+    "systemic": False,
+    "solution": "<p>Encode output for the context it is written into.</p>",
+    "otherinfo": SECRET,
+    "reference": f"<p>https://example.invalid/{SECRET}</p>",
+    "cweid": "79",
+    "wascid": "8",
+    "sourceid": "36977",
+}
+
+
+def zap_report(*alerts) -> bytes:
+    site = {"@name": "http://127.0.0.1:8080", "@host": "127.0.0.1", "@port": "8080", "@ssl": "false"}
+    return encode(
+        {
+            "@version": "synthetic",
+            "insights": [{"description": SECRET}],
+            "site": [site | {"alerts": list(alerts)}],
+        }
+    )
 
 
 def encode(value) -> bytes:
@@ -143,6 +186,42 @@ class ToolReportParserTests(unittest.TestCase):
                 lines(NUCLEI | {"matched-at": None}),
                 lines(NUCLEI | {"matcher-name": [SECRET]}),
                 lines(NUCLEI | {"info": {"name": {"x": SECRET}}}),
+            ],
+            zap.parse: [
+                b"not json",
+                b"[]",
+                deep,
+                encode({"alerts": [ZAP_ALERT | {"url": "http://127.0.0.1/"}]}),  # the API's flat list
+                encode({"site": {"alerts": [ZAP_ALERT]}}),  # one site as an object, as old releases wrote
+                encode({"site": [{"@name": SECRET}]}),
+                encode({"site": [{"alerts": [SECRET]}]}),
+                zap_report(ZAP_ALERT | {"pluginid": 40012}),
+                zap_report(ZAP_ALERT | {"pluginid": f"40012 {SECRET}"}),
+                zap_report({k: v for k, v in ZAP_ALERT.items() if k != "pluginid"}),
+                zap_report(ZAP_ALERT | {"alertRef": SECRET}),
+                zap_report(ZAP_ALERT | {"name": [SECRET]}),
+                zap_report({k: v for k, v in ZAP_ALERT.items() if k not in ("name", "alert")}),
+                zap_report(ZAP_ALERT | {"riskcode": 3}),
+                zap_report({k: v for k, v in ZAP_ALERT.items() if k != "confidence"}),
+                zap_report(ZAP_ALERT | {"cweid": SECRET}),
+                zap_report(ZAP_ALERT | {"wascid": 8}),
+                zap_report(ZAP_ALERT | {"instances": []}),
+                zap_report({k: v for k, v in ZAP_ALERT.items() if k != "instances"}),
+                zap_report(ZAP_ALERT | {"instances": [ZAP_INSTANCE, SECRET]}),
+                zap_report(
+                    ZAP_ALERT | {"instances": [{k: v for k, v in ZAP_INSTANCE.items() if k != "uri"}]}
+                ),
+                zap_report(ZAP_ALERT | {"instances": [ZAP_INSTANCE | {"uri": f"javascript:{SECRET}"}]}),
+                zap_report(ZAP_ALERT | {"instances": [ZAP_INSTANCE | {"uri": "http://127.0.0.1:99999/"}]}),
+                zap_report(ZAP_ALERT | {"instances": [ZAP_INSTANCE | {"uri": "http://127.0.0.1:0/"}]}),
+                zap_report(ZAP_ALERT | {"instances": [ZAP_INSTANCE | {"method": f"GET {SECRET}"}]}),
+                zap_report(ZAP_ALERT | {"instances": [ZAP_INSTANCE | {"method": "get"}]}),
+                zap_report(
+                    ZAP_ALERT | {"instances": [{k: v for k, v in ZAP_INSTANCE.items() if k != "method"}]}
+                ),
+                zap_report(ZAP_ALERT | {"instances": [ZAP_INSTANCE | {"param": [SECRET]}]}),
+                zap_report(ZAP_ALERT | {"instances": [ZAP_INSTANCE | {"param": None}]}),
+                zap_report(ZAP_ALERT | {"instances": [ZAP_INSTANCE | {"param": "q\x00" + SECRET}]}),
             ],
         }
         for parse, reports in cases.items():
@@ -365,6 +444,94 @@ class ToolReportParserTests(unittest.TestCase):
         result = gitleaks.parse(encode(many))
         self.assertEqual((len(result["findings"]), result["truncated"]), (MAX_FINDINGS, True))
         self.assertEqual(nuclei.parse(b"\n\n"), {"findings": [], "truncated": False})
+
+
+class ZapReportTests(unittest.TestCase):
+    def test_the_documented_sample_becomes_one_finding_per_instance_without_any_secret_text(self):
+        result = zap.parse(zap_report(ZAP_ALERT))
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertFalse(result["truncated"])
+        first, second = result["findings"]
+        self.assertEqual(
+            {key: value for key, value in first.items() if key != "fingerprint"},
+            {
+                "plugin_id": "40012",
+                "alert_ref": "40012",
+                "name": "Cross Site Scripting (Reflected)",
+                "severity": "high",
+                "confidence": "medium",
+                "matched_at": "http://127.0.0.1:8080/shop/search.jsp",
+                "method": "GET",
+                "parameter": "q",
+                "cwe_id": "79",
+                "wasc_id": "8",
+                "solution": "<p>Encode output for the context it is written into.</p>",
+            },
+        )
+        self.assertEqual(
+            (second["matched_at"], second["method"]), ("http://127.0.0.1:8080/shop/contact.jsp", "POST")
+        )
+        self.assertRegex(first["fingerprint"], r"^[0-9a-f]{16}$")
+        self.assertEqual(zap.parse(zap_report())["findings"], [])  # a site with no alerts is a clean report
+
+    def test_identity_separates_rule_variants_methods_and_parameters(self):
+        one = ZAP_ALERT | {"instances": [ZAP_INSTANCE]}
+        variants = [
+            one,
+            one | {"alertRef": "40012-2"},
+            one | {"instances": [ZAP_INSTANCE | {"method": "POST"}]},
+            one | {"instances": [ZAP_INSTANCE | {"param": "page"}]},
+            one | {"instances": [ZAP_INSTANCE | {"param": ""}]},
+            one | {"instances": [ZAP_INSTANCE | {"uri": "https://127.0.0.1:8443/shop/search.jsp"}]},
+        ]
+        prints = [zap.parse(zap_report(alert))["findings"][0]["fingerprint"] for alert in variants]
+        self.assertEqual(len(set(prints)), len(variants))
+        # The display name and the tool's prose are not identity; a release without alertRef uses pluginid.
+        renamed = one | {"name": "Renamed in a later release", "solution": "x", "desc": "y"}
+        legacy = {key: value for key, value in one.items() if key not in ("alertRef", "name")}
+        for alert in (renamed, legacy):
+            self.assertEqual(zap.parse(zap_report(alert))["findings"][0]["fingerprint"], prints[0])
+        self.assertIsNone(zap.parse(zap_report(variants[4]))["findings"][0]["parameter"])
+
+    def test_unknown_codes_are_unknown_and_absent_taxonomy_is_absent(self):
+        alert = ZAP_ALERT | {"riskcode": "9", "confidence": "User Confirmed", "cweid": "-1", "wascid": "0"}
+        finding = zap.parse(zap_report(alert))["findings"][0]
+        self.assertEqual((finding["severity"], finding["confidence"]), ("unknown", "unknown"))
+        self.assertEqual((finding["cwe_id"], finding["wasc_id"]), (None, None))
+        confirmed = zap.parse(zap_report(ZAP_ALERT | {"riskcode": "0", "confidence": "4"}))["findings"][0]
+        self.assertEqual((confirmed["severity"], confirmed["confidence"]), ("info", "confirmed"))
+
+    def test_credentials_in_kept_fields_are_redacted_and_rejections_carry_no_report_text(self):
+        token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0" + "K1l2M3n4O5p6Q7r8"
+        instance = ZAP_INSTANCE | {"uri": f"http://127.0.0.1:8080/reset/{token}", "param": token}
+        alert = ZAP_ALERT | {
+            "instances": [instance],
+            "name": f"Leaked {token}",
+            "solution": f"Rotate {token}",
+        }
+        result = zap.parse(zap_report(alert))
+        self.assertNotIn(token, json.dumps(result))
+        self.assertNotEqual(
+            result["findings"][0]["fingerprint"],
+            zap.parse(zap_report(alert | {"instances": [instance | {"param": token[:-1] + "Z"}]}))[
+                "findings"
+            ][0]["fingerprint"],
+        )
+        try:
+            zap.parse(zap_report(ZAP_ALERT | {"instances": [ZAP_INSTANCE | {"uri": f"http://[{SECRET}"}]}))
+        except ValueError as error:
+            self.assertIsNone(error.__cause__)
+            self.assertTrue(error.__suppress_context__)
+            self.assertNotIn(SECRET, str(error))
+        else:
+            self.fail("a broken uri was accepted")
+
+    def test_instances_past_the_cap_are_still_validated_and_the_report_says_truncated(self):
+        many = ZAP_ALERT | {"instances": [ZAP_INSTANCE] * (MAX_FINDINGS + 1)}
+        result = zap.parse(zap_report(many))
+        self.assertEqual((len(result["findings"]), result["truncated"]), (MAX_FINDINGS, True))
+        with self.assertRaises(ValueError):
+            zap.parse(zap_report(many | {"instances": many["instances"] + [ZAP_INSTANCE | {"method": 5}]}))
 
 
 if __name__ == "__main__":
