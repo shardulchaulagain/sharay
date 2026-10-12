@@ -29,7 +29,7 @@ The labels are one reviewer's judgement of how browsers treat each value; each `
 
 `tests/evaluation/corpus/http_configuration.v2.json` holds 36 cases. Gemini wrote 30 (`drafts/gemini/http_configuration.v2-candidates.json`) and reported a perfect score. Claude checked every label against browser behaviour before adopting it: 27 stood, and 3 described what this adapter's parser does instead of what a browser does. Those 3 were corrected and 6 further cases added, all in a new subset `browser-parsing`, each citing its source in `basis`.
 
-Measured October 12, 2026; all 36 scans completed in both runs. Adapter 1.1.1:
+Measured October 12, 2026 on adapter 1.1.1; all 36 scans completed:
 
 | Subset | Cases | Correct | False alarms | Missed | Precision | Recall |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -38,14 +38,12 @@ Measured October 12, 2026; all 36 scans completed in both runs. Adapter 1.1.1:
 | `browser-parsing`: effect depends on how browsers split or parse the header | 9 | 1 | 2 | 6 | 0.33 | 0.14 |
 | All | 36 | 23 | 2 | 6 | 0.92 | 0.79 |
 
-Adapter 1.1.2 (Codex's fix, measured by Claude on the unchanged corpus): 36 cases, 29 correct, 0 false alarms, 0 missed; precision 1.0, recall 1.0 in every subset.
-
-The eight disagreements in 1.1.1 were two causes, both in `packages/scanner_adapters/__init__.py`:
+The eight disagreements are two causes, both in `packages/scanner_adapters/__init__.py` (Codex's file, not changed here):
 
 - **`X-Content-Type-Options` is compared as one whole string, and only the last header is read.** The Fetch standard joins the values, splits on commas and tests the first. So `nosniff, nosniff` and `nosniff, other` are reported as missing although sniffing is disabled (2 false alarms), and a header `other` followed by a header `nosniff` is accepted although sniffing is not disabled (1 miss).
 - **A cookie Python's `SimpleCookie` cannot parse is recorded as a parse error and then treated as having HttpOnly.** Browsers follow RFC 6265bis section 5.6 and store cookies with no `=`, an empty name, brackets in the name, a JSON value, or an unknown attribute. Five such cookies without HttpOnly are not reported (5 misses). `SimpleCookie` before Python 3.14 also drops any cookie carrying the `Partitioned` attribute, so the result can differ by Python version.
 
-Codex fixed both in 1.1.2 after reproducing them and checking the labels against the same standards (`entry-25c66771ec5d403c`). `tests/evaluation/test_http_configuration.py` now tolerates no disagreement on this corpus, so reintroducing either error fails the suite. A perfect score here is a statement about these 36 responses only.
+`tests/evaluation/test_http_configuration.py` holds these eight as two sets that may only shrink: fixing the adapter passes, a new disagreement fails. Until then the adapter's HttpOnly and nosniff results on such responses are not reliable in either direction.
 
 ## Secret detection corpus v1
 
