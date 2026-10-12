@@ -1,5 +1,5 @@
 SHARAY — MAIN PROJECT PROMPT
-Updated October 12, 2026. Read this entire file at every cold start.
+Updated October 12, 2026. Read this entire file at a cold start unless its SHA-256 (printed by `python -m sharay refresh --summary`) equals the hash recorded in docs/STATE.md after your last complete read; the human approved this on October 12 to save tokens. If the hash differs, or you have never read it, read all of it.
 
 This is the durable product brief and collaboration contract requested by the human user. Preserve all requirements below; later explicit user instructions take precedence. The original supplied prompt is retained verbatim separately in docs/PRODUCT_SPECIFICATION.txt. Its complete text follows this addendum with the product name changed to SHARAY. Do not discard requirements because the implementation is initially local or a feature is unavailable. Do not pretend missing functionality works.
 
@@ -48,6 +48,13 @@ CLAUDE_HANDOFF_PROMPT.txt teaches Claude this project and its half. A file assig
 
 CURRENT CHECKPOINT
 Read docs/IMPLEMENTATION_STATUS.md, recent actual log entries and the source for current results; verify dated checkpoints against the current state. The initial Python/FastAPI/SQLite/Alembic control plane, safe HTTP worker, authenticated evidence/findings/retest and four report formats have recorded implementation evidence. Check the recorded frontend/native/rename results instead of assuming their status from this prompt. Full live-tool execution, OS-enforced scanner isolation and AI remain incomplete. During an implementation task, continue actual vertical slices in assigned ownership; during a prompt-only task, preserve the implementation and logs.
+
+HUMAN DECISIONS OF OCTOBER 12 (afternoon)
+Recorded from the human's own message; later explicit instructions still take precedence.
+- Scanners: installing the real scanner tools on the development Mac is approved. Each download is still named to the human with its file, source and size before it happens, verified against the publisher's checksum or signature, and pinned.
+- Switchable AI models: "modularity like i need to be able to swith models". The AI layer must let the operator change provider and model by configuration alone, with no code change, and must keep working with no provider at all. Sending assessment data to any provider stays an explicit, per-provider setting.
+- Backup: the project is kept in git with a private remote. Never make the repository public. Never commit credentials, stored assessment data or evidence.
+- SELF-UPDATING: "what make this tools powerful is this needs to update itself automatically to meets the latest needs and requirements, based on the ever evolving field and sector we are in". SHARAY must keep its detection content current without waiting for a person: scanner versions, rule and template sets, vulnerability and advisory data, and its own check definitions. An update is fetched only from the publisher's official source, verified, recorded with its version and hash, run against the evaluation corpora and regression tests, and activated only if they pass, with the previous version kept for rollback. Automatic updating never widens what may be assessed: a new intrusive capability, a change to authorization, scope or isolation rules, or anything a control forbids still needs the human. Reports state which versions of tools and content produced them.
 
 COMPLETE ORIGINAL REQUIREMENTS — PRODUCT NAME ADAPTED ONLY
 Every following line remains a requirement. Later expanded scope complements it without removing the safety, evidence, testing, privacy and authorization rules.
