@@ -1,0 +1,5 @@
+#!/bin/zsh
+set -e
+task_root="${0:A:h:h:h:h}"
+cd "$task_root"
+exec "$task_root/.venv/bin/python" -m sharay desktop

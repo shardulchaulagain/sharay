@@ -1,0 +1,22 @@
+--- /private/tmp/claude-501/-Users-shardul-Desktop-portfolio/98c66ed4-4593-4c88-a99d-bc66ab78d266/scratchpad/reports.before.py	2026-10-12 06:10:03
++++ packages/reporting/reports.py	2026-10-12 06:11:15
+@@ -9,6 +9,8 @@
+ from typing import Any
+ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+ 
++from services.source_analysis_worker.secrets import redact_tokens
++
+ REDACTED = "[REDACTED]"
+ _SECRET_KEY = re.compile(
+     r"(?:^|[_\-\s])(?:password|passwd|passcode|secret|token|authorization|"
+@@ -87,7 +89,9 @@
+         text = _SENSITIVE_HEADER.sub(lambda m: m.group(1) + ": " + REDACTED, text)
+         text = _AUTH_VALUE.sub(lambda m: m.group(1) + " " + REDACTED, text)
+         text = _URL.sub(_redact_url, text)
+-        return _SECRET_ASSIGNMENT.sub(lambda m: m.group(1) + REDACTED, text)
++        text = _SECRET_ASSIGNMENT.sub(lambda m: m.group(1) + REDACTED, text)
++        # Bare provider tokens (no "key=" label) in tool output or free text; one shared rule set.
++        return redact_tokens(text, REDACTED)
+     if isinstance(value, datetime):
+         return value.isoformat()
+     if value is None or isinstance(value, (bool, int, float)):

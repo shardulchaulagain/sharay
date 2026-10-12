@@ -1,0 +1,26 @@
+.engineering/
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store
+.aegis/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+apps/web/.next/
+apps/web/out/
+*.tsbuildinfo
+*.db
+*.db-wal
+*.db-shm
+tmp/
+# Unreviewed Gemini draft tests and one review note hold token-shaped test strings; they stay local.
+drafts/gemini/attack-tests/
+drafts/gemini/test_*.py
+drafts/gemini/review-of-codex-file-changes.md
