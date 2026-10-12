@@ -7,6 +7,7 @@ one stored identity. Errors are ValueError with fixed text.
 """
 
 import hashlib
+import ipaddress
 import json
 import re
 from typing import Any
@@ -17,6 +18,8 @@ from packages.reporting import redact
 MAX_REPORT_BYTES = 10 * 1024 * 1024
 MAX_FINDINGS = 5000
 _UNPRINTABLE = re.compile(r"[^\x20-\x7e]")
+_URL_HOST = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,252}$")
+_NOT_IN_A_URL = re.compile(r'[\s<>"\\^`{|}]')
 
 
 def load_json(data: bytes, what: str) -> Any:
@@ -81,6 +84,15 @@ def http_location(value: Any, what: str) -> str:
         raise ValueError(f"{what} is not a valid URL.") from None
     if parsed.scheme not in ("http", "https") or not host:
         raise ValueError(f"{what} is not an http or https URL.")
+    # Checked, never fixed: an empty port, a zone id, or characters a URL cannot hold as written.
+    if _NOT_IN_A_URL.search(raw) or parsed.netloc.endswith(":") or "%" in host:
+        raise ValueError(f"{what} is not a valid URL.")
+    try:
+        literal = ":" in host and ipaddress.ip_address(host).version == 6
+    except ValueError:
+        literal = False
+    if not literal and not _URL_HOST.match(host):
+        raise ValueError(f"{what} is not a valid URL.")
     authority = f"[{host}]" if ":" in host else host  # an IPv6 literal keeps its brackets
     return f"{parsed.scheme}://{authority}{port_suffix(port, what)}{parsed.path or '/'}"
 

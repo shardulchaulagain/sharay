@@ -8,7 +8,7 @@ import json
 import unittest
 
 from packages.scanner_adapters.integrations import gitleaks, nuclei, semgrep, zap
-from packages.scanner_adapters.integrations._parsing import MAX_FINDINGS, MAX_REPORT_BYTES
+from packages.scanner_adapters.integrations._parsing import MAX_FINDINGS, MAX_REPORT_BYTES, http_location
 
 SECRET = "synthetic-secret-value"
 GITLEAKS = {
@@ -200,6 +200,8 @@ class ToolReportParserTests(unittest.TestCase):
                 zap_report({k: v for k, v in ZAP_ALERT.items() if k != "pluginid"}),
                 zap_report(ZAP_ALERT | {"alertRef": SECRET}),
                 zap_report(ZAP_ALERT | {"name": [SECRET]}),
+                zap_report(ZAP_ALERT | {"solution": [SECRET]}),
+                zap_report(ZAP_ALERT | {"solution": 123}),
                 zap_report({k: v for k, v in ZAP_ALERT.items() if k not in ("name", "alert")}),
                 zap_report(ZAP_ALERT | {"riskcode": 3}),
                 zap_report({k: v for k, v in ZAP_ALERT.items() if k != "confidence"}),
@@ -444,6 +446,47 @@ class ToolReportParserTests(unittest.TestCase):
         result = gitleaks.parse(encode(many))
         self.assertEqual((len(result["findings"]), result["truncated"]), (MAX_FINDINGS, True))
         self.assertEqual(nuclei.parse(b"\n\n"), {"findings": [], "truncated": False})
+
+
+class HttpLocationTests(unittest.TestCase):
+    """The one URL sanitiser the Nuclei and ZAP parsers share."""
+
+    def test_a_url_is_rebuilt_from_its_parts_without_credentials_query_or_fragment(self):
+        cases = {
+            f"http://user:{SECRET}@127.0.0.1:8080/a/b?x={SECRET}#{SECRET}": "http://127.0.0.1:8080/a/b",
+            "https://example.test": "https://example.test/",
+            "https://Example.TEST:8443/A%20b": "https://example.test:8443/A%20b",
+            "http://[::1]:8080/x": "http://[::1]:8080/x",
+            "http://[2001:db8::1]/": "http://[2001:db8::1]/",
+            "http://internal_host.test/": "http://internal_host.test/",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(http_location(raw, "Sample"), expected)
+
+    def test_what_is_not_a_plain_url_is_rejected_never_repaired(self):
+        for raw in (
+            "http://bad host/path",
+            "http://host<script>/path",
+            "http://[::1%25eth0]:8080/path",
+            "http://127.0.0.1:/path",
+            "http://127.0.0.1/a b",
+            "http://-option.test/",
+            "http://127.0.0.1:0/",
+            "http://127.0.0.1:99999/",
+            "http://[::1/",
+            "http:///path",
+            "ftp://example.test/",
+            'http://example.test/"quoted"',
+            "http://example.test/a\\b",
+            "http://" + "a" * 254 + "/",
+            f"http://example.test/{SECRET}\x00",
+            7,
+            None,
+        ):
+            with self.subTest(raw=str(raw).replace(SECRET, "…")), self.assertRaises(ValueError) as caught:
+                http_location(raw, "Sample")
+            self.assertNotIn(SECRET, str(caught.exception))
+            self.assertIsNone(caught.exception.__cause__)
 
 
 class ZapReportTests(unittest.TestCase):

@@ -72,6 +72,9 @@ def parse(data: bytes) -> dict:
             confidence = _code(alert.get("confidence"), "ZAP confidence", CONFIDENCES)
             cwe = _taxonomy(alert.get("cweid"), "ZAP cweid")
             wasc = _taxonomy(alert.get("wascid"), "ZAP wascid")
+            solution = alert.get("solution", "")
+            if not isinstance(solution, str):
+                raise ValueError("ZAP solution is not text.")
             instances = alert.get("instances")
             if not isinstance(instances, list) or not instances:
                 raise ValueError("ZAP alert has no instances.")
@@ -100,7 +103,7 @@ def parse(data: bytes) -> dict:
                             "parameter": shown(parameter) or None,
                             "cwe_id": cwe,
                             "wasc_id": wasc,
-                            "solution": label(alert.get("solution"), 400),
+                            "solution": label(solution, 400),
                             "fingerprint": fingerprint("zap", reference, where, method, parameter),
                         }
                     )
