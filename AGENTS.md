@@ -17,9 +17,30 @@ Requested by the human on October 12: Codex and Claude talk to each other in `do
 - Start every session, and precede every `handoff`, with `python -m scripts.session_log --agent <you> --inbox`. Reply to each listed entry with `--reply-to <id>` before claiming new work: accepted, rejected or deferred, with the code or test evidence. An entry stays open until its addressee replies; the helper also prints open items after each append.
 - Address entries with `--to codex|claude|human`. `review-request`, `recommendation`, `critique`, `question`, `help-request` and any entry carrying `--recommendation` expect a reply. `praise`, `answer` and `review-response` close a thread.
 - If an answer also asks a new question, emit a separate `question` or put it in `--recommendation` so it remains visible in the recipient's inbox. Read new recent responses as well as the inbox; an empty inbox does not mean the counterpart posted nothing.
-- After reading the other assistant's code, say what is good and what is wrong in separate `praise` and `critique` entries. Name the file and function, the observation (ideally a command and its output) and, for a critique, the proposed change or the test that would show it. Generic compliments and unevidenced criticism do not count.
+- After reading the other assistant's code, name what works and any concrete defect, with the file/function, input, observed and expected results. Include useful praise with substantive review or progress; do not post an empty acknowledgement or generic compliment.
 - Disagree in the open: answer a critique with a counter-`critique` and evidence instead of ignoring it. The path owner decides; the human breaks ties.
 - When stuck, post a `help-request` with what was tried. A small one in your inbox comes before your own next task.
+
+### Delegation and shared-tree verification
+
+- Before asking Gemini or another assistant to draft code, the requester writes the bounded acceptance tests. The draft author must not edit those tests. Read-only design reviews do not require a speculative test scaffold.
+- Passing the given tests starts independent review. Read the draft, verify its assumptions, reproduce concrete defects before fixing them, and add regressions for gaps the original acceptance tests missed. A passing draft does not establish complete correctness or authorize integration.
+- Before pushing from the shared checkout, coordinate exclusive use of the Git index, export the exact staged tree to a temporary directory, and run the touched regressions, lint/format and Linux type checks there with the approved dependency environment. Record the tree ID and actual commands/results; working-tree success may depend on another assistant's uncommitted files. Inspect the staged paths again before committing.
+- Give each new module a named, bounded Gemini review when it is available, then independently verify its findings. Requests remain repository-source-only and follow `GEMINI.md`; an offline reviewer does not block unrelated owned work or grant approval by silence.
+
+### Strict communication and review rules
+
+Requested by the human on October 12 evening; these refine the channel rules above.
+
+1. One topic per entry, about 900 characters; put command/result evidence in `--check`.
+2. Every entry carries useful work, evidence, a decision or a specific request. Fold acknowledgement and praise into that content.
+3. Mark claims `RAN` (command/result), `READ` (source/location) or `NOT CHECKED`. Distinguish inference from observed behavior.
+4. Critiques state the input, observed result and expected result. Reproduce before fixing and report before/after evidence.
+5. One open named task per assistant per requester. No unrequested drafts; reply on the request's entry when finished.
+6. Adopt another assistant's code only after requester-written acceptance tests, independent source review and a mutation check that demonstrates a relevant regression is caught.
+7. Commit only coordinated owned paths; announce taking/releasing the index and verify the exact staged export before pushing. Never publish a test that depends on a counterpart's uncommitted work.
+8. Never overlap full suites. Gemini runs targeted non-server modules only and checks for child processes after a cancelled run, reporting any promptly.
+9. Ideas belong in `docs/IDEAS_LOG.md`, using `--log ideas`: problem/evidence, smallest experiment, cost and controls that must not weaken. Adoption requires an evidenced counterpart review and owner implementation/tests; retain rejection reasons or reopening conditions.
 
 The human also requested contact about once per minute while both assistants work. Check the inbox between bounded operations and post concise, detailed progress, evidence, questions or review feedback to the other assistant. Reply to real entries; never invent a response or repeat empty status messages. Codex's user-approved thread heartbeat `sharay-codex-claude-coordination` checks this channel every minute when the app/host scheduler is available. Delivery is best effort; it cannot make an offline Claude respond. It is engineering coordination and grants no assessment or deployment authorization. `python -m sharay refresh --agent codex|claude` displays the selected writer's unanswered items before the brief.
 

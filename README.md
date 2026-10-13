@@ -1,6 +1,6 @@
 # SHARAY desktop security workspace
 
-At every cold start, read [MAIN_PROMPT.txt](MAIN_PROMPT.txt), [team assignments](docs/TEAM_ASSIGNMENTS.md) and the latest [shared session log](docs/SESSION_LOG.md). Refresh them with `.venv/bin/python -m sharay refresh --agent codex` (full prompt and open inbox) or `refresh --summary --agent claude` (checkpoint index and Claude inbox). Give [CLAUDE_HANDOFF_PROMPT.txt](CLAUDE_HANDOFF_PROMPT.txt) to Claude in the same checkout; Claude has now posted actual review responses. Codex and Claude append addressed checks/reviews/handoffs using `python -m scripts.session_log --agent codex|claude --to claude|codex ... --reply-to entry-ID`. The user-approved Codex thread heartbeat checks coordination every minute when the app scheduler is available; the shared log retains real replies and cannot make an offline counterpart respond.
+At every cold start, follow [AGENTS.md](AGENTS.md): read [MAIN_PROMPT.txt](MAIN_PROMPT.txt) completely unless its hash matches your recorded complete read, then read [team assignments](docs/TEAM_ASSIGNMENTS.md) and the latest [shared session log](docs/SESSION_LOG.md). Refresh them with `.venv/bin/python -m sharay refresh --agent codex` (full prompt and open inbox) or `refresh --summary --agent claude` (checkpoint index and Claude inbox). Give [CLAUDE_HANDOFF_PROMPT.txt](CLAUDE_HANDOFF_PROMPT.txt) to Claude in the same checkout. Codex and Claude append addressed checks/reviews/handoffs using `python -m scripts.session_log --agent codex|claude --to claude|codex ... --reply-to entry-ID`; add `--log ideas` for the separate ideas channel. The user-approved Codex thread heartbeat checks coordination every minute when the app scheduler is available; the shared log retains real replies and cannot make an offline counterpart respond.
 
 The October 12 expansion targets verified authorized live sites/systems and integrated Nmap/ZAP/Nuclei/Metasploit/recon/source/AI workflows. Shared typed contracts now define approved operations and independently require scope, approval, budgets and runner readiness. Those external integrations remain planned/disabled. Claude owns isolation and adapters; Codex owns the platform and operator experience. Exact ownership and open review IDs are in the log.
 
@@ -39,7 +39,7 @@ npm --prefix apps/web run build
 
 `requirements-lock-macos-py313.txt` captures the tested transitive environment, including macOS desktop dependencies. Use it only on compatible macOS/Python installations. Direct cross-platform API dependencies are pinned separately. `apps/web/package-lock.json` pins the frontend dependency graph. See [deployment and recovery](docs/DEPLOYMENT.md) for upgrade responsibilities and platform limitations. Node is needed for the build, not at runtime.
 
-Frontend lint uses maintained ESLint 10 for TypeScript/React hooks and Oxlint for the 31 configured accessibility rules. The checked-in corpus preserves 81 measured decisions from the prior checker; this is a lint regression, not a full accessibility audit. CI configuration now prepares a separate frontend install/lint/type/test/build job with pinned Node/action versions and no deployment credentials. No remote CI run exists until a repository is connected.
+Frontend lint uses maintained ESLint 10 for TypeScript/React hooks and Oxlint for the 31 configured accessibility rules. The checked-in corpus preserves 81 measured decisions from the prior checker; this is a lint regression, not a full accessibility audit. CI configuration now prepares a separate frontend install/lint/type/test/build job with pinned Node/action versions and no deployment credentials. The private remote has a passing committed CI run; current working changes require their own remote verification.
 
 ## Complete a real local assessment
 
@@ -51,7 +51,9 @@ Start the synthetic fixture in another terminal:
 
 Sign in → Projects → create a project → register `http://127.0.0.1:8766/` → review origins, included/excluded paths and expiration → record explicit controlled-lab authorization → review and launch. The worker collects real HTTP configuration facts, showing skipped TLS/DNS coverage for this HTTP literal-IP fixture. Review findings and evidence, and download reports from the assessment or Reports view.
 
-To retest remediation, stop the fixture with Ctrl+C and restart it with `--secure-headers`. Select Retest on the completed assessment. Only a complete successful relevant check can mark an absent header issue fixed; a connection error or cancellation cannot. A confirmed missing header is a verified configuration fact, not a claim of exploitation or complete application security.
+Use **Edit scope** in Projects to revise a target or renew its validity window (up to 24 hours). Review the complete replacement before saving. A change clears authorization, cancels queued jobs and requests cancellation of active jobs; collected facts and historical reports retain their original scope. Approve the new version before launching. Stale open forms are rejected and must reload the current version.
+
+To retest remediation, stop the fixture with Ctrl+C and restart it with `--secure-headers`. Select Review retest on the completed assessment and review the captured current scope version. Only a complete successful relevant check can mark an absent header issue fixed; a connection error or cancellation cannot. A confirmed missing header is a verified configuration fact, not a claim of exploitation or complete application security.
 
 ## Product verification
 
@@ -60,10 +62,11 @@ source .venv/bin/activate
 python3 -m unittest discover -s tests -v
 python3 engineering/check.py
 python3 engineering/check.py --run-gates
+python3 engineering/check.py --run-gates --caller codex
 python3 -m pytest -q
-ruff check aegis sharay packages migrations fixtures tests/product scripts services tests/integration tests/evaluation
-ruff format --check aegis sharay packages migrations fixtures tests/product scripts services tests/integration tests/evaluation
-mypy aegis sharay packages services
+ruff check aegis sharay packages migrations fixtures tests/product scripts services tests/integration tests/evaluation engineering tests/test_engineering.py
+ruff format --check aegis sharay packages migrations fixtures tests/product scripts services tests/integration tests/evaluation engineering tests/test_engineering.py
+mypy --explicit-package-bases aegis sharay packages services engineering scripts/log_view.py scripts/session_log.py
 npm --prefix apps/web run test
 npm --prefix apps/web run typecheck
 npm --prefix apps/web run lint
@@ -90,7 +93,11 @@ python3 engineering/check.py --run-gates
 
 Open `.engineering/reports/index.html` in a browser. Each collector run saves a dated JSON snapshot and `latest.json`. The dashboard supports path filtering, JSON import and export. It operates locally and makes no network requests. Reports contain file paths and may reveal private repository structure; keep them private.
 
+During shared engineering sessions, pass `--caller codex`, `claude`, `gemini` or `human` to keep default reports under `.engineering/reports/<caller>/`. The label is supplied attribution, not authentication. An explicit `--output` retains its chosen path; omitting the caller retains the original report location. Coordinate full-suite runs because report separation does not isolate test fixtures or serialize execution.
+
 `--run-gates` executes commands from `engineering/gates.json` with `shell=False`, a timeout, no inherited credential variables, and no raw output capture. A nonzero exit, missing executable or timeout fails the collection exit status. Commands remain arbitrary programs: this runner does not provide an OS sandbox, filesystem confinement, or network isolation. Review gates and use an externally sandboxed environment for untrusted repositories. Full commands and raw output are intentionally not added to shareable reports; reproduce a failed trusted command locally to inspect its output.
+
+The unittest runner writes a private temporary metadata sidecar containing counts and safe base IDs for failures, errors and unexpected successes. Reports exclude messages, tracebacks and subtest parameters; unsupported or credential-shaped IDs are omitted with a truncation flag. Missing, invalid or unsafe metadata is `unavailable`. Optional sidecar cleanup problems are recorded separately from the actual gate result. Other commands do not automatically supply unittest diagnostics, and the earlier unidentified failed run cannot be reconstructed from discarded output.
 
 The dashboard shows repository metadata, actual gate status, gate timings and the collector process's peak RSS/CPU time. It does not yet collect application coverage, dependency resolution, scanner findings, product logs/traces, service resource utilization, API/database/network metrics, Codex session events, tokens or cost. Those fields are explicitly unavailable. The collector never reads source contents during inventory, follows directory symlinks, installs packages, or invokes an LLM.
 
@@ -103,9 +110,9 @@ The dashboard shows repository metadata, actual gate status, gate timings and th
 | `engineering/gates.json` | Four reviewed Python test/lint/format/type gates, stored as argv arrays |
 | `engineering/dashboard.html` | Local interactive dashboard template |
 | `tests/test_engineering.py` | Gate failure, timeout, credential handling, inventory and output-injection checks |
-| `.github/workflows/quality.yml` | Pinned, least-privilege CI checks; runs only after a GitHub repository is connected |
+| `.github/workflows/quality.yml` | Pinned CI test/build checks on the private GitHub repository; read-only permissions and retained collector evidence |
 | `docs/` | Architecture, roadmap, decisions and change evidence |
 
 Repository output ignores `.engineering`, Git internals, generated caches, dependency trees, virtual environments and build folders. Exclusions are disclosed in the report; this is not a complete audit of excluded content. Hidden file names are inventoried. Environment files' contents are never read by inventory.
 
-See `docs/roadmap.md` for the original foundation decisions and `docs/ARCHITECTURE.md` for current component and telemetry boundaries. Global engineering skills are separate instructions available to this user. The approved recurring automation coordinates engineering through this conversation. No remote GitHub repository, branch protection, production deployment, external scanner execution or observability service is provisioned.
+See `docs/roadmap.md` for the original foundation decisions and `docs/ARCHITECTURE.md` for current component and telemetry boundaries. Global engineering skills are separate instructions available to this user. The approved recurring automation coordinates engineering through this conversation. A private GitHub remote and observed CI runs exist; branch protection is not verified. Production deployment, external scanner execution and an observability service remain unavailable.
