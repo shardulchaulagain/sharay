@@ -44,3 +44,12 @@ Read this with care: the built-in detector was developed against these corpora, 
 
 The real-binary tests in `tests/integration/test_gitleaks_adapter.py` skip where the tool is not installed, which includes CI. A skip there is not a pass.
 
+
+## Second real download: Nuclei 3.11.1 (October 12, 2026)
+
+Downloaded on the human's pre-approval and verified like Gitleaks: `nuclei_3.11.1_macOS_arm64.zip` (43,571,292 bytes) checked against the publisher SHA-256 by `verify_file`, extracted inside the sandbox (a 136,853,122-byte Go binary), validated, placed read-only under `tools/` (not committed). It runs under the isolation runner. **Not evaluated and not pinned**: it has only run `-version`, not a real scan against a corpus, so the update ledger's evaluation gate is deliberately not satisfied.
+
+Findings for the future L3 adapter, from the real binary:
+
+- Nuclei writes a config directory under `HOME/Library/Application Support/nuclei` at startup. Under the deny-default sandbox this is refused; `-version` still prints, `-health-check` exits 1. The adapter will need a scratch-writable config home, and `run_isolated` has no environment/`HOME` option yet.
+- Nuclei has no network in the sandbox, so it cannot fetch or update templates. Templates must be pre-staged and verified as their own component (see `SELF_UPDATE.md`: templates are review-gated, never auto-fetched, because community templates can add intrusive probes). No Nuclei scan has been run.
