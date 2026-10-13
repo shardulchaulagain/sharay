@@ -1,26 +1,13 @@
-"""Acceptance checks for an OSV advisory matcher (L6). Written by Claude before any implementation.
+"""OSV advisory matching: range evaluation as the schema defines it, honest about what it cannot do.
 
-The implementation under test is `drafts/gemini/osv.py`; it is adopted only when every check
-here passes and it survives Claude's review. Expected results follow the OSV schema's own
-evaluation algorithm (https://ossf.github.io/osv-schema/#evaluation), PEP 440 ordering for
-PyPI and SemVer 2.0.0 ordering for npm. Run:
-    .venv/bin/python -m unittest drafts.claude.osv_acceptance -v
-
-Interface:
-    match(advisories: bytes, packages: list[dict]) -> dict
-      advisories  JSON: one OSV record or a list of them, at most 10 MiB
-      packages    items of dependencies.inventory()["packages"]:
-                  {"ecosystem": "PyPI" | "npm", "name", "version", "manifest", ...}
-      returns     {"findings": [...], "not_evaluated": [...], "truncated": bool}
-      finding     {"advisory", "aliases", "summary", "severity", "ecosystem", "package",
-                   "version", "fixed", "manifest", "fingerprint"}
-      not_evaluated item  {"advisory", "reason"}   (fixed reason text, nothing echoed)
+Most of this file was written as acceptance tests before any implementation existed; the
+expected results follow the OSV schema's evaluation algorithm, PEP 440 and SemVer 2.0.0.
 """
 
 import json
 import unittest
 
-from drafts.gemini import osv
+from packages.scanner_adapters.integrations import osv
 
 SECRET = "synthetic-secret-value"
 
@@ -47,7 +34,10 @@ class RangeEvaluationTests(unittest.TestCase):
     def test_events_are_evaluated_in_order_as_the_schema_defines(self):
         two_windows = [("introduced", "0"), ("fixed", "1.2.3"), ("introduced", "2.0.0"), ("fixed", "2.1.5")]
         cases = [
-            ([("introduced", "0"), ("fixed", "1.2.3")], {"0.0.1": True, "1.2.2": True, "1.2.3": False, "9.0": False}),
+            (
+                [("introduced", "0"), ("fixed", "1.2.3")],
+                {"0.0.1": True, "1.2.2": True, "1.2.3": False, "9.0": False},
+            ),
             ([("introduced", "1.0.0"), ("fixed", "1.2.3")], {"0.9": False, "1.0.0": True, "1.2.3": False}),
             # Several introduced/fixed pairs in ONE range: each window counts, not only the last pair.
             (two_windows, {"1.0.0": True, "1.5.0": False, "2.0.0": True, "2.1.0": True, "2.1.5": False}),
@@ -64,19 +54,34 @@ class RangeEvaluationTests(unittest.TestCase):
 
     def test_pypi_versions_order_by_pep_440(self):
         cases = [
-            ("1.0", {"1.0rc1": True, "1.0.dev1": True, "1.0a1": True, "1.0": False, "1.0.post1": False, "1.0.0": False}),
+            (
+                "1.0",
+                {
+                    "1.0rc1": True,
+                    "1.0.dev1": True,
+                    "1.0a1": True,
+                    "1.0": False,
+                    "1.0.post1": False,
+                    "1.0.0": False,
+                },
+            ),
             ("1.10", {"1.9": True, "1.10": False, "1.9.9": True}),
             ("2.0", {"1!0.5": False, "2.0+local": False, "1.9+local": True}),
         ]
         for fixed, expectations in cases:
             for version, expected in expectations.items():
                 with self.subTest(fixed=fixed, version=version):
-                    self.assertEqual(hit(record([("introduced", "0"), ("fixed", fixed)]), package(version)), expected)
+                    self.assertEqual(
+                        hit(record([("introduced", "0"), ("fixed", fixed)]), package(version)), expected
+                    )
 
     def test_npm_versions_order_by_semver_2(self):
         cases = [
             ("2.0.0", {"2.0.0-beta.1": True, "2.0.0": False, "1.99.99": True, "2.0.0+build.5": False}),
-            ("1.0.0-beta.11", {"1.0.0-beta.2": True, "1.0.0-beta.11": False, "1.0.0-alpha": True, "1.0.0": False}),
+            (
+                "1.0.0-beta.11",
+                {"1.0.0-beta.2": True, "1.0.0-beta.11": False, "1.0.0-alpha": True, "1.0.0": False},
+            ),
             ("1.0.0-rc.1", {"1.0.0-beta": True, "1.0.0-rc.1": False, "1.0.0-1": True}),
         ]
         for fixed, expectations in cases:
@@ -96,8 +101,12 @@ class MatchingTests(unittest.TestCase):
         always = [("introduced", "0")]
         self.assertTrue(hit(record(always, name="Flask-Cors"), package("1.0", name="flask_cors")))
         self.assertTrue(hit(record(always, name="zope.interface"), package("1.0", name="Zope-Interface")))
-        self.assertTrue(hit(record(always, name="@scope/pkg", ecosystem="npm"), package("1.0.0", "@scope/pkg", "npm")))
-        self.assertFalse(hit(record(always, name="Lodash", ecosystem="npm"), package("1.0.0", "lodash", "npm")))
+        self.assertTrue(
+            hit(record(always, name="@scope/pkg", ecosystem="npm"), package("1.0.0", "@scope/pkg", "npm"))
+        )
+        self.assertFalse(
+            hit(record(always, name="Lodash", ecosystem="npm"), package("1.0.0", "lodash", "npm"))
+        )
         self.assertFalse(hit(record(always, name="demo"), package("1.0.0", "demo", "npm")))
         self.assertFalse(hit(record(always, name="demo", ecosystem="npm"), package("1.0")))
         self.assertFalse(hit(record(always, name="demo2"), package("1.0")))
@@ -159,7 +168,15 @@ class HonestyTests(unittest.TestCase):
             "git range": record([("introduced", "0"), ("fixed", "a" * 40)], kind="GIT"),
             "unparseable bound": record([("introduced", "0"), ("fixed", "not a version")]),
             "bound is not text": record([("introduced", "0"), ("fixed", 2)]),
-            "events not a list": record() | {"affected": [{"package": {"ecosystem": "PyPI", "name": "demo"}, "ranges": [{"type": "ECOSYSTEM", "events": "x"}]}]},
+            "events not a list": record()
+            | {
+                "affected": [
+                    {
+                        "package": {"ecosystem": "PyPI", "name": "demo"},
+                        "ranges": [{"type": "ECOSYSTEM", "events": "x"}],
+                    }
+                ]
+            },
             "affected not a list": {"id": "OSV-TEST-1", "affected": "x"},
             "no introduced event": record([("fixed", "1.0")]),
         }
@@ -215,6 +232,99 @@ class HonestyTests(unittest.TestCase):
         self.assertFalse(osv.match(json.dumps(always).encode(), exactly)["truncated"])
         result = osv.match(json.dumps(always).encode(), exactly + [package("9.9")])
         self.assertEqual((len(result["findings"]), result["truncated"]), (5000, True))
+
+
+class ReviewFindingsTests(unittest.TestCase):
+    """Defects found by reading the first implementation; each was reproduced before the fix."""
+
+    ALWAYS = [("introduced", "0")]
+
+    def run_match(self, advisory, *packages):
+        return osv.match(json.dumps(advisory).encode(), list(packages))
+
+    def test_one_declared_version_that_cannot_be_ordered_does_not_stop_the_others(self):
+        result = self.run_match(record(self.ALWAYS), package("not-a-version"), package("1.0"))
+        self.assertEqual([finding["version"] for finding in result["findings"]], ["1.0"])
+        self.assertEqual(
+            result["not_evaluated"], [{"package": "demo", "reason": "declared version cannot be ordered"}]
+        )
+        for broken in (
+            {"ecosystem": "PyPI", "name": "demo", "version": None},
+            {"ecosystem": "npm", "name": 7, "version": "1.0.0"},
+        ):
+            with self.assertRaises(ValueError):
+                self.run_match(record(self.ALWAYS), broken)
+        with self.assertRaises(ValueError):
+            osv.match(json.dumps(record(self.ALWAYS)).encode(), ["demo==1.0"])
+        other = {"ecosystem": "Go", "name": "demo", "version": "v1.0.0"}
+        self.assertEqual(
+            self.run_match(record(self.ALWAYS), other),
+            {"findings": [], "not_evaluated": [], "truncated": False},
+        )
+
+    def test_a_listed_version_is_compared_as_the_ecosystem_orders_it_and_an_odd_one_is_harmless(self):
+        self.assertTrue(hit(record(versions=["1.0.0"]), package("1.0")))
+        self.assertTrue(
+            hit(record(versions=["1.0.0"], ecosystem="npm"), package("1.0.0+build", ecosystem="npm"))
+        )
+        # A legacy string in the list cannot equal a declared version; the range still decides.
+        legacy = record(self.ALWAYS, versions=["0.1dev-r1234", "1.0"])
+        result = self.run_match(legacy, package("2.0"))
+        self.assertEqual((len(result["findings"]), result["not_evaluated"]), (1, []))
+        self.assertEqual(self.run_match(record(versions=["0.1dev-r1234"]), package("2.0"))["findings"], [])
+        not_text = self.run_match(record(self.ALWAYS, versions=[["1.0"]]), package("2.0"))
+        self.assertEqual((not_text["findings"], len(not_text["not_evaluated"])), ([], 1))
+
+    def test_a_commit_range_beside_a_version_range_does_not_hide_the_version_range(self):
+        advisory = record([("introduced", "0"), ("fixed", "2.0")])
+        advisory["affected"][0]["ranges"].insert(
+            0,
+            {
+                "type": "GIT",
+                "repo": "https://example.invalid/x",
+                "events": [{"introduced": "0"}, {"fixed": "a" * 40}],
+            },
+        )
+        result = self.run_match(advisory, package("1.0"))
+        self.assertEqual(
+            ([finding["fixed"] for finding in result["findings"]], result["not_evaluated"]), (["2.0"], [])
+        )
+        self.assertEqual(self.run_match(advisory, package("2.0"))["findings"], [])
+
+    def test_an_entry_that_cannot_be_evaluated_does_not_hide_the_next_package(self):
+        advisory = record(self.ALWAYS, name="other")
+        advisory["affected"].insert(
+            0, record([("introduced", "0"), ("fixed", "a" * 40)], kind="GIT")["affected"][0]
+        )
+        advisory["affected"].insert(1, "not an object")
+        result = self.run_match(advisory, package("1.0"), package("1.0", name="other"))
+        self.assertEqual([finding["package"] for finding in result["findings"]], ["other"])
+        self.assertEqual([item["advisory"] for item in result["not_evaluated"]], ["OSV-TEST-1"])  # once
+
+    def test_a_bound_that_is_not_text_is_not_evaluated_in_either_ecosystem(self):
+        for ecosystem, version in (("PyPI", "0.5"), ("npm", "0.5.0")):
+            for bound in (2, None, ["1.0.0"], "1.0.0\x00"):
+                advisory = record([("introduced", "0"), ("fixed", bound)], ecosystem=ecosystem)
+                result = self.run_match(advisory, package(version, ecosystem=ecosystem))
+                self.assertEqual(
+                    (result["findings"], len(result["not_evaluated"])), ([], 1), (ecosystem, bound)
+                )
+
+    def test_two_entries_for_one_package_give_one_finding(self):
+        advisory = record([("introduced", "0"), ("fixed", "2.0")])
+        advisory["affected"].append(record([("introduced", "0"), ("fixed", "3.0")])["affected"][0])
+        self.assertEqual(len(self.run_match(advisory, package("1.0"))["findings"]), 1)
+
+    def test_malformed_aliases_matter_only_for_an_advisory_about_a_declared_package(self):
+        irrelevant = record(self.ALWAYS, name="absent", aliases=[7])
+        self.assertEqual(self.run_match(irrelevant, package("1.0"))["not_evaluated"], [])
+        for aliases in ([7], "CVE-2099-0001", [SECRET + "\x00"]):
+            result = self.run_match(record(self.ALWAYS, aliases=aliases), package("1.0"))
+            self.assertEqual(
+                (result["findings"], [item["reason"] for item in result["not_evaluated"]]),
+                ([], ["aliases are malformed"]),
+            )
+            self.assertNotIn(SECRET, json.dumps(result))
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ review step first.
 import hashlib
 import hmac
 import os
+import re
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +31,8 @@ SOURCES = {
 }
 MAX_ARTIFACT_BYTES = 200 * 1024 * 1024
 MAX_LEDGER_BYTES = 1024 * 1024
+# After the official prefix: plain path segments only, so no dot segment, encoding, query or host trick.
+_REST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9][A-Za-z0-9._+-]*)*$")
 Version = Annotated[str, Field(strict=True, pattern=r"^[0-9]{1,6}(\.[0-9]{1,6}){1,3}$")]
 Digest = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
 
@@ -81,7 +84,12 @@ def regressions(baseline: dict, candidate: dict) -> list[str]:
             for check in case[kind]
         } | {f"{identifier}:incomplete" for identifier in report.get("incomplete_scans", [])}
 
-    return sorted(disagreements(candidate) - disagreements(baseline))
+    # A case the candidate's report no longer contains is a regression too: an update that makes
+    # the tool report nothing must not look like an update that agrees with everything.
+    missing = {case["id"] for case in baseline["cases"]} - {case["id"] for case in candidate["cases"]}
+    return sorted(
+        (disagreements(candidate) - disagreements(baseline)) | {f"{name}:missing" for name in missing}
+    )
 
 
 def verify_file(path: Path | str, sha256: str, size: int) -> None:
@@ -105,18 +113,25 @@ def verify_file(path: Path | str, sha256: str, size: int) -> None:
 
 
 def load(ledger_path: Path | str) -> Ledger:
-    path = Path(ledger_path)
     try:
-        status = os.lstat(path)
+        descriptor = os.open(ledger_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return Ledger()  # nothing has ever been activated
+    except OSError:
+        descriptor = -1
     try:
+        # One open, then checks on that descriptor: the file read is the file that was checked.
+        status = os.fstat(descriptor)
         if not stat.S_ISREG(status.st_mode) or status.st_size > MAX_LEDGER_BYTES:
             raise ValueError
-        return Ledger.model_validate_json(path.read_bytes())
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            return Ledger.model_validate_json(handle.read(MAX_LEDGER_BYTES + 1))
     except (OSError, ValueError):  # a pydantic ValidationError is a ValueError
         # Never guess what is active: a damaged ledger stops updates until a person looks.
         raise UpdateRefused("The update ledger is unreadable; nothing was changed.") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _save(ledger_path: Path | str, ledger: Ledger) -> None:
@@ -151,10 +166,7 @@ def activate(ledger_path: Path | str, candidate: Candidate, artifact: Path | str
     """
     ledger = load(ledger_path)
     url, prefix = candidate.url, SOURCES[candidate.component]
-    rest = url[len(prefix) :]
-    if not url.startswith(prefix) or not rest or not rest.isprintable() or any(c in rest for c in "?#@\\ "):
-        raise UpdateRefused("The update does not come from this component's official source.")
-    if ".." in rest.split("/") or "//" in rest:
+    if not url.startswith(prefix) or not _REST.match(url[len(prefix) :]):
         raise UpdateRefused("The update does not come from this component's official source.")
     if candidate.version in ledger.withdrawn.get(candidate.component, []):
         raise UpdateRefused("This version was rolled back and needs a person to re-approve it.")
@@ -186,7 +198,7 @@ def rollback(ledger_path: Path | str, component: str, reason: str) -> Pin | None
     if (
         failed is None
         or not isinstance(reason, str)
-        or not 0 < len(reason) <= 300
+        or not 0 < len(reason.strip()) <= 300
         or not reason.isprintable()
     ):
         raise UpdateRefused("There is no active version to roll back, or no short reason was given.")

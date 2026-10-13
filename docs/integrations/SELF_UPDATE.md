@@ -10,8 +10,8 @@ An update goes CHECK → FETCH → VERIFY → EVALUATE → ACTIVATE, with ROLLBA
 | --- | --- | --- |
 | CHECK, FETCH | no | — |
 | VERIFY | `verify_file` | The file must be a regular file (never a link, directory or pipe) of exactly the published size whose SHA-256 equals the published one. |
-| EVALUATE | `regressions(baseline, candidate)` only | Lists disagreements in a candidate's corpus report that the baseline did not have, including scans that did not complete. Running the corpora against a candidate is not built. |
-| ACTIVATE | `activate` | Refused unless: the URL lies under the component's one official source; the version is strictly newer than the active one; it was not rolled back before; the evidence says gates passed and regressions are an empty list; and the file verifies. The replaced version is kept. |
+| EVALUATE | `regressions(baseline, candidate)` only | Lists disagreements in a candidate's corpus report that the baseline did not have, including scans that did not complete and cases the candidate's report no longer contains (an empty report is all regressions, not none). Running the corpora against a candidate is not built. |
+| ACTIVATE | `activate` | Refused unless: the URL is the component's one official source followed by plain path segments only (no dot segment, percent-encoding, query or credentials); the version is strictly newer than the active one; it was not rolled back before; the evidence says gates passed and regressions are an empty list; and the file verifies. The replaced version is kept. |
 | ROLLBACK | `rollback` | Restores the replaced version and withdraws the failed one, which then needs a person to come back. |
 
 Components and their only accepted sources: Gitleaks and Nuclei (their GitHub release downloads), Semgrep (PyPI files). Nuclei *templates* are deliberately not a component: new templates can add intrusive requests, so they need their own review step before any automatic update. Nmap and advisory data are not components yet.

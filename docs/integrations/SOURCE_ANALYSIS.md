@@ -53,3 +53,15 @@ A secret that appears in a file's own name is redacted from the reported path. K
 ```sh
 .venv/bin/python -m unittest tests.integration.test_archive_ingestion tests.integration.test_dependency_inventory tests.integration.test_secret_detection -v
 ```
+
+## Advisory matching (OSV)
+
+`packages/scanner_adapters/integrations/osv.py` answers one question: which declared packages (from the dependency inventory above) fall inside the affected ranges of OSV advisory records the caller supplies. Tests: `tests/integration/test_osv_matching.py`. **No advisory data is bundled or downloaded and nothing calls this yet**, so today it reports nothing in the product; data arrives with the self-update work (`SELF_UPDATE.md`).
+
+- Ranges are evaluated as the OSV schema defines: events sorted, every introduced/fixed window counted, `last_affected` inclusive, `limit` honoured. PyPI versions are ordered by PEP 440 (the `packaging` library), npm by SemVer 2.0.0. PyPI names are compared in normalised form, npm names exactly; ecosystems never cross.
+- A match means a **declared** version lies in a **published** range. It does not show the vulnerable code is reachable or even installed.
+- Severity is the advisory database's own word or `unknown`; a CVSS vector is never turned into a word. Withdrawn advisories report nothing.
+- What cannot be evaluated for a declared package is listed in `not_evaluated` with a fixed reason: a commit-only (GIT) range, a malformed range or bound, a declared version that cannot be ordered. An advisory about a package that is not declared is ignored, however odd it is. A feed that is not OSV records at all is rejected.
+- Written by Gemini against acceptance tests Claude wrote first; it passed all twelve. Review then found defects the tests had not covered, each reproduced before the fix: one unorderable declared version crashed the whole run; a legacy string in an advisory's version list, or a commit range beside a version range, suppressed a finding the version range plainly supported; an unevaluable entry hid the next package in the same advisory; `1.0` did not equal a listed `1.0.0`; two entries for one package produced two findings; one malformed alias anywhere rejected the entire feed.
+- Limits: PyPI and npm only; input is at most 10 MiB per call, so a real database must be fed in pieces; `packaging` is installed through the test tools but is not yet a declared runtime dependency (asked of Codex).
+

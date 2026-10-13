@@ -89,6 +89,12 @@ class UpdateCoreTests(unittest.TestCase):
             f"{BASE}{name}?token={SECRET}",
             f"{BASE}{name}#{SECRET}",
             f"{BASE}v8.30.1//x.tar.gz",
+            f"{BASE}%2e%2e/%2e%2e/someone-else/x.tar.gz",
+            f"{BASE}v8.30.1/%2fx.tar.gz",
+            f"{BASE}./v8.30.1/x.tar.gz",
+            f"{BASE}v8.30.1/.hidden",
+            f"{BASE}v8.30.1/x.tar.gz/",
+            f"{BASE}v8.30.1/x;y.tar.gz",
             f"{BASE}v8.30.1/x y.tar.gz",
             f"{BASE}v8.30.1/@{SECRET}",
             BASE,
@@ -151,7 +157,7 @@ class UpdateCoreTests(unittest.TestCase):
         activate(self.ledger, self.candidate(), self.artifact(), PASSED)
         newer = b"synthetic newer archive"
         activate(self.ledger, self.candidate("8.31.0", newer), self.artifact(newer), PASSED)
-        for reason in ("", "x" * 301, "line\nbreak", None):
+        for reason in ("", "   ", "x" * 301, "line\nbreak", None):
             with self.subTest(reason=reason), self.assertRaises(UpdateRefused):
                 rollback(self.ledger, "gitleaks", reason)
         self.assertEqual(load(self.ledger).active["gitleaks"].version, "8.31.0")
@@ -193,6 +199,13 @@ class UpdateCoreTests(unittest.TestCase):
         self.ledger.write_bytes(valid.read_bytes() + b" " * core.MAX_LEDGER_BYTES)
         self.refused(self.candidate("8.31.0"), text="ledger is unreadable")
         self.ledger.unlink()
+        os.mkfifo(self.ledger)
+        with self.assertRaisesRegex(UpdateRefused, "ledger is unreadable"):  # and it does not hang
+            activate(self.ledger, self.candidate("8.31.0"), self.artifact(), PASSED)
+        self.ledger.unlink()
+        self.ledger.symlink_to(self.root / "nowhere.json")  # a dangling link is not "no ledger yet"
+        self.refused(self.candidate("8.31.0"), text="ledger is unreadable")
+        self.ledger.unlink()
         self.ledger.symlink_to(valid)
         self.refused(self.candidate("8.31.0"), text="ledger is unreadable")
         self.assertEqual(load(valid).active["gitleaks"].version, "8.30.1")
@@ -209,6 +222,12 @@ class UpdateCoreTests(unittest.TestCase):
         self.assertEqual(regressions(baseline, report([("a", [], []), ("b", [], [])])), [])  # an improvement
         worse = report([("a", ["y"], ["x"]), ("b", [], ["z"])], incomplete=["c"])
         self.assertEqual(regressions(baseline, worse), ["a:unexpected:y", "b:missed:z", "c:incomplete"])
+        # A candidate whose report lost cases, or is empty, has not agreed with anything.
+        self.assertEqual(regressions(baseline, report([("b", [], [])])), ["a:missing"])
+        self.assertEqual(regressions(baseline, report([])), ["a:missing", "b:missing"])
+        self.assertEqual(
+            regressions(baseline, report([("a", [], ["x"]), ("b", [], []), ("new", [], [])])), []
+        )
 
     def test_the_core_imports_no_network_client_and_nothing_that_holds_scope(self):
         tree = ast.parse(Path(core.__file__).read_text())
@@ -219,7 +238,7 @@ class UpdateCoreTests(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom):
                 modules.add((node.module or "").split(".")[0])
         self.assertEqual(
-            modules, {"hashlib", "hmac", "os", "stat", "datetime", "pathlib", "typing", "pydantic"}
+            modules, {"hashlib", "hmac", "os", "re", "stat", "datetime", "pathlib", "typing", "pydantic"}
         )
         self.assertNotIn("nuclei-templates", core.SOURCES)
 
