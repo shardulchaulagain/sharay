@@ -91,7 +91,10 @@ class WorkflowTests(unittest.TestCase):
         if approve:
             response = self.client.post(
                 f"/api/v1/targets/{target.json()['id']}/approve",
-                json={"acknowledgement": "I authorize this controlled laboratory target"},
+                json={
+                    "acknowledgement": "I authorize this controlled laboratory target",
+                    "expected_scope_version": target.json()["scope_version"],
+                },
             )
             self.assertEqual(response.status_code, 200, response.text)
         return target.json(), project.json()
@@ -102,6 +105,7 @@ class WorkflowTests(unittest.TestCase):
             json={
                 "target_id": target["id"],
                 "idempotency_key": key or secrets.token_hex(16),
+                "expected_scope_version": target["scope_version"],
                 "retest_of": retest,
             },
         )
@@ -168,7 +172,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(
             other.post(
                 f"/api/v1/targets/{target['id']}/approve",
-                json={"acknowledgement": "I authorize this controlled laboratory target"},
+                json={
+                    "acknowledgement": "I authorize this controlled laboratory target",
+                    "expected_scope_version": target["scope_version"],
+                },
             ).status_code,
             404,
         )
@@ -184,7 +191,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(viewer.post("/api/v1/projects", json={"name": "Denied"}).status_code, 403)
         self.assertEqual(
             viewer.post(
-                "/api/v1/assessments", json={"target_id": target["id"], "idempotency_key": "viewer-denied"}
+                "/api/v1/assessments",
+                json={
+                    "target_id": target["id"],
+                    "idempotency_key": "viewer-denied",
+                    "expected_scope_version": target["scope_version"],
+                },
             ).status_code,
             403,
         )
@@ -233,18 +245,27 @@ class WorkflowTests(unittest.TestCase):
     def test_scope_approval_and_idempotency(self):
         target, _ = self.target(approve=False)
         response = self.client.post(
-            "/api/v1/assessments", json={"target_id": target["id"], "idempotency_key": "unapproved"}
+            "/api/v1/assessments",
+            json={
+                "target_id": target["id"],
+                "idempotency_key": "unapproved",
+                "expected_scope_version": target["scope_version"],
+            },
         )
         self.assertEqual(response.status_code, 403)
         self.assertEqual(
             self.client.post(
-                f"/api/v1/targets/{target['id']}/approve", json={"acknowledgement": "I own a server"}
+                f"/api/v1/targets/{target['id']}/approve",
+                json={"acknowledgement": "I own a server", "expected_scope_version": target["scope_version"]},
             ).status_code,
             422,
         )
         self.client.post(
             f"/api/v1/targets/{target['id']}/approve",
-            json={"acknowledgement": "I authorize this controlled laboratory target"},
+            json={
+                "acknowledgement": "I authorize this controlled laboratory target",
+                "expected_scope_version": target["scope_version"],
+            },
         )
         a = self.launch(target, key="stable-idempotency")
         b = self.launch(target, key="stable-idempotency")

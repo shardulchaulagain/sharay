@@ -20,6 +20,9 @@ def _path(value: str) -> str:
     if re.search(r"%(?![0-9a-fA-F]{2})", value):
         raise PolicyError("Malformed path encoding.")
     decoded = unquote(value, errors="strict")
+    # Routing layers may strip semicolon parameters before matching paths.
+    if ";" in decoded:
+        raise PolicyError("Semicolon path parameters are not permitted.")
     if "%" in decoded or "\\" in decoded or "//" in decoded:
         raise PolicyError("Ambiguous path encoding or separators are not permitted.")
     if any(ord(c) < 32 or ord(c) == 127 for c in decoded):
@@ -29,7 +32,7 @@ def _path(value: str) -> str:
     # Encoded separators can have a different meaning in target routing layers.
     if re.search(r"%(?:2f|5c)", value, re.IGNORECASE):
         raise PolicyError("Encoded path separators are not permitted.")
-    return quote(decoded, safe="/-._~:@!$&'()*+,;=")
+    return quote(decoded, safe="/-._~:@!$&'()*+,=")
 
 
 def normalize_url(value: str) -> str:

@@ -28,6 +28,7 @@ from aegis.schemas import (
     ProjectInput,
     ProjectUpdate,
     TargetInput,
+    TargetScopeUpdate,
 )
 from aegis.serialization import (
     assessment_view,
@@ -36,11 +37,12 @@ from aegis.serialization import (
     observation_view,
     project_view,
     target_view,
+    timestamp,
     user_view,
 )
 from packages.reporting import render_report
 from packages.scanner_adapters import preflight
-from packages.security_policies import validate_scope
+from packages.security_policies import PolicyError, ScopePolicy, normalize_url, validate_scope
 from packages.shared_schemas import ProposedToolAction, adapter_roadmap
 
 COOKIE = "aegis_session"
@@ -91,6 +93,21 @@ def page(db: Session, query, serializer, limit: int, offset: int):
         "limit": limit,
         "offset": offset,
     }
+
+
+def request_cancellation(db: Session, row: Assessment, user: User, reason: str = "operator_cancel"):
+    if row.status in TERMINAL:
+        return
+    row.cancel_requested = True
+    if row.status == "queued":
+        row.status, row.stage, row.finished_at = (
+            "cancelled",
+            "Scope changed before execution" if reason == "scope_changed" else "Cancelled before execution",
+            time.time(),
+        )
+    else:
+        row.status, row.stage = "cancelling", "Stopping bounded HTTP request"
+    audit(db, user.organization_id, user.id, "assessment.cancel_requested", row.id, {"reason": reason})
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -385,6 +402,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def update_project(project_id: str, data: ProjectUpdate, db: DB, user: Actor):
         require_role(user, *CONTROL_ROLES)
         row = owned(db, Project, project_id, user)
+        if data.name is not None:
+            if not data.name.strip():
+                raise ValueError("Project name is required")
+            data.name = data.name.strip()
         for key, value in data.model_dump(exclude_none=True).items():
             setattr(row, key, value)
         audit(db, user.organization_id, user.id, "project.updated", row.id)
@@ -396,8 +417,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         project = owned(db, Project, project_id, user)
         if project.archived:
             raise HTTPException(409, "Restore the project before registering targets")
-        from packages.security_policies import normalize_url
-
         scope = validate_scope(data.scope, data.url)
         row = Target(
             organization_id=user.organization_id,
@@ -417,10 +436,60 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return target_view(row)
 
+    @app.get("/api/v1/targets/{target_id}")
+    def target(target_id: str, db: DB, user: Actor):
+        return target_view(owned(db, Target, target_id, user))
+
+    @app.patch("/api/v1/targets/{target_id}/scope")
+    def update_scope(target_id: str, data: TargetScopeUpdate, db: DB, user: Actor):
+        require_role(user, *CONTROL_ROLES)
+        row = owned(db, Target, target_id, user)
+        project = owned(db, Project, row.project_id, user)
+        if project.archived:
+            raise HTTPException(409, "Restore the project before editing target scopes")
+        if data.expected_scope_version != row.scope_version:
+            raise HTTPException(409, "Scope changed; reload and review the current version")
+        scope = validate_scope(data.scope, data.url).model_dump(mode="json")
+        url = normalize_url(data.url)
+        if (url, scope) == (row.url, row.scope):
+            return target_view(row)
+        previous_url, previous_scope, previous_version = row.url, row.scope, row.scope_version
+        row.url, row.scope, row.scope_version = url, scope, row.scope_version + 1
+        row.verification_status, row.authorized_by, row.approved_at = "awaiting_authorization", None, None
+        for pending in db.scalars(
+            select(Assessment).where(
+                Assessment.organization_id == user.organization_id,
+                Assessment.target_id == row.id,
+                Assessment.status.in_(["queued", "running", "cancelling"]),
+            )
+        ):
+            request_cancellation(db, pending, user, "scope_changed")
+        audit(
+            db,
+            user.organization_id,
+            user.id,
+            "scope.updated",
+            row.id,
+            {
+                "previous_url": previous_url,
+                "previous_scope": previous_scope,
+                "previous_scope_version": previous_version,
+                "url": url,
+                "scope": scope,
+                "scope_version": row.scope_version,
+            },
+        )
+        return target_view(row)
+
     @app.post("/api/v1/targets/{target_id}/approve")
     def approve(target_id: str, data: ApprovalInput, db: DB, user: Actor):
         require_role(user, *CONTROL_ROLES)
         row = owned(db, Target, target_id, user)
+        project = owned(db, Project, row.project_id, user)
+        if project.archived:
+            raise HTTPException(409, "Restore the project before approving targets")
+        if data.expected_scope_version != row.scope_version:
+            raise HTTPException(409, "Scope changed; reload and review the current version")
         validate_scope(row.scope, row.url)
         if data.acknowledgement != "I authorize this controlled laboratory target":
             raise HTTPException(422, "Explicit controlled laboratory authorization is required")
@@ -447,16 +516,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         )
         if previous:
-            if previous.target_id != data.target_id or previous.retest_of != data.retest_of:
+            if (
+                previous.target_id != data.target_id
+                or previous.retest_of != data.retest_of
+                or previous.scope_version != data.expected_scope_version
+            ):
                 raise HTTPException(409, "Idempotency key belongs to a different assessment request")
             return assessment_view(previous)
         if project.archived:
             raise HTTPException(409, "Project is archived")
+        if data.expected_scope_version != target.scope_version:
+            raise HTTPException(409, "Scope changed; reload and review the current version")
         if target.verification_status != "verified_lab" or not target.authorized_by:
             audit(db, user.organization_id, user.id, "assessment.authorization_rejected", target.id)
             db.commit()
             raise HTTPException(403, "Approve the controlled laboratory scope before assessment")
-        validate_scope(target.scope, target.url)
+        try:
+            validate_scope(target.scope, target.url)
+        except PolicyError as exc:
+            audit(
+                db,
+                user.organization_id,
+                user.id,
+                "assessment.scope_rejected",
+                target.id,
+                {"scope_version": target.scope_version, "reason": str(exc)},
+            )
+            db.commit()
+            raise HTTPException(422, str(exc)) from None
         active = (
             db.scalar(
                 select(func.count())
@@ -556,17 +643,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def cancel(assessment_id: str, db: DB, user: Actor):
         require_role(user, *SCAN_ROLES)
         row = owned(db, Assessment, assessment_id, user)
-        if row.status not in TERMINAL:
-            row.cancel_requested = True
-            if row.status == "queued":
-                row.status, row.stage, row.finished_at = (
-                    "cancelled",
-                    "Cancelled before execution",
-                    time.time(),
-                )
-            else:
-                row.status, row.stage = "cancelling", "Stopping bounded HTTP request"
-            audit(db, user.organization_id, user.id, "assessment.cancel_requested", row.id)
+        request_cancellation(db, row, user)
         return assessment_view(row)
 
     @app.get("/api/v1/findings")
@@ -662,10 +739,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         detail = assessment(assessment_id, db, user)
         project = owned(db, Project, row.project_id, user)
         target = owned(db, Target, row.target_id, user)
+        snapshot = row.scope_snapshot
+        historical_target = {
+            **target_view(target),
+            "url": snapshot["target_url"],
+            "scope": {key: value for key, value in snapshot.items() if key in ScopePolicy.model_fields},
+            "scope_version": row.scope_version,
+            "verification_status": "verified_lab",
+            "authorized_by": snapshot["authorized_by"],
+            "approved_at": timestamp(snapshot["approved_at"]),
+        }
         data = {
             "assessment": assessment_view(row),
             "project": project_view(project),
-            "target": target_view(target),
+            "target": historical_target,
             "scope": row.scope_snapshot,
             "observations": detail["observations"],
             "findings": detail["findings"],

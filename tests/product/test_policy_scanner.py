@@ -97,6 +97,27 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(PolicyError):
                 check_url(self.scope, self.origin + path)
 
+    def test_semicolon_path_parameters_cannot_bypass_exclusions_or_traversal(self):
+        for path in (
+            "/excluded;jsessionid=1",
+            "/excluded%3Bjsessionid=1",
+            "/excluded%3bjsessionid=1",
+            "/excluded;jsessionid=1/child",
+            "/app/..;/excluded",
+            "/app/..%3B/excluded",
+            "/app/%2e%2e%3b/excluded",
+            "/app/.;/public",
+        ):
+            scope = self.scope | {"allowed_paths": ["/app"]} if path.startswith("/app/") else self.scope
+            with self.subTest(path=path), self.assertRaises(PolicyError):
+                check_url(scope, self.origin + path)
+
+    def test_scope_prefixes_reject_raw_and_encoded_semicolon_parameters(self):
+        for field in ("allowed_paths", "excluded_paths"):
+            for path in ("/app;version=1", "/app%3Bversion=1", "/app%3bversion=1"):
+                with self.subTest(field=field, path=path), self.assertRaises(ValidationError):
+                    ScopePolicy.model_validate(self.scope | {field: [path]})
+
     def test_permission_schema_rejects_intrusive_authenticated_credentials_and_unknown_fields(
         self,
     ):

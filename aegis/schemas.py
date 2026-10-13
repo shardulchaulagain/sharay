@@ -36,13 +36,19 @@ class TargetInput(Input):
     scope: ScopePolicy
 
 
+class TargetScopeUpdate(TargetInput):
+    expected_scope_version: int = Field(strict=True, ge=1)
+
+
 class ApprovalInput(Input):
     acknowledgement: str
+    expected_scope_version: int = Field(strict=True, ge=1)
 
 
 class AssessmentInput(Input):
     target_id: str
     idempotency_key: str = Field(min_length=8, max_length=100)
+    expected_scope_version: int = Field(strict=True, ge=1)
     retest_of: str | None = None
 
 

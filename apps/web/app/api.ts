@@ -11,7 +11,7 @@ export type Target = {
   id: string; project_id: string; url: string; scope: Scope; scope_version: number;
   verification_status: string; approved_at?: string; authorized_by?: string;
 };
-export type Project = { id: string; name: string; description: string; created_at: string; targets?: Target[]; assessments?: Assessment[]; findings?: Finding[] };
+export type Project = { id: string; name: string; description: string; created_at: string; archived: boolean; targets?: Target[]; assessments?: Assessment[]; findings?: Finding[] };
 export type Assessment = {
   id: string; project_id: string; target_id: string; target_url?: string; status: string; stage: string;
   created_at: string; started_at?: string; finished_at?: string; error?: string; retest_of?: string;
@@ -74,20 +74,66 @@ export function date(value?: string) {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-export function laboratoryScope(url: string, included: string, excluded: string, expires: string): Scope {
+export function localDateTime(value: string) {
+  const parsed = new Date(value);
+  return new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60_000).toISOString().slice(0, -1);
+}
+
+export function scopeIsActive(scope: Scope) {
+  const now = Date.now();
+  return new Date(scope.starts_at).getTime() <= now && new Date(scope.expires_at).getTime() > now;
+}
+
+export function scopeActionError(error: unknown, fallback: string) {
+  if (error instanceof ApiError && error.status === 409) return new ApiError(`${error.message} Reload and review the target’s current scope before trying again.`, error.status, error.requestId);
+  return error instanceof Error ? error : new Error(fallback);
+}
+
+function scopePath(value: string) {
+  if (!value.startsWith("/") || value.length > 2048 || /[?#\\]/.test(value)) throw new Error("Enter absolute paths without queries, fragments or backslashes.");
+  let decoded: string;
+  try { decoded = decodeURIComponent(value); }
+  catch { throw new Error("Use valid UTF-8 path encoding."); }
+  if (/[;%\\]/.test(decoded) || [...decoded].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) || decoded.includes("//") || decoded.split("/").some(part => part === "." || part === "..") || /%(2f|5c)/i.test(value)) throw new Error("Ambiguous path encoding, traversal and semicolon parameters are unavailable.");
+  return encodeURI(decoded).replace(/[?#]/g, encodeURIComponent);
+}
+
+export function laboratoryScope(url: string, included: string, excluded: string, expires: string, existing?: Scope, starts = existing?.starts_at ?? new Date().toISOString()): Scope {
   const parsed = new URL(url);
   if (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "[::1]") throw new Error("Use an explicit laboratory address: 127.0.0.1 or [::1].");
   if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash || parsed.search) throw new Error("Use HTTP or HTTPS without credentials, a query string or a fragment.");
-  const paths = (value: string) => value.split(/\r?\n/).map(path => path.trim()).filter(Boolean);
-  const allowed = paths(included);
-  if (!allowed.length || [...allowed, ...paths(excluded)].some(path => !path.startsWith("/") || path.includes("?") || path.includes("#"))) throw new Error("Enter paths beginning with /, one per line, without query strings or fragments.");
-  const expiresAt = new Date(expires);
+  const raw = url.match(/^https?:\/\/(127\.0\.0\.1|\[::1\])(?::([1-9]\d*))?(\/[^?#]*)?$/i);
+  if (!raw || url.length > 2048 || url.includes("\\") || [...url].some(char => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127)) throw new Error("Use a canonical literal laboratory URL without whitespace, a query string or a fragment.");
+  const targetPath = scopePath(raw[3] || "/"); // Validate before URL can strip dot segments.
+  const paths = (value: string) => value.split(/\r?\n/).map(path => path.trim()).filter(Boolean).map(scopePath);
+  const allowed = paths(included), excludedPaths = paths(excluded);
+  if (!allowed.length || allowed.length > 32 || excludedPaths.length > 32) throw new Error("Enter up to 32 paths per list, with at least one permitted path.");
+  const matches = (prefix: string) => prefix === "/" || targetPath === prefix.replace(/\/+$/, "") || targetPath.startsWith(prefix.replace(/\/+$/, "") + "/");
+  if (!allowed.some(matches) || excludedPaths.some(matches)) throw new Error("The target URL must be inside permitted paths and outside excluded paths.");
+  const savedExpiry = existing && expires === localDateTime(existing.expires_at) ? existing.expires_at : undefined;
+  const expiresAt = new Date(savedExpiry ?? expires);
   if (Number.isNaN(expiresAt.getTime()) || expiresAt <= new Date()) throw new Error("Choose an expiration time in the future.");
+  const savedStart = existing && starts === localDateTime(existing.starts_at) ? existing.starts_at : undefined;
+  const startsAt = new Date(savedStart ?? starts);
+  if (Number.isNaN(startsAt.getTime()) || startsAt >= expiresAt || expiresAt.getTime() - startsAt.getTime() > 86_400_000) throw new Error("Choose a validity window of up to 24 hours, starting before expiry.");
+  if (startsAt > new Date()) throw new Error("The scope must have started before it can be registered or approved.");
+  if (existing) {
+    const sameOrigin = existing.allowed_origins.includes(parsed.origin);
+    return {
+      ...existing,
+      // A URL change within the registered origins preserves the complete host/IP boundary.
+      hosts: sameOrigin ? existing.hosts : [parsed.hostname === "[::1]" ? "::1" : parsed.hostname],
+      allowed_origins: sameOrigin ? existing.allowed_origins : [parsed.origin],
+      allowed_cidrs: sameOrigin ? existing.allowed_cidrs : [parsed.hostname === "[::1]" ? "::1/128" : "127.0.0.1/32"],
+      allowed_paths: allowed, excluded_paths: excludedPaths,
+      starts_at: savedStart ?? startsAt.toISOString(), expires_at: savedExpiry ?? expiresAt.toISOString(),
+    };
+  }
   return {
     hosts: [parsed.hostname === "[::1]" ? "::1" : parsed.hostname], allowed_origins: [parsed.origin],
-    allowed_paths: allowed, excluded_paths: paths(excluded), allowed_cidrs: [parsed.hostname === "[::1]" ? "::1/128" : "127.0.0.1/32"],
+    allowed_paths: allowed, excluded_paths: excludedPaths, allowed_cidrs: [parsed.hostname === "[::1]" ? "::1/128" : "127.0.0.1/32"],
     categories: ["http_headers", "tls", "dns"], authenticated: false, credential_refs: [], request_rate: 1,
-    max_concurrency: 1, starts_at: new Date().toISOString(), expires_at: expiresAt.toISOString(), intrusive: false,
+    max_concurrency: 1, starts_at: startsAt.toISOString(), expires_at: expiresAt.toISOString(), intrusive: false,
     approval_required: true, emergency_stop_conditions: ["operator_cancel", "scope_expired", "policy_violation"],
   };
 }
