@@ -2,10 +2,10 @@
 
 import json
 import unittest
-from http.client import parse_headers
+from http.client import HTTPException, parse_headers
 from io import BytesIO
 
-from packages.scanner_adapters import _findings, _header_facts
+from packages.scanner_adapters import MAX_HEADER_BYTES, _findings, _header_facts, _HeaderReader
 
 
 class HeaderSemanticsTests(unittest.TestCase):
@@ -173,6 +173,104 @@ class HeaderSemanticsTests(unittest.TestCase):
                 facts = _header_facts([("Referrer-Policy", value) for value in values])
                 self.assertEqual(facts["referrer_policy_valid"], recognized)
                 self.assertIn("not a privacy-strength", facts["header_analysis_limits"])
+
+    def test_nosniff_uses_the_first_value_and_preserves_duplicate_field_order(self):
+        for values, expected in [
+            (["nosniff, nosniff"], True),
+            (["nosniff, other"], True),
+            (["other, nosniff"], False),
+            (["nosniff", "other"], True),
+            (["other", "nosniff"], False),
+            (["", "nosniff"], False),
+            ([", nosniff"], False),
+            ([" \tNoSnIfF\t , other"], True),
+            (["nosniff;"], False),
+            (['"nosniff, other"', "nosniff"], False),
+            (['"nosniff"'], False),
+            (["nosniff\xa0"], False),
+            (["\x0bnosniff"], False),
+            (["nosniff\r\n\t"], False),
+        ]:
+            with self.subTest(values=values):
+                facts = _header_facts([("x-CoNtEnT-TyPe-OpTiOnS", value) for value in values])
+                self.assertEqual(facts["nosniff"], expected)
+                self.assertEqual("missing_nosniff" in self.checks(facts), not expected)
+
+    def test_permissive_cookie_pairs_and_unknown_attributes_do_not_hide_httponly_absence(self):
+        for cookie in [
+            "no-equals-private-cookie",
+            "=empty-name-private-cookie",
+            "user[id]=private-cookie",
+            'prefs={"private-cookie":1}',
+            "sid=private-cookie; Unrecognised",
+            "sid=private-cookie; Partitioned; Secure",
+            "sid=private-cookie; Extra=private-attribute",
+            "HttpOnly=private-cookie",
+            "sid=HttpOnly",
+        ]:
+            for suffix, expected in [("", False), ("; hTtPoNlY", True)]:
+                with self.subTest(cookie=cookie, suffix=suffix):
+                    facts = self.facts(("Set-Cookie", cookie + suffix))
+                    self.assertEqual(len(facts["cookie_flags"]), 1)
+                    self.assertEqual(facts["cookie_flags"][0]["httponly"], expected)
+                    self.assertEqual("cookie_httponly" in self.checks(facts), not expected)
+                    self.assertNotIn("private-cookie", json.dumps(facts))
+                    self.assertNotIn("private-attribute", json.dumps(facts))
+                    self.assertIn("not browser storage acceptance", facts["header_analysis_limits"])
+
+    def test_cookie_flags_parse_separate_attributes_and_last_samesite_without_retaining_values(self):
+        for attributes, expected in [
+            ("HttpOnly=false; Secure=false; SameSite=lAx", (True, True, "lax")),
+            ("SameSite=Strict; SameSite=unknown", (False, False, "unset")),
+            ("SameSite=unknown; SameSite=None", (False, False, "none")),
+            ('Unknown=HttpOnly; Path=/HttpOnly; SameSite="Lax"', (False, False, "unset")),
+            ("Unrecognised; Partitioned; HttpOnly; Other=private-attribute", (True, False, "unset")),
+        ]:
+            with self.subTest(attributes=attributes):
+                facts = self.facts(("Set-Cookie", "private-name=private-value; " + attributes))
+                flags = facts["cookie_flags"]
+                self.assertEqual(
+                    flags, [{"httponly": expected[0], "secure": expected[1], "samesite": expected[2]}]
+                )
+                serialized = json.dumps(facts)
+                for secret in ["private-name", "private-value", "Other", "private-attribute"]:
+                    self.assertNotIn(secret, serialized)
+
+    def test_cookie_rejects_controls_anywhere_but_allows_horizontal_tab_whitespace(self):
+        for code in [*range(9), *range(10, 32), 127, 256]:
+            for cookie in [
+                "name" + chr(code) + "=private",
+                "name=private" + chr(code),
+                "name=private; Unrecognised=" + chr(code),
+            ]:
+                with self.subTest(code=code, position=cookie.index(chr(code))):
+                    facts = self.facts(("Set-Cookie", cookie))
+                    self.assertEqual(facts["cookie_flags"], [{"parse_error": True}])
+                    self.assertNotIn("cookie_httponly", self.checks(facts))
+        facts = self.facts(("Set-Cookie", "\t name \t=\t private \t;\t HttpOnly \t; SameSite= Lax \t"))
+        self.assertEqual(facts["cookie_flags"], [{"secure": False, "httponly": True, "samesite": "lax"}])
+
+    def test_cookie_pair_and_attribute_octet_limits_do_not_make_false_cookie_facts(self):
+        for value in ["", "=", " \t = \t", " ; HttpOnly", "n=" + "x" * 4096]:
+            with self.subTest(length=len(value)):
+                facts = self.facts(("Set-Cookie", value))
+                self.assertEqual(facts["cookie_flags"], [{"parse_error": True}])
+                self.assertNotIn("cookie_httponly", self.checks(facts))
+        accepted = self.facts(("Set-Cookie", "n=" + "\xff" * 4095))
+        self.assertIn("cookie_httponly", self.checks(accepted))
+        for size, expected in [(1024, True), (1025, False)]:
+            with self.subTest(attribute_size=size):
+                facts = self.facts(("Set-Cookie", "n=v; HttpOnly=" + "x" * size))
+                self.assertEqual(facts["cookie_flags"][0]["httponly"], expected)
+                self.assertEqual("cookie_httponly" in self.checks(facts), not expected)
+
+    def test_response_header_reader_still_enforces_the_total_wire_budget(self):
+        reader = _HeaderReader(BytesIO(b"x" * MAX_HEADER_BYTES))
+        self.assertEqual(len(reader.readline()), MAX_HEADER_BYTES)
+        self.assertEqual(reader.readline(), b"")
+        reader = _HeaderReader(BytesIO(b"x" * (MAX_HEADER_BYTES + 1)))
+        with self.assertRaisesRegex(HTTPException, "Response header budget exceeded"):
+            reader.readline()
 
     def test_observations_retain_only_facts_and_stable_finding_keys(self):
         facts = self.facts(

@@ -10,7 +10,6 @@ import ssl
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from http.cookies import CookieError, SimpleCookie
 from typing import Any, cast
 from urllib.parse import urljoin
 
@@ -22,7 +21,7 @@ from packages.security_policies import (
     validate_scope,
 )
 
-ADAPTER_VERSION = "1.1.1"
+ADAPTER_VERSION = "1.1.2"
 MAX_REQUESTS = 5
 MAX_SECONDS = 15
 REQUEST_TIMEOUT = 3
@@ -180,25 +179,38 @@ def _connection(destination: Destination, timeout: float) -> http.client.HTTPCon
 
 
 def _cookie_flags(values: list[str]) -> list[dict]:
+    """Read RFC6265bis attributes without retaining cookie identifiers or values.
+
+    This is a response configuration fact, not a cookie storage simulation.
+    """
     flags: list[dict[str, Any]] = []
     for value in values:
-        cookie = SimpleCookie()
-        try:
-            cookie.load(value)
-        except CookieError:
+        # HTTPResponse decodes bytes as Latin-1. CTLs other than HTAB reject
+        # the entire Set-Cookie string, including controls in attributes.
+        if any(ord(char) > 255 or (ord(char) < 32 and char != "\t") or ord(char) == 127 for char in value):
             flags.append({"parse_error": True})
             continue
-        if not cookie:
+        pair, _, attributes = value.partition(";")
+        name, separator, cookie_value = pair.partition("=")
+        if not separator:
+            name, cookie_value = "", name
+        name, cookie_value = name.strip(" \t"), cookie_value.strip(" \t")
+        if not (name or cookie_value) or len(name) + len(cookie_value) > 4096:
             flags.append({"parse_error": True})
-        for morsel in cookie.values():
-            same_site = morsel["samesite"].lower()
-            flags.append(
-                {
-                    "secure": bool(morsel["secure"]),
-                    "httponly": bool(morsel["httponly"]),
-                    "samesite": same_site if same_site in {"strict", "lax", "none"} else "unset",
-                }
-            )
+            continue
+        cookie_flags = {"secure": False, "httponly": False, "samesite": "unset"}
+        for attribute in attributes.split(";"):
+            attribute_name, _, attribute_value = attribute.partition("=")
+            attribute_name = attribute_name.strip(" \t").lower()
+            attribute_value = attribute_value.strip(" \t")
+            if len(attribute_value) > 1024:
+                continue
+            if attribute_name in {"secure", "httponly"}:
+                cookie_flags[attribute_name] = True
+            elif attribute_name == "samesite":
+                same_site = attribute_value.lower()
+                cookie_flags["samesite"] = same_site if same_site in {"strict", "lax", "none"} else "unset"
+        flags.append(cookie_flags)
     return flags
 
 
@@ -271,6 +283,12 @@ def _header_facts(headers: list[tuple[str, str]]) -> dict:
     frame_options_restrict = frame_options_valid or (
         len(frame_options) > 1 and bool(frame_options & {"deny", "sameorigin", "allowall"})
     )
+    # Fetch determines nosniff from the first value of the combined field list.
+    # A quoted first value cannot equal the bare token, so first-comma slicing
+    # suffices for this exact match without implementing a general field parser.
+    first_content_type_option = next(
+        (value for name, value in headers if name.lower() == "x-content-type-options"), ""
+    ).partition(",")[0]
     return {
         "security_headers": {
             name: name in lowered
@@ -295,8 +313,8 @@ def _header_facts(headers: list[tuple[str, str]]) -> dict:
         if ancestors
         else frame_options_restrict,
         "referrer_policy_valid": any(token in _REFERRER_POLICIES for token in referrer_tokens),
-        "header_analysis_limits": "CSP non-emptiness is not policy validity. Framing checks ancestor host patterns and XFO rules; combined scheme/port/path behavior and browser workflows are not tested. Referrer recognition is not a privacy-strength assessment.",
-        "nosniff": lowered.get("x-content-type-options", "").strip().lower() == "nosniff",
+        "header_analysis_limits": "CSP non-emptiness is not policy validity. Framing checks ancestor host patterns and XFO rules; combined scheme/port/path behavior and browser workflows are not tested. Referrer recognition is not a privacy-strength assessment. Cookie flags describe Set-Cookie attributes, not browser storage acceptance.",
+        "nosniff": first_content_type_option.strip(" \t").lower() == "nosniff",
         "cache_control": {
             directive: directive
             in {d.strip().lower().split("=")[0] for d in lowered.get("cache-control", "").split(",")}
