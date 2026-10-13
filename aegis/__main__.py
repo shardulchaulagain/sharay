@@ -2,6 +2,7 @@
 
 import argparse
 import getpass
+import http.client
 import json
 import os
 import signal
@@ -19,30 +20,35 @@ from sqlalchemy import text
 from aegis.auth import consume_recovery, issue_recovery, provision_owner
 from aegis.config import ROOT, Settings
 from aegis.database import create_database
+from aegis.lifecycle import watch_parent_stdin
 from packages.scanner_adapters import preflight
 
 
-def serve(settings: Settings):
+def serve(settings: Settings, parent_stdin: bool = False):
     import uvicorn
 
     from aegis.api import create_app
 
     os.umask(0o077)
-    uvicorn.run(
-        create_app(settings),
-        host="127.0.0.1",
-        port=settings.port,
-        access_log=False,
-        log_level="warning",
-        timeout_graceful_shutdown=10,
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(settings),
+            host="127.0.0.1",
+            port=settings.port,
+            access_log=False,
+            log_level="warning",
+            timeout_graceful_shutdown=10,
+        )
     )
+    with watch_parent_stdin(parent_stdin, lambda: setattr(server, "should_exit", True)):
+        server.run()
 
 
 def ready(settings: Settings) -> bool:
     try:
         with urllib.request.urlopen(settings.origin + "/api/v1/health/ready", timeout=0.5) as response:
             return response.status == 200
-    except (urllib.error.URLError, TimeoutError):
+    except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
         return False
 
 
@@ -69,10 +75,10 @@ def desktop(settings: Settings, browser: bool, smoke_seconds: float):
         }
     )
     process = subprocess.Popen(
-        [sys.executable, "-m", "aegis", "serve"],
+        [sys.executable, "-m", "aegis", "serve", "--parent-stdin"],
         cwd=ROOT,
         env=environment,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE,
         start_new_session=True,
     )
     cleanup_lock = threading.Lock()
@@ -83,6 +89,8 @@ def desktop(settings: Settings, browser: bool, smoke_seconds: float):
         with cleanup_lock:
             if cleaned_up:
                 return
+            if process.stdin:
+                process.stdin.close()
             if process.poll() is None:
                 process.terminate()
                 try:
@@ -152,7 +160,8 @@ def main(argv=None):
     sub.add_parser("reset-password", help="Consume a recovery token once and revoke existing sessions")
     sub.add_parser("preflight", help="Report dependency status without running external scanners")
     sub.add_parser("migrate", help="Apply forward-only Alembic migrations")
-    sub.add_parser("serve", help="Run loopback API and worker without a window")
+    api = sub.add_parser("serve", help="Run loopback API and worker without a window")
+    api.add_argument("--parent-stdin", action="store_true", help=argparse.SUPPRESS)
     window = sub.add_parser("desktop", help="Start the native app; this is the default")
     window.add_argument("--browser", action="store_true")
     window.add_argument("--smoke-seconds", type=float, default=0)
@@ -176,7 +185,7 @@ def main(argv=None):
                 )
             )
         elif args.command == "serve":
-            serve(settings)
+            serve(settings, args.parent_stdin)
         elif args.command in {"init-owner", "issue-recovery", "reset-password", "migrate"}:
             engine, sessions = create_database(settings)
             try:

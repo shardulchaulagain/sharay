@@ -450,6 +450,71 @@ class WorkflowTests(unittest.TestCase):
             with self.sessions() as db:
                 self.assertEqual(db.get(Assessment, assessment["id"]).status, "running")
 
+    def test_invalid_worker_parent_channel_leaves_jobs_unchanged(self):
+        import subprocess
+        import sys
+
+        from aegis.config import ROOT
+        from aegis.models import Assessment
+
+        target, _ = self.target()
+        assessment = self.launch(target)
+        with self.sessions() as db:
+            row = db.get(Assessment, assessment["id"])
+            row.status, row.stage = "running", "Synthetic preexisting work"
+            db.commit()
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "aegis.worker",
+                "--data-dir",
+                str(self.settings.data_dir),
+                "--parent-stdin",
+            ],
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0, "Explicit parent lifetime channel must be a pipe")
+        with self.sessions() as db:
+            row = db.get(Assessment, assessment["id"])
+            self.assertEqual(row.status, "running", "Rejected startup must not mutate stored work")
+            self.assertEqual(row.stage, "Synthetic preexisting work")
+
+    def test_parent_eof_cancels_inflight_and_leaves_next_job_queued(self):
+        from aegis.worker import WorkerSupervisor
+        from fixtures.safe_targets.server import FixtureHandler
+
+        entered = threading.Event()
+        original = FixtureHandler.do_GET
+
+        def observed(handler):
+            if handler.path == "/slow-header":
+                entered.set()
+            original(handler)
+
+        slow, _ = self.target(url=self.url + "slow-header")
+        live = self.launch(slow)
+        following = self.launch(slow)
+        supervisor = WorkerSupervisor(self.settings)
+        with patch.object(FixtureHandler, "do_GET", observed):
+            supervisor.start()
+            try:
+                self.assertTrue(entered.wait(5), "Worker did not begin the controlled HTTP request")
+                assert supervisor.process is not None and supervisor.process.stdin is not None
+                supervisor.process.stdin.close()
+                self.assertEqual(supervisor.process.wait(timeout=8), 0)
+                self.assertEqual(
+                    self.client.get(f"/api/v1/assessments/{live['id']}").json()["status"], "cancelled"
+                )
+                self.assertEqual(
+                    self.client.get(f"/api/v1/assessments/{following['id']}").json()["status"], "queued"
+                )
+            finally:
+                supervisor.stop()
+
     def test_application_instance_lock_rejects_duplicate_data_directory(self):
         settings = Settings(self.settings.data_dir, start_worker=True)
         first = create_app(settings)

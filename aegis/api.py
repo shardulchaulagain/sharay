@@ -113,16 +113,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise RuntimeError("Another SHARAY instance owns this data directory") from exc
         supervisor = WorkerSupervisor(settings) if settings.start_worker else None
         app.state.supervisor = supervisor
-        if supervisor:
-            supervisor.start()
         try:
+            if supervisor:
+                supervisor.start()
             yield
         finally:
-            if supervisor:
-                supervisor.stop()
-            if instance:
-                instance.close()
-            engine.dispose()
+            try:
+                if supervisor:
+                    supervisor.stop()
+            finally:
+                if instance:
+                    instance.close()
+                engine.dispose()
 
     app = FastAPI(
         title="SHARAY local assessment API",

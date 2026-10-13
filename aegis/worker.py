@@ -14,6 +14,7 @@ from sqlalchemy import select, text
 from aegis.audit import audit
 from aegis.config import ROOT, Settings
 from aegis.database import create_database
+from aegis.lifecycle import watch_parent_stdin
 from aegis.models import Assessment, Finding, FindingEvidence, FindingHistory, Observation
 from packages.reporting import redact
 from packages.scanner_adapters import scan
@@ -264,10 +265,17 @@ class WorkerSupervisor:
         }
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "aegis.worker", "--data-dir", str(self.settings.data_dir)],
+            [
+                sys.executable,
+                "-m",
+                "aegis.worker",
+                "--data-dir",
+                str(self.settings.data_dir),
+                "--parent-stdin",
+            ],
             cwd=ROOT,
             env=environment,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -277,6 +285,8 @@ class WorkerSupervisor:
         return self.process is not None and self.process.poll() is None
 
     def stop(self):
+        if self.process is not None and self.process.stdin:
+            self.process.stdin.close()
         if self.process is not None and self.process.poll() is None:
             self.process.terminate()
             try:
@@ -293,8 +303,10 @@ class WorkerSupervisor:
             except BlockingIOError:
                 return
             engine, sessions = create_database(self.settings, migrate=False)
-            mark_interrupted(sessions)
-            engine.dispose()
+            try:
+                mark_interrupted(sessions)
+            finally:
+                engine.dispose()
 
 
 def main():
@@ -304,6 +316,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--parent-stdin", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     settings = Settings(Path(args.data_dir), start_worker=False)
     os.umask(0o077)
@@ -324,13 +337,16 @@ def main():
 
         signal.signal(signal.SIGTERM, request_stop)
         signal.signal(signal.SIGINT, request_stop)
-        mark_interrupted(sessions)
         try:
-            while not stop[0]:
-                if not run_one(sessions, lambda: stop[0]):
-                    time.sleep(0.25)
+            with watch_parent_stdin(args.parent_stdin, lambda: request_stop(None, None)):
+                try:
+                    mark_interrupted(sessions)
+                    while not stop[0]:
+                        if not run_one(sessions, lambda: stop[0]):
+                            time.sleep(0.25)
+                finally:
+                    mark_interrupted(sessions)
         finally:
-            mark_interrupted(sessions)
             engine.dispose()
     return 0
 
