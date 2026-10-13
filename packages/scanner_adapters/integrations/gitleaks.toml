@@ -1,0 +1,4 @@
+title = "SHARAY pinned configuration: the tool's own default rules, never the scanned tree's"
+
+[extend]
+useDefault = true

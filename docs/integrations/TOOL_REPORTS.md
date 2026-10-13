@@ -18,3 +18,29 @@ Shared rules (`_parsing.py`), most of them from Codex's and Gemini's reviews rec
 - Reports are bytes of at most 10 MiB; `NaN` and `Infinity` are not JSON; deep nesting is refused; error text is fixed.
 - ZAP: only the documented "Traditional JSON Report" (`site[].alerts[].instances[]`) is accepted. The API's flat alert list and the single-object `site` written by old releases are rejected rather than guessed at, and an alert with no instances rejects the report. A risk or confidence code the parser does not know is stored as `unknown`, never as a real level. Adapted from Gemini's draft (`drafts/gemini/zap_parser.py`), which defaulted a missing risk to `info`, a missing confidence to `medium` and an unknown method to `GET`, skipped malformed instances, and accepted a flat format whose field names did not match ZAP's.
 - Semgrep's `complete` is false when the tool reported any error. Gitleaks, Nuclei and ZAP reports carry no error section, so completion must come from the tool's exit status.
+
+## First real run: Gitleaks 8.30.1 (October 12, 2026)
+
+The human approved the download. The archive (7,897,593 bytes, from the project's GitHub releases) was checked against the publisher's SHA-256 by `services/update_worker.verify_file`, extracted inside the sandbox by `run_staged_extraction`, validated from the parent side, and recorded in the update ledger. The binary runs only through the isolation runner, without network. It lives under `tools/`, which is not committed. **Still not connected to the product**: no operator can start a Gitleaks scan.
+
+What real output showed, all on synthetic secrets generated for the test:
+
+- The parser accepts real reports unchanged and keeps no secret text; with `--redact` the tool's own output holds none either.
+- **A scanned tree can switch the scanner off.** Its own `.gitleaks.toml` reduced four findings to none, silently, with exit status 0. `gitleaks:allow` comments hid a token. `build_argv` therefore always passes a pinned configuration (`gitleaks.toml` beside the parser: the tool's default rules and nothing from the tree) and `--ignore-gitleaks-allow`; both are covered by tests that run the real binary.
+- **A `.gitleaksignore` inside the tree still suppresses findings and no flag was found that stops it**, including `--gitleaks-ignore-path`. `suppression_files(root)` lists such files; a scan of a tree where it returns anything must be reported as incomplete, never as clean. The built-in detector is not affected by any of these files.
+- The tool's own fingerprint contains the absolute path of the scanned folder, so the stored identity changed whenever the staging folder did. The parser now removes the trusted root before hashing; the same secret keeps one identity across retests.
+- Reports arrive on standard output, which the runner caps at 1 MiB. A larger report is cut off and the parser then rejects it; it fails loudly, but a file-based report path is needed before large trees.
+
+Measured on the two secret-detection corpora, at file level (any report in a file against a secret expected in it):
+
+| Corpus | Tool | Secrets found | False alarms |
+| --- | --- | --- | --- |
+| v1 (12 secrets, 12 look-alikes) | Gitleaks 8.30.1 | 7 of 12 | 1 |
+| v1 | built-in detector | 12 of 12 | 0 |
+| v2 (12 secrets, 18 look-alikes) | Gitleaks 8.30.1 | 9 of 12 | 6 |
+| v2 | built-in detector | 12 of 12 | 0 |
+
+Read this with care: the built-in detector was developed against these corpora, so its score is not independent, and the corpus secrets are short synthetic strings that an entropy-based tool may rightly pass over. Several "false alarms" are test or publishable keys that the corpus labels as harmless and Gitleaks reports anyway, which is a difference of policy, not an error. The honest conclusion is that the two disagree on 15 of 54 files and each disagreement needs a label checked by a second author.
+
+The real-binary tests in `tests/integration/test_gitleaks_adapter.py` skip where the tool is not installed, which includes CI. A skip there is not a pass.
+

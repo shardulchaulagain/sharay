@@ -24,3 +24,6 @@ tmp/
 drafts/gemini/attack-tests/
 drafts/gemini/test_*.py
 drafts/gemini/review-of-codex-file-changes.md
+
+# Downloaded third-party tools and the update ledger: never committed.
+tools/
