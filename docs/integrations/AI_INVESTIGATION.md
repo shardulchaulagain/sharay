@@ -25,4 +25,15 @@ A test feeds evidence containing injected instructions to a stand-in model that 
 
 Changing provider or model is a change to these values and nothing else. Without `share_assessment_data` a configured provider is refused before anything is sent. An unknown provider is an error, never a silent fallback. Malformed configuration is refused with fixed text, because a wrong value is often a pasted credential; a credential-shaped model name is refused for the same reason. Timeout and output-token limits are fields of the configuration with fixed defaults (60 seconds, 16000 tokens).
 
+## The verifier (deterministic, with an adversarial second opinion)
+
+`services/ai_analysis_worker/verifier.py` is the `verifier` actor that the state table always named but nothing filled. Tests: `tests/integration/test_ai_verifier.py`. It never changes state directly; it calls the guarded `advance()`, so the role and evidence rules still apply. Drafted by Gemini, adopted by Claude after independent acceptance tests (18 of 18 mutants killed).
+
+- `verify_testing_outcome` moves a `testing` hypothesis to `supported`, `inconclusive` or `disproved` from assessment-scoped observations. Every cited observation must belong to the active assessment and match its stored SHA-256, or the whole step is refused. A `contradicted` observation disproves; otherwise a `confirmed_reproducible` or `supporting_signal` supports; otherwise inconclusive.
+- `apply_adversarial_challenge` takes a validated `ChallengeVerdict` from an independent challenger and moves a `supported` hypothesis to `confirmed`, `inconclusive` or `disproved`. To confirm needs both an upholding verdict and a `confirmed_reproducible` cited observation; anything less is at most inconclusive.
+- `parse_challenge_verdict` validates the challenger's JSON with fixed error text and refuses an incoherent verdict (uphold with flaws, or non-uphold with none).
+- `TokenUsageLedger` caps calls and total tokens per assessment; a refused call does not count.
+
+Open question with the PM: when observations both contradict and confirm, the current rule disproves. Whether a genuine conflict should instead be inconclusive is being decided; the tests pin only the unambiguous single-outcome cases.
+
 Not built: any real provider adapter or model call, token and cost accounting, relevance-based evidence retrieval, storage of hypotheses, the operator approval screen, and the verification engine that would act as `verifier`. Choosing a provider, and what assessment data may be sent to it, is a decision for the human.
