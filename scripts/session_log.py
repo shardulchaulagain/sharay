@@ -18,6 +18,8 @@ from packages.reporting import redact
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_LOG = ROOT / "docs" / "SESSION_LOG.md"
+# A second, separate channel for proposals and pushback on new ideas; same format, same rules.
+LOGS = {"session": DEFAULT_LOG, "ideas": ROOT / "docs" / "IDEAS_LOG.md"}
 KINDS = (
     "claim",
     "checkpoint",
@@ -172,10 +174,12 @@ def main(argv=None):
     parser.add_argument("--next", dest="next_task", default="")
     parser.add_argument("--reply-to", default="")
     parser.add_argument("--recommendation", default="")
+    parser.add_argument("--log", choices=tuple(LOGS), default="session", help="Which channel to use")
     args = parser.parse_args(argv)
+    log_path = LOGS[args.log]
     try:
         if args.inbox:
-            print(inbox_text(args.agent))
+            print(inbox_text(args.agent, log_path))
             return 0
         print(
             append_entry(
@@ -188,9 +192,10 @@ def main(argv=None):
                 reply_to=args.reply_to,
                 recommendation=args.recommendation,
                 to=args.to,
+                log_path=log_path,
             )
         )
-        waiting = inbox(args.agent)
+        waiting = inbox(args.agent, log_path)
         if waiting:
             print(
                 f"{len(waiting)} open item(s) still await your reply: "

@@ -24,7 +24,9 @@
         "scripts",
         "services",
         "tests/integration",
-        "tests/evaluation"
+        "tests/evaluation",
+        "engineering",
+        "tests/test_engineering.py"
       ],
       "timeout_seconds": 60
     },
@@ -45,7 +47,9 @@
         "scripts",
         "services",
         "tests/integration",
-        "tests/evaluation"
+        "tests/evaluation",
+        "engineering",
+        "tests/test_engineering.py"
       ],
       "timeout_seconds": 60
     },
@@ -55,10 +59,14 @@
         "{python}",
         "-m",
         "mypy",
+        "--explicit-package-bases",
         "aegis",
         "sharay",
         "packages",
-        "services"
+        "services",
+        "engineering",
+        "scripts/log_view.py",
+        "scripts/session_log.py"
       ],
       "timeout_seconds": 60
     }

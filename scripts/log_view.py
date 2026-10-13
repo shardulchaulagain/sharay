@@ -19,7 +19,7 @@ import stat
 from contextlib import ExitStack
 from pathlib import Path
 
-from scripts.session_log import DEFAULT_LOG, HEADER, ROOT, WRITERS, read_log
+from scripts.session_log import DEFAULT_LOG, HEADER, LOGS, ROOT, WRITERS, read_log
 
 # Every file under these folders is an input, whatever its suffix, except what is generated.
 INPUT_FOLDERS = (
@@ -169,6 +169,7 @@ def main(argv=None) -> int:
     parser.add_argument("--brief", action="store_true", help="Shorten each entry to 400 characters")
     parser.add_argument("--since", default="", help="Show entries after this entry id instead")
     parser.add_argument("--tree", action="store_true", help="Print the source tree hash and exit")
+    parser.add_argument("--log", choices=tuple(LOGS), default="session", help="Which channel to read")
     args = parser.parse_args(argv)
     if args.tree:
         try:
@@ -179,7 +180,7 @@ def main(argv=None) -> int:
     if not args.agent:
         parser.error("--agent is required unless --tree is given")
     try:
-        entries = unread(args.agent, brief=400 if args.brief else 0, since=args.since)
+        entries = unread(args.agent, LOGS[args.log], brief=400 if args.brief else 0, since=args.since)
     except ValueError as exc:
         parser.error(str(exc))
     print("\n\n".join(entries))
