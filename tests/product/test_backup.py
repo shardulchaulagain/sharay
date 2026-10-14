@@ -119,8 +119,10 @@ class BackupTests(unittest.TestCase):
         backup(self.data, snapshot)
         with closing(sqlite3.connect(snapshot)) as db, db:
             # Deliberately corrupt only this synthetic snapshot; live audit writes remain guarded.
+            trigger = db.execute("SELECT sql FROM sqlite_master WHERE name='audit_no_update'").fetchone()[0]
             db.execute("DROP TRIGGER audit_no_update")
             db.execute("UPDATE audit_events SET detail=?", (json.dumps({"tampered": True}),))
+            db.execute(trigger)
         with self.assertRaises(ValueError):
             restore(snapshot, self.root / "tampered-restore")
         self.assertFalse((self.root / "tampered-restore").exists())
@@ -143,6 +145,26 @@ class BackupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             restore(snapshot, self.root / "unsupported-restore")
         self.assertFalse((self.root / "unsupported-restore").exists())
+
+    def test_modified_schema_and_missing_audit_controls_are_not_published(self):
+        backup, restore = self.functions()
+        for index, statement in enumerate(
+            [
+                "ALTER TABLE projects RENAME COLUMN name TO incompatible_name",
+                "DROP TRIGGER audit_no_update",
+                "DROP TRIGGER audit_no_delete",
+                "CREATE INDEX sqliteX_hidden ON projects (name)",
+            ]
+        ):
+            with self.subTest(statement=statement):
+                snapshot = self.root / f"schema-{index}.db"
+                backup(self.data, snapshot)
+                with closing(sqlite3.connect(snapshot)) as db, db:
+                    db.execute(statement)
+                destination = self.root / f"schema-restore-{index}"
+                with self.assertRaises(ValueError):
+                    restore(snapshot, destination)
+                self.assertFalse(destination.exists())
 
     def test_cli_recovery_and_expired_operation_report_only_safe_metadata(self):
         from aegis.__main__ import main

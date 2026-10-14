@@ -9,6 +9,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -19,6 +21,7 @@ from aegis.config import ROOT
 from aegis.models import Base
 
 _ERROR = "Database snapshot failed validation or could not be safely completed."
+_SCHEMA_QUERY = "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY type, name"
 
 
 def _deadline(max_seconds: float) -> float:
@@ -77,6 +80,21 @@ def _validate(path: Path, deadline: float) -> None:
         revisions = {row[0] for row in connection.execute("SELECT version_num FROM alembic_version")}
         if revisions != set(ScriptDirectory(str(ROOT / "migrations")).get_heads()):
             raise ValueError(_ERROR)
+        # A version label alone does not preserve columns, constraints or audit
+        # protections. Compare against the actual shipped migrations in memory.
+        reference = create_engine("sqlite://")
+        try:
+            config = Config(str(ROOT / "alembic.ini"))
+            config.set_main_option("script_location", str(ROOT / "migrations"))
+            with reference.begin() as schema:
+                config.attributes["connection"] = schema
+                command.upgrade(config, "head")
+                expected = [tuple(row) for row in schema.exec_driver_sql(_SCHEMA_QUERY)]
+            if connection.execute(_SCHEMA_QUERY).fetchall() != expected:
+                raise ValueError(_ERROR)
+        finally:
+            reference.dispose()
+        _check_time(deadline)
         with Session(engine) as session:
             if not verify_audit(session):
                 raise ValueError(_ERROR)
