@@ -15,15 +15,19 @@ def refresh(summary: bool = False, agent: str = "codex") -> str:
     text = prompt.read_text(encoding="utf-8")
     digest = hashlib.sha256(prompt.read_bytes()).hexdigest()
     log_path = ROOT / "docs" / "SESSION_LOG.md"
+    heading = f"SHARAY cold-start refresh\nMain prompt: {prompt}\nSHA-256: {digest}\nLogical lines: {len(text.splitlines())}\n"
+    heading += "\nOpen session inbox:\n" + inbox_text(agent, log_path) + "\n"
+    if summary:
+        return (
+            heading
+            + "\nFollow AGENTS.md's complete-read/hash rule before coding.\n"
+            + f"New entries: .venv/bin/python -m scripts.log_view --agent {agent} --since LAST_READ_ID\n"
+            + "Replace LAST_READ_ID with the last entry actually read. Check ideas with --log ideas.\n"
+            + f"Current state: {ROOT / 'docs' / 'STATE.md'}\n"
+        )
     log = read_log(log_path)
     recent = "\n".join(log.splitlines()[-120:])
     status = (ROOT / "docs" / "IMPLEMENTATION_STATUS.md").read_text(encoding="utf-8")
-    heading = f"SHARAY cold-start refresh\nMain prompt: {prompt}\nSHA-256: {digest}\nLogical lines: {len(text.splitlines())}\n"
-    heading += "\nOpen coordination inbox:\n" + inbox_text(agent, log_path) + "\n"
-    if summary:
-        return (
-            heading + "\nRead the full MAIN_PROMPT.txt before coding.\n\nRecent shared checkpoint:\n" + recent
-        )
     return (
         heading
         + "\n"
@@ -42,7 +46,7 @@ def main(argv=None):
         parser.add_argument(
             "--summary",
             action="store_true",
-            help="Index/checkpoint only; assistants still read the full prompt",
+            help="Compact index and pending requests; follow the recorded complete-read/hash rule",
         )
         parser.add_argument(
             "--agent", choices=WRITERS, default="codex", help="Whose pending requests to show"

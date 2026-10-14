@@ -4,12 +4,41 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.session_log import append_entry
 from sharay.__main__ import ROOT, refresh
 
 
 class ContinuityTests(unittest.TestCase):
+    def test_summary_is_compact_without_hiding_old_pending_requests(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "docs").mkdir()
+            (root / "MAIN_PROMPT.txt").write_text("COMPLETE_PROMPT_ONLY\n")
+            (root / "docs/IMPLEMENTATION_STATUS.md").write_text("FULL_STATUS_ONLY\n")
+            log = root / "docs/SESSION_LOG.md"
+            request = append_entry("claude", "question", "Old required decision", to="codex", log_path=log)
+            for index in range(32):
+                append_entry(
+                    "claude", "checkpoint", f"RECENT_DETAIL_ONLY {index}\n" + "x" * 300, log_path=log
+                )
+            self.assertNotIn(request, "\n".join(log.read_text().splitlines()[-120:]))
+            with patch("sharay.__main__.ROOT", root):
+                summary = refresh(summary=True)
+                full = refresh()
+            self.assertIn(request, summary)
+            self.assertIn("Old required decision", summary)
+            self.assertNotIn("RECENT_DETAIL_ONLY", summary)
+            self.assertNotIn("COMPLETE_PROMPT_ONLY", summary)
+            self.assertNotIn("FULL_STATUS_ONLY", summary)
+            self.assertLess(len(summary), 1000)
+            self.assertIn("AGENTS.md", summary)
+            self.assertIn("--since LAST_READ_ID", summary)
+            self.assertIn("COMPLETE_PROMPT_ONLY", full)
+            self.assertIn("FULL_STATUS_ONLY", full)
+            self.assertIn("RECENT_DETAIL_ONLY", full)
+
     def test_main_prompt_preserves_complete_original_and_current_assignment(self):
         original = (ROOT / "docs/PRODUCT_SPECIFICATION.txt").read_text()
         prompt = (ROOT / "MAIN_PROMPT.txt").read_text()

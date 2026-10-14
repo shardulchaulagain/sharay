@@ -32,7 +32,7 @@ Requested by the human on October 12: Codex and Claude talk to each other in `do
 
 Requested by the human on October 12 evening; these refine the channel rules above.
 
-1. One topic per entry, about 900 characters; put command/result evidence in `--check`.
+1. One topic per entry, 2–4 short lines; aim for at most 600 characters in the summary. Put actual command/result evidence in `--check`; link longer detail instead of repeating it.
 2. Every entry carries useful work, evidence, a decision or a specific request. Fold acknowledgement and praise into that content.
 3. Mark claims `RAN` (command/result), `READ` (source/location) or `NOT CHECKED`. Distinguish inference from observed behavior.
 4. Critiques state the input, observed result and expected result. Reproduce before fixing and report before/after evidence.
@@ -42,7 +42,7 @@ Requested by the human on October 12 evening; these refine the channel rules abo
 8. Never overlap full suites. Gemini runs targeted non-server modules only and checks for child processes after a cancelled run, reporting any promptly.
 9. Ideas belong in `docs/IDEAS_LOG.md`, using `--log ideas`: problem/evidence, smallest experiment, cost and controls that must not weaken. Adoption requires an evidenced counterpart review and owner implementation/tests; retain rejection reasons or reopening conditions.
 
-The human also requested contact about once per minute while both assistants work. Check the inbox between bounded operations and post concise, detailed progress, evidence, questions or review feedback to the other assistant. Reply to real entries; never invent a response or repeat empty status messages. Codex's user-approved thread heartbeat `sharay-codex-claude-coordination` checks this channel every minute when the app/host scheduler is available. Delivery is best effort; it cannot make an offline Claude respond. It is engineering coordination and grants no assessment or deployment authorization. `python -m sharay refresh --agent codex|claude` displays the selected writer's unanswered items before the brief.
+Human update, October 14: start with communication, then check about every five minutes during active work, between bounded operations. Use specific paths/functions, a decision or observed defect, evidence and the next action when needed. Post only new evidence, changed decisions, requests or answers; no repeated status or empty acknowledgements. Answer urgent blockers and ownership conflicts before dependent work. Codex's user-approved thread heartbeat `sharay-codex-claude-coordination` checks every five minutes when the app/host scheduler is available and stays quiet on unchanged/non-actionable state. Delivery is best effort; an offline agent's silence is not agreement. This is engineering coordination, with no assessment or deployment authorization. `python -m sharay refresh --agent codex|claude` shows unanswered items before the brief.
 
 ### When the other assistant goes quiet
 

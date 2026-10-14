@@ -1,6 +1,6 @@
 # SHARAY desktop security workspace
 
-At every cold start, follow [AGENTS.md](AGENTS.md): read [MAIN_PROMPT.txt](MAIN_PROMPT.txt) completely unless its hash matches your recorded complete read, then read [team assignments](docs/TEAM_ASSIGNMENTS.md) and the latest [shared session log](docs/SESSION_LOG.md). Refresh them with `.venv/bin/python -m sharay refresh --agent codex` (full prompt and open inbox) or `refresh --summary --agent claude` (checkpoint index and Claude inbox). Give [CLAUDE_HANDOFF_PROMPT.txt](CLAUDE_HANDOFF_PROMPT.txt) to Claude in the same checkout. Codex and Claude append addressed checks/reviews/handoffs using `python -m scripts.session_log --agent codex|claude --to claude|codex ... --reply-to entry-ID`; add `--log ideas` for the separate ideas channel. The user-approved Codex thread heartbeat checks coordination every minute when the app scheduler is available; the shared log retains real replies and cannot make an offline counterpart respond.
+At every cold start, follow [AGENTS.md](AGENTS.md): read [MAIN_PROMPT.txt](MAIN_PROMPT.txt) completely unless its hash matches your recorded complete read, then read [team assignments](docs/TEAM_ASSIGNMENTS.md) and the latest [shared session log](docs/SESSION_LOG.md). Refresh them with `.venv/bin/python -m sharay refresh --agent codex` (full prompt and open inbox) or `refresh --summary --agent claude` (checkpoint index and Claude inbox). Give [CLAUDE_HANDOFF_PROMPT.txt](CLAUDE_HANDOFF_PROMPT.txt) to Claude in the same checkout. Codex and Claude append addressed checks/reviews/handoffs using `python -m scripts.session_log --agent codex|claude --to claude|codex ... --reply-to entry-ID`; add `--log ideas` for the separate ideas channel. The user-approved heartbeat checks coordination every five minutes when the app scheduler is available. Updates contain only specific changes, evidence, requests or answers; unchanged state stays quiet. The shared log retains real replies and cannot make an offline counterpart respond.
 
 The October 12 expansion targets verified authorized live sites/systems and integrated Nmap/ZAP/Nuclei/Metasploit/recon/source/AI workflows. Shared typed contracts now define approved operations and independently require scope, approval, budgets and runner readiness. Those external integrations remain planned/disabled. Claude owns isolation and adapters; Codex owns the platform and operator experience. Exact ownership and open review IDs are in the log.
 
@@ -74,6 +74,8 @@ npm --prefix apps/web run build
 ```
 
 Product tests create temporary databases, synthetic accounts, ephemeral TLS certificates and loopback fixtures. They need local socket permission. No real Internet target is scanned. The prior dependency-free collector and foundation tests are retained below.
+
+`sharay refresh --summary --agent codex` shows the prompt hash, pending session requests and file/reader guidance without repeating the raw log tail. Read new entries with `scripts.log_view --agent codex --since LAST_READ_ID`, replacing the placeholder with the last entry actually read; check the ideas inbox separately with `scripts.session_log --agent codex --log ideas --inbox`. Full `sharay refresh` retains the complete prompt, recent log and implementation status.
 
 ## Account recovery
 

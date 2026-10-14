@@ -88,9 +88,12 @@ class SessionRoutingTests(unittest.TestCase):
         (self.root / "MAIN_PROMPT.txt").write_text("Full current brief")
         (self.root / "docs" / "IMPLEMENTATION_STATUS.md").write_text("Current status")
         with patch("sharay.__main__.ROOT", self.root):
-            text = refresh(summary=True)
+            text = refresh()
             self.assertIn(request, text)
             self.assertLess(text.index(request), text.index("Recent shared checkpoint:"))
+            summary = refresh(summary=True)
+            self.assertIn(request, summary)
+            self.assertLess(summary.index(request), summary.index("New entries:"))
             self.assertIn("0 entries awaiting a reply from claude.", refresh(summary=True, agent="claude"))
 
 
