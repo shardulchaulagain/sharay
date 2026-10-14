@@ -21,7 +21,7 @@ from packages.security_policies import (
     validate_scope,
 )
 
-ADAPTER_VERSION = "1.1.2"
+ADAPTER_VERSION = "1.1.3"
 MAX_REQUESTS = 5
 MAX_SECONDS = 15
 REQUEST_TIMEOUT = 3
@@ -446,6 +446,8 @@ def scan(
     target_url: str,
     cancelled: Callable[[], bool],
     emit: Callable[[dict], None],
+    *,
+    request_starts: dict[str, tuple[float, float]] | None = None,
 ) -> dict:
     """Run bounded real observations. Errors and skipped coverage remain explicit."""
     result: dict[str, Any] = {
@@ -460,6 +462,7 @@ def scan(
     connection = None
     performed = 0
     policy: ScopePolicy | None = None
+    pacing = request_starts if request_starts is not None else {}
 
     def guard():
         if cancelled():
@@ -515,12 +518,18 @@ def scan(
             if destination.url in seen:
                 raise PolicyError("Redirect loop detected; assessment stopped.")
             seen.add(destination.url)
+            interval = 1 / policy.request_rate
+            next_request = time.monotonic()
+            prior = pacing.get(destination.origin)
+            if prior is not None:
+                # Keep the earlier job's cooldown even if the new approval allows a faster rate.
+                next_request = max(next_request, prior[0] + prior[1], prior[0] + interval)
             if previous_request is not None:
-                next_request = previous_request + 1 / policy.request_rate
-                while time.monotonic() < next_request:
-                    guard()
-                    check_url(policy, destination.url)
-                    time.sleep(max(0, min(0.05, next_request - time.monotonic())))
+                next_request = max(next_request, previous_request + interval)
+            while time.monotonic() < next_request:
+                guard()
+                check_url(policy, destination.url)
+                time.sleep(max(0, min(0.05, next_request - time.monotonic())))
             guard()
             # Expiry and scope are revalidated immediately before every connection.
             destination = check_url(policy, destination.url)
@@ -529,6 +538,8 @@ def scan(
                 MAX_SECONDS - (time.monotonic() - started),
                 (policy.expires_at - datetime.now(UTC)).total_seconds(),
             )
+            # Reserve before connecting, including TLS-only and failed connection attempts.
+            pacing[destination.origin] = time.monotonic(), interval
             connection = _connection(destination, timeout)
             performed += 1
             if destination.scheme == "https" and "tls" in policy.categories:
@@ -546,6 +557,7 @@ def scan(
             guard()
             check_url(policy, destination.url)
             previous_request = time.monotonic()
+            pacing[destination.origin] = previous_request, interval
             connection.request(
                 "GET",
                 destination.path,

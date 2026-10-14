@@ -20,6 +20,9 @@ from packages.reporting import redact
 from packages.scanner_adapters import scan
 from packages.security_policies import ScopePolicy
 
+# ponytail: one local worker; durable shared pacing is required before multiworker/live release.
+_request_starts: dict[str, tuple[float, float]] = {}
+
 
 def evidence_hash(value: dict) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -81,7 +84,7 @@ def run_one(sessions, stopping=lambda: False) -> bool:
                 db.commit()
 
     try:
-        result = scan(scope, target_url, cancelled, emit)
+        result = scan(scope, target_url, cancelled, emit, request_starts=_request_starts)
     except Exception as exc:
         # Only fixed builtin names are retained: messages and custom class names can contain secrets.
         error_class = {

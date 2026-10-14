@@ -2,7 +2,7 @@
 
 A current index, not a history; the log and ledger hold the evidence. Update the line you changed and its date.
 Last full edit: 2026-10-12 19:03, Codex.
-Codex refresh: 2026-10-14; communication first, five-minute cadence, concise specific entries. C3/diagnostics publication evidence retained; DIAG-1 Gemini review received.
+Codex refresh: 2026-10-14; C4 origin pacing fixed locally, exact staged verification next. Communication first, five-minute cadence; C8-REFRESH/C4-PACING Gemini reviews received.
 
 ## Health
 - Host: Apple Silicon Mac — arm64, macOS 26.6.2 (Darwin 25.6.0), Python 3.13.1 arm64. We build and run here, so every scanner/tool download and native dependency must be the **darwin-arm64** build (never x86_64); the isolation backend is macOS Seatbelt (`sandbox-exec`). (2026-10-13)
@@ -18,8 +18,8 @@ Codex refresh: 2026-10-14; communication first, five-minute cadence, concise spe
 - Complete reads of this hash — Codex: yes (1138 lines, including corrected hash-read guidance); Claude/Gemini: not confirmed for the new hash. Original requirements retained.
 
 ## Who is doing what
-- **Codex (C1–C8):** C3 published1205283;51 Python/15 frontend tests,5 mutants/native390px flow passed. Diagnostics0bf60e9 published;4 relevant mutants caught. SBOM privacy independently verified; current container privacy/completeness3tests/5subtests pass with2 caught mutants. Container semantics/Metasploit remain queued for owner review. C4 session draft unadopted; IDEA5 acceptance design and IDEA6 critique recorded.
-- **Claude (L1–L8):** live October14; reports container semantics/Metasploit fixes and267-test pass. Privacy fix independently verified; remaining cases under root source/probe recheck. External integrations stay unwired. Normalizer eight sources/arm64 activation remain attributed, not root clean-export verified. READ runner cap10MiB/default65,536bytes. Provider data-sharing stays explicit.
+- **Codex (C1–C8):** C3/diagnostics published1205283/0bf60e9; compact refresh published5d8b6b4, CI38516112555 all3jobs passed. C4 pacing10 requester tests pass; dropped-shared-state/GET-refresh mutants caught. C4 drafts unadopted; IDEA5/6/7 boundaries in ideas log. Exact C4 staged verification next.
+- **Claude (L1–L8):** live October14; container stage inheritance/last-healthcheck fixed, root5 requester tests and4 scoped mutations verified. Metasploit four semantic fixes independently reviewed; catalog16 classes/269 tests remain owner-attributed. External integrations stay unwired; new modules require owner clean-export verification. Provider data-sharing stays explicit.
 - **Gemini (advisory):** container/Metasploit drafts queued for owner review. DIAG-1 review received; bounded diagnostics checks agree with root evidence, not attestation. IDEA5/6 and new resilience draft remain advisory; trusted predicates and execution controls are unimplemented. No draft grants execution authority.
 
 ## Built and tested, not connected to the product
@@ -37,3 +37,4 @@ Separate parser/runner slices with attributed local checks: isolation/staged ext
 - Check about every5 minutes; one topic/2–4 short lines, summary ≤600 chars when practical. Evidence in `--check`, longer detail by path. Only changes, requests or answers; verify before posting.
 - Record full runs as `suite @tree=<hash>`; iterate on affected test files only.
 - Last entry read — Claude: entry-e9bcb2ee954741bf.
+- Last entry read — Codex: entry-7394b543f9b74251 (Gemini C4 review and Claude catalog note included).

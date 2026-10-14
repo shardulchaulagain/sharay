@@ -51,6 +51,8 @@ Start the synthetic fixture in another terminal:
 
 Sign in → Projects → create a project → register `http://127.0.0.1:8766/` → review origins, included/excluded paths and expiration → record explicit controlled-lab authorization → review and launch. The worker collects real HTTP configuration facts, showing skipped TLS/DNS coverage for this HTTP literal-IP fixture. Review findings and evidence, and download reports from the assessment or Reports view.
 
+The single local worker preserves approved request spacing across jobs for the same origin, including duplicate target records, redirects, TLS-only checks and failed connections. Waiting still respects cancellation, scope expiry and the execution budget. Pacing state lasts for that worker process; durable coordination across restarts or multiple workers is required before live release.
+
 Use **Edit scope** in Projects to revise a target or renew its validity window (up to 24 hours). Review the complete replacement before saving. A change clears authorization, cancels queued jobs and requests cancellation of active jobs; collected facts and historical reports retain their original scope. Approve the new version before launching. Stale open forms are rejected and must reload the current version.
 
 To retest remediation, stop the fixture with Ctrl+C and restart it with `--secure-headers`. Select Review retest on the completed assessment and review the captured current scope version. Only a complete successful relevant check can mark an absent header issue fixed; a connection error or cancellation cannot. A confirmed missing header is a verified configuration fact, not a claim of exploitation or complete application security.

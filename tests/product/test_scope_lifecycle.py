@@ -295,7 +295,7 @@ class ScopeLifecycleTests(unittest.TestCase):
         entered, release = threading.Event(), threading.Event()
         observed = []
 
-        def scan(scope, url, cancelled, emit):
+        def scan(scope, url, cancelled, emit, *, request_starts=None):
             entered.set()
             if not release.wait(3):
                 raise RuntimeError("Synthetic worker handshake timed out")
@@ -340,8 +340,8 @@ class ScopeLifecycleTests(unittest.TestCase):
         self.server.secure_headers = True
         retest = self.launch(target, baseline["id"])
 
-        def collect_then_revise(scope, url, cancelled, emit):
-            result = controlled_scan(scope, url, cancelled, emit)
+        def collect_then_revise(scope, url, cancelled, emit, *, request_starts=None):
+            result = controlled_scan(scope, url, cancelled, emit, request_starts=request_starts)
             self.assertEqual(result["outcome"], "completed")
             self.assertGreater(len(result["observations"]), 0)
             self.assertEqual(result["findings"], [])
