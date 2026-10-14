@@ -2,13 +2,13 @@
 
 A current index, not a history; the log and ledger hold the evidence. Update the line you changed and its date.
 Last full edit: 2026-10-12 19:03, Codex.
-Codex refresh: 2026-10-14; durable pacing/90s gate follow-up d9d6b75 CI38547809013 all3jobs/steps pass. C4 broad registration, versioned operator authorization and explicit execution diagnostics under final verification; live execution still unavailable.
+Codex refresh: 2026-10-14; C4 broad registration64b9fa6/tree4af8a855 verified:393tests/3skips,4gates,18UItests/build and CI38550982099 all3jobs/steps pass. Current-scope readiness/history follow-up regression reproduced and fixed; exact export next. Live execution remains unavailable.
 
 ## Health
 - Host: Apple Silicon Mac — arm64, macOS 26.6.2 (Darwin 25.6.0), Python 3.13.1 arm64. We build and run here, so every scanner/tool download and native dependency must be the **darwin-arm64** build (never x86_64); the isolation backend is macOS Seatbelt (`sandbox-exec`). (2026-10-13)
 - Earlier Claude snapshot:241/four gates at e5139fe0bc60 (14:18); historical. Coordinate full suites; reuse only matching verified inputs/environment.
 - Latest Codex full snapshot: published tree df62cc8cf20548127b511c6c307f387905549e40,384tests/3skips/0failures57.845s; Python3.13.1/Darwin. Initial CI38523088548 unit60.137s timeout, static/frontend passed. Older diagnostics failure/pass evidence retained; L working source excluded.
-- CI: d9d6b75 run38547809013 all Python3.11/3.13/frontend jobs/steps succeeded, existing GitHub connector confirmed. Exact-export384tests/3skips58.107896s plus4gates pass. Earlier60s failure retained; product budgets unchanged.
+- CI:64b9fa6 run38550982099 all Python3.11/3.13/frontend jobs/steps succeeded, existing GitHub connector confirmed. Exact-export393tests/3skips61.238410s plus4gates/18UItests/build pass. Earlier60s failure retained; product budgets unchanged.
 - C1 `af52761`: clean staged tree0a3103c7 passed23 tests/Ruff/format/Linux types; three watcher mutants caught. Remote run38348549805 all3jobs successful.
 - Backup: git, private remote `github.com/shardulchaulagain/sharay` (first commit a005277, 14:25). Never make it public; never commit credentials, stored data or evidence.
 - Nothing is deployed. No live target can be assessed. Scanner downloads: approved 19:15 for three named files; see the log for which are installed.
@@ -18,7 +18,7 @@ Codex refresh: 2026-10-14; durable pacing/90s gate follow-up d9d6b75 CI385478090
 - Complete reads of this hash — Codex: yes (1138 lines, including corrected hash-read guidance); Claude/Gemini: not confirmed for the new hash. Original requirements retained.
 
 ## Who is doing what
-- **Codex (C1–C8):** C4 broad inventory/API/UI implemented from Gemini requester acceptance; pure validation and separate execution guard. Six requester cases and extra offline cases pass; exact-export gates/review next. One serialized worker; rate ceiling10, approval concurrency ceiling5, actual1.
+- **Codex (C1–C8):** C4 broad inventory/API/UI64b9fa6 verified/pushed; six Gemini cases, extra regressions/3mutants, actual browser registration/authorization/blockers and390px layout pass. C7 historical readiness metadata fix under final verification. One worker; rate ceiling10, concurrency ceiling5, actual1.
 - **Claude (L1–L8):** reports Podman VM no-network smoke passed, but rootless-pasta nft OUTPUT deny failed to block TCP443; destination egress remains unproven/refused. Codex independently replayed UTF-8 provider fix offline; actual TLS-opener/redirect test coverage gaps remain.
 - **Gemini (senior technical lead):** directs priorities/architecture/review; Codex/Claude implement and independently verify. Broad acceptance supplied; dispatcher defects reproduced with mocks, deferred adoption. No draft or log grants assessment/deployment authority.
 

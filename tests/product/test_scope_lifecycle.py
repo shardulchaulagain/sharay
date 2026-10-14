@@ -44,6 +44,23 @@ class ScopeLifecycleTests(unittest.TestCase):
             },
         )
 
+    def test_broad_scope_replacement_does_not_rewrite_historical_report_readiness(self):
+        from tests.product.test_broad_scope import broad_scope
+
+        target, _ = self.target()
+        baseline = self.launch(target)
+        self.assertTrue(run_one(self.sessions))
+        route = f"/api/v1/reports/{baseline['id']}?format=json"
+        before = self.client.get(route).json()
+        replacement = broad_scope()
+        revised = self.update(target, url="https://example.com/", scope=replacement)
+        self.assertEqual(revised.status_code, 200, revised.text)
+        self.assertIn("execution requires", revised.json()["execution_blocker"])
+        after = self.client.get(route).json()
+        self.assertEqual(before["target"], after["target"])
+        self.assertEqual(before["scope"], after["scope"])
+        self.assertEqual(before["observations"], after["observations"])
+
     def test_scope_edit_resets_approval_stops_queue_and_preserves_reports(self):
         target, project = self.target()
         baseline = self.launch(target)

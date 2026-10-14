@@ -768,6 +768,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "authorized_by": snapshot["authorized_by"],
             "approved_at": timestamp(snapshot["approved_at"]),
         }
+        # Current execution readiness is not evidence about a historical assessment.
+        historical_target.pop("execution_blocker", None)
         data = {
             "assessment": assessment_view(row),
             "project": project_view(project),
