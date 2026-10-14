@@ -159,7 +159,9 @@ class WorkerPacingTests(unittest.TestCase):
 
     def status(self, identifier):
         with self.sessions() as db:
-            return db.get(Assessment, identifier).status
+            row = db.get(Assessment, identifier)
+            assert row is not None, "Synthetic assessment fixture is missing"
+            return row.status
 
     def restarted_worker_requests(self):
         # A fresh interpreter cannot inherit the first worker's origin map.
