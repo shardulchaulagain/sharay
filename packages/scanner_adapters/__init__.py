@@ -25,7 +25,7 @@ from packages.security_policies import (
     validate_execution_scope as validate_scope,
 )
 
-ADAPTER_VERSION = "1.1.5"
+ADAPTER_VERSION = "1.1.6"
 MAX_REQUESTS = 5
 MAX_SECONDS = 15
 REQUEST_TIMEOUT = 3
@@ -212,7 +212,9 @@ def _cookie_flags(values: list[str]) -> list[dict]:
         if not (name or cookie_value) or len(name) + len(cookie_value) > 4096:
             flags.append({"parse_error": True})
             continue
-        cookie_flags = {"secure": False, "httponly": False, "samesite": "unset"}
+        cookie_flags: dict[str, Any] = {"secure": False, "httponly": False, "samesite": "unset"}
+        root_path = False
+        domain_present = False
         for attribute in attributes.split(";"):
             attribute_name, _, attribute_value = attribute.partition("=")
             attribute_name = attribute_name.strip(" \t").lower()
@@ -224,6 +226,20 @@ def _cookie_flags(values: list[str]) -> list[dict]:
             elif attribute_name == "samesite":
                 same_site = attribute_value.lower()
                 cookie_flags["samesite"] = same_site if same_site in {"strict", "lax", "none"} else "unset"
+            elif attribute_name == "path":
+                root_path = attribute_value == "/"
+            elif attribute_name == "domain":
+                # The last bounded Domain wins, after removing one leading dot.
+                domain_present = bool(attribute_value.removeprefix("."))
+        prefix = (
+            "host"
+            if name.lower().startswith("__host-")
+            else ("secure" if name.lower().startswith("__secure-") else "")
+        )
+        if prefix:
+            cookie_flags.update(prefix=prefix, prefix_missing_secure=not cookie_flags["secure"])
+            if prefix == "host":
+                cookie_flags.update(prefix_nonroot_path=not root_path, prefix_domain_present=domain_present)
         flags.append(cookie_flags)
     return flags
 
@@ -272,6 +288,36 @@ def _arbitrary_web_hosts(source: str) -> bool:
 def _header_facts(headers: list[tuple[str, str]]) -> dict:
     """Retain configuration facts rather than untrusted header values or secrets."""
     lowered = {name.lower(): value for name, value in headers}
+    field_values: dict[str, list[str]] = {}
+    for name, value in headers:
+        field_values.setdefault(name.lower(), []).append(value)
+    # Fetch combines repeated CORS fields; none of the resulting comma lists
+    # equals a single wildcard or the case-sensitive credentials token.
+    cors_origin = field_values.get("access-control-allow-origin", [])
+    cors_credentials = field_values.get("access-control-allow-credentials", [])
+    isolation_tokens = {}
+    for short, name, allowed in [
+        (
+            "coop",
+            "cross-origin-opener-policy",
+            {"unsafe-none", "same-origin", "same-origin-allow-popups", "noopener-allow-popups"},
+        ),
+        ("coep", "cross-origin-embedder-policy", {"unsafe-none", "require-corp", "credentialless"}),
+        ("corp", "cross-origin-resource-policy", {"same-origin", "same-site", "cross-origin"}),
+    ]:
+        values = field_values.get(name, [])
+        token = values[0].partition(";")[0].strip(" \t") if len(values) == 1 else ""
+        isolation_tokens[short] = "absent" if not values else token if token in allowed else "unrecognized"
+    software_indicators = {
+        name: {
+            "present": any(value.strip(" \t") for value in field_values.get(name, [])),
+            "version_pattern": any(
+                re.search(r"(?:^|[/ \t])v?[0-9]+(?:\.[0-9]+)+", value) is not None
+                for value in field_values.get(name, [])
+            ),
+        }
+        for name in ["server", "x-powered-by", "x-aspnet-version", "x-generator", "x-backend-server"]
+    }
     csp_values = [value for name, value in headers if name.lower() == "content-security-policy"]
     ancestors = _ancestor_policies(csp_values)
     # Even an empty ancestor list blocks framing. A narrow policy still applies
@@ -327,15 +373,17 @@ def _header_facts(headers: list[tuple[str, str]]) -> dict:
         if ancestors
         else frame_options_restrict,
         "referrer_policy_valid": any(token in _REFERRER_POLICIES for token in referrer_tokens),
-        "header_analysis_limits": "CSP non-emptiness is not policy validity. Framing checks ancestor host patterns and XFO rules; combined scheme/port/path behavior and browser workflows are not tested. Referrer recognition is not a privacy-strength assessment. Cookie flags describe Set-Cookie attributes, not browser storage acceptance.",
+        "header_analysis_limits": "CSP non-emptiness is not policy validity. Framing checks ancestor host patterns and XFO rules; combined scheme/port/path behavior and browser workflows are not tested. Referrer recognition is not a privacy-strength assessment. Cookie flags describe Set-Cookie attributes, not browser storage acceptance. Isolation tokens do not validate parameters or establish browser isolation; missing isolation headers require application context. Software version patterns do not identify a product or vulnerability. CORS origin reflection and credentialed browser access were not tested.",
         "nosniff": first_content_type_option.strip(" \t").lower() == "nosniff",
         "cache_control": {
             directive: directive
             in {d.strip().lower().split("=")[0] for d in lowered.get("cache-control", "").split(",")}
             for directive in ["no-store", "no-cache", "private", "public"]
         },
-        "cors_wildcard": lowered.get("access-control-allow-origin", "").strip() == "*",
-        "cors_credentials": lowered.get("access-control-allow-credentials", "").strip().lower() == "true",
+        "cors_wildcard": len(cors_origin) == 1 and cors_origin[0].strip(" \t") == "*",
+        "cors_credentials": len(cors_credentials) == 1 and cors_credentials[0].strip(" \t") == "true",
+        "browser_isolation_tokens": isolation_tokens,
+        "software_indicators": software_indicators,
         "server_indicator_present": "server" in lowered,
         "cookie_flags": _cookie_flags([value for name, value in headers if name.lower() == "set-cookie"]),
     }
@@ -403,6 +451,42 @@ def _findings(observation: dict) -> list[dict]:
                 "A response cookie omits HttpOnly",
                 "info",
                 "Use HttpOnly for cookies that do not require JavaScript access, especially session cookies.",
+            )
+        )
+    if any(
+        any(
+            flags.get(key, False)
+            for key in ("prefix_missing_secure", "prefix_nonroot_path", "prefix_domain_present")
+        )
+        for flags in facts["cookie_flags"]
+    ):
+        issues.append(
+            (
+                "cookie_prefix",
+                "A prefixed response cookie omits required prefix attributes",
+                "info",
+                "For __Secure- cookies include Secure; for __Host- cookies also send Path=/ and omit nonempty Domain attributes. Inspect browser storage behavior separately; cookie identifiers and values are not retained.",
+            )
+        )
+    if facts.get("cors_wildcard") and facts.get("cors_credentials"):
+        issues.append(
+            (
+                "cors_wildcard_credentials",
+                "CORS wildcard is paired with a credentials flag",
+                "info",
+                "Use an explicit intended origin when credentialed cross-origin access is required. Browsers do not grant credentialed response access with a wildcard; origin reflection and exploitability were not tested.",
+            )
+        )
+    if any(
+        name != "server" and indicator.get("present")
+        for name, indicator in facts.get("software_indicators", {}).items()
+    ):
+        issues.append(
+            (
+                "software_indicators",
+                "Application software-identifying response headers are present",
+                "info",
+                "Review whether these response headers are needed and suppress unnecessary software details. Only presence and numeric version-pattern facts are retained; no vulnerable version has been established.",
             )
         )
     return [
@@ -657,4 +741,103 @@ def scan(
     return result
 
 
-__all__ = ["preflight", "scan"]
+__all__ = ["preflight", "scan", "scan_live"]
+
+
+def _parse_http_headers(raw: str) -> tuple[int, list[tuple[str, str]]]:
+    """Parse a curl `-D -` header dump into (final status code, [(name, value)]). Each `HTTP/`
+    status line resets the block so the last response (after any 1xx/redirect) wins."""
+    status = 0
+    headers: list[tuple[str, str]] = []
+    for line in raw.splitlines():
+        if line.startswith("HTTP/"):
+            parts = line.split(None, 2)
+            status, headers = (int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0), []
+        elif ":" in line:
+            name, _, value = line.partition(":")
+            headers.append((name.strip(), value.strip()))
+    return status, headers
+
+
+def scan_live(destination: Destination, allow_ip: str, *, run: Callable[..., Any] | None = None) -> dict:
+    """Assess a live, in-scope, ownership-verified target's security headers over the enforced
+    single-destination egress runner. `curl --resolve` pins the connection to the authorized IP
+    (the allowlist drops everything else, DNS included), so no name is resolved in-container. Reuses
+    the safe_http header/finding logic and returns the same result shape as scan()."""
+    runner: Callable[..., Any]
+    if run is None:
+        from services.scanner_worker.container import run_with_egress
+
+        runner = run_with_egress
+    else:
+        runner = run
+    started = time.monotonic()
+    host, port, url = destination.host, destination.port, destination.url
+    argv = [
+        "-sS",
+        "-D",
+        "-",
+        "-o",
+        "/dev/null",
+        "--max-time",
+        str(REQUEST_TIMEOUT * 5),
+        "--resolve",
+        f"{host}:{port}:{allow_ip}",
+        url,
+    ]
+    result: dict[str, Any] = {
+        "adapter": "safe_http_live",
+        "observations": [],
+        "findings": [],
+        "checks": [],
+        "outcome": "completed",
+        "requests_performed": 0,
+    }
+    try:
+        res = runner(
+            "docker.io/curlimages/curl:8.11.1",
+            argv,
+            allow_ip=allow_ip,
+            allow_port=port,
+            max_seconds=MAX_SECONDS * 2,
+        )
+    except Exception:
+        result["outcome"] = "failed"
+        result["checks"].append(
+            {"category": "safe_http", "status": "failed", "detail": "Enforced-egress fetch did not complete."}
+        )
+        result["duration_ms"] = round((time.monotonic() - started) * 1000)
+        return result
+    result["requests_performed"] = 1
+    if res.outcome != "completed":
+        result["outcome"] = "failed"
+        result["checks"].append(
+            {
+                "category": "http_headers",
+                "status": "failed",
+                "detail": "No HTTP response within the egress-locked budget.",
+            }
+        )
+        result["duration_ms"] = round((time.monotonic() - started) * 1000)
+        return result
+    status, headers = _parse_http_headers(res.stdout.decode("utf-8", "replace"))
+    observation = {
+        "url": url,
+        "destination_ip": allow_ip,
+        "method": "GET",
+        "status_code": status,
+        "captured_at": datetime.now(UTC).isoformat(),
+        "facts": _header_facts(headers),
+        "body_retained": False,
+    }
+    result["observations"].append(observation)
+    result["findings"] = _findings(observation)
+    result["checks"].append(
+        {
+            "category": "http_headers",
+            "status": "completed",
+            "detail": "Security-header facts from a real GET over enforced single-destination egress; body not retained.",
+        }
+    )
+    result["duration_ms"] = round((time.monotonic() - started) * 1000)
+    return result

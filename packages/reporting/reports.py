@@ -120,8 +120,20 @@ def _safe_fact(key: str, value: Any) -> bool:
     return all(
         isinstance(flags, dict)
         and all(
-            (name in {"secure", "httponly", "parse_error"} and isinstance(item, bool))
+            (
+                name
+                in {
+                    "secure",
+                    "httponly",
+                    "parse_error",
+                    "prefix_missing_secure",
+                    "prefix_nonroot_path",
+                    "prefix_domain_present",
+                }
+                and isinstance(item, bool)
+            )
             or (name == "samesite" and isinstance(item, str) and item in {"strict", "lax", "none", "unset"})
+            or (name == "prefix" and isinstance(item, str) and item in {"host", "secure"})
             for name, item in flags.items()
         )
         for flags in value

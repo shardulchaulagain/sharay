@@ -6,7 +6,16 @@ The data directory defaults to `.aegis/`, mode 0700; database files are 0600. It
 
 ## Backup, restore and retention
 
-Close the app and verify its worker stopped before backing up the entire data directory to a private encrypted destination. Copy SQLite WAL/SHM files together if present. Never back up live SQLite by copying only the main file. Restore into a new private directory, point SHARAY_DATA_DIR there, run `migrate`, then verify audit integrity and project/assessment history through the authenticated UI. Backup/restore drills are not yet tested and must not be claimed complete.
+The local database now has consistent online snapshots through SQLite's backup API, including committed WAL data. Use an existing private destination directory outside the repository:
+
+```sh
+.venv/bin/python -m sharay --data-dir /absolute/private/data backup /absolute/private/backups/sharay.db
+.venv/bin/python -m sharay --data-dir /absolute/private/recovered restore /absolute/private/backups/sharay.db
+```
+
+Both destinations must be new: backup refuses an existing file, and restore refuses an existing data directory. Symlinks in source, sidecar or destination paths and their ancestors are rejected; on macOS use canonical `/private/var/...` paths rather than `/var/...`. Files are mode0600 and the restored directory0700. Output contains only status, byte count and SHA256. Snapshots are validated for SQLite integrity, foreign keys, current shipped migration heads, required tables and the existing audit hash chain. Corrupt, unsupported or failed snapshots are not published. The default30-second deadline is cooperative, with a300-second maximum; it is not an OS execution limit or a protection against a concurrent privileged filesystem attacker. Power-loss durability is not established.
+
+The snapshot contains the complete database, including account hashes, sessions, approvals, scope history, findings and cooldown intervals. It is unencrypted; use a private encrypted backup destination. The hash is an integrity reference, not proof of authenticity, and the audit chain is not external tamper protection. The command does not back up other data-directory files or environment/provider credentials. Stop the original application and worker before using a restored directory so two copies do not resume the same queued work. Restore starts no services and changes no records or credentials. Point SHARAY_DATA_DIR at the recovered directory and review audit/history through the authenticated UI before resuming work. Six synthetic recovery regressions exercise committed WAL/all-table preservation, CLI output, permissions, corruption, audit tampering, unsupported revisions, deadlines and refusal paths; production recovery and encrypted-destination drills remain untested.
 
 Evidence retention is currently indefinite in the local database; there is no automatic purge. Assessments store no response bodies and no raw cookie/header values. Comprehensive retention/deletion policies, artifact storage and report version history remain incomplete. Archiving a project changes its availability for new work; it does not erase evidence.
 

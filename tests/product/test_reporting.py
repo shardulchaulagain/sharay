@@ -252,6 +252,25 @@ class ReportingTests(unittest.TestCase):
             self.assertEqual(redact({"cookie_flags": value}), {"cookie_flags": "[REDACTED]"})
         self.assertEqual(redact({"cors_credentials": "raw-secret"}), {"cors_credentials": "[REDACTED]"})
 
+    def test_redaction_preserves_prefixed_cookie_enums_and_booleans_but_not_identifiers(self):
+        flags = {
+            "secure": True,
+            "httponly": False,
+            "samesite": "unset",
+            "prefix": "host",
+            "prefix_missing_secure": False,
+            "prefix_nonroot_path": True,
+            "prefix_domain_present": False,
+        }
+        facts = {"cookie_flags": [flags]}
+        self.assertEqual(redact(facts), facts)
+        for invalid in (
+            {**flags, "prefix": "private-name"},
+            {**flags, "prefix_nonroot_path": "private-path"},
+            {**flags, "cookie_name": "private-name"},
+        ):
+            self.assertEqual(redact({"cookie_flags": [invalid]}), {"cookie_flags": "[REDACTED]"})
+
 
 if __name__ == "__main__":
     unittest.main()

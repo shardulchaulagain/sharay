@@ -9,6 +9,121 @@ from packages.scanner_adapters import MAX_HEADER_BYTES, _findings, _header_facts
 
 
 class HeaderSemanticsTests(unittest.TestCase):
+    def test_cors_credentials_is_case_sensitive_and_duplicate_fields_are_not_collapsed(self):
+        for values, expected in [
+            (["true"], True),
+            ([" \ttrue\t "], True),
+            (["True"], False),
+            (["TRUE"], False),
+            (["true", "true"], False),
+            (["false", "true"], False),
+            (["true\xa0"], False),
+        ]:
+            with self.subTest(values=values):
+                facts = self.facts(*[("Access-Control-Allow-Credentials", value) for value in values])
+                self.assertEqual(facts["cors_credentials"], expected)
+        facts = self.facts(
+            ("Access-Control-Allow-Origin", "https://private-origin.invalid"),
+            ("Access-Control-Allow-Credentials", "true"),
+        )
+        self.assertFalse(facts["cors_wildcard"])
+        self.assertFalse(any("reflection" in check for check in self.checks(facts)))
+        self.assertNotIn("private-origin", json.dumps(facts))
+        repeated = self.facts(("Access-Control-Allow-Origin", "*"), ("Access-Control-Allow-Origin", "*"))
+        self.assertFalse(repeated["cors_wildcard"])
+
+    def test_browser_isolation_retains_only_known_tokens_without_claiming_effectiveness(self):
+        facts = self.facts(
+            ("Cross-Origin-Opener-Policy", 'same-origin; report-to="private-endpoint"'),
+            ("Cross-Origin-Embedder-Policy", "credentialless"),
+            ("Cross-Origin-Resource-Policy", "same-site"),
+        )
+        self.assertEqual(
+            facts["browser_isolation_tokens"],
+            {"coop": "same-origin", "coep": "credentialless", "corp": "same-site"},
+        )
+        self.assertNotIn("private-endpoint", json.dumps(facts))
+        invalid = self.facts(
+            ("Cross-Origin-Opener-Policy", "SAME-ORIGIN"),
+            ("Cross-Origin-Embedder-Policy", "require-corp"),
+            ("Cross-Origin-Embedder-Policy", "require-corp"),
+        )
+        self.assertEqual(
+            invalid["browser_isolation_tokens"],
+            {"coop": "unrecognized", "coep": "unrecognized", "corp": "absent"},
+        )
+        self.assertFalse(any("isolation" in check for check in self.checks(self.facts())))
+
+    def test_prefixed_cookie_facts_follow_attribute_whitespace_and_last_path(self):
+        for cookie, expected in [
+            ("__Host-private=private-value; Secure=false; Path = /", (False, False, False)),
+            ("__hOsT-private=private-value; Secure; Path=/; Path=/child", (False, True, False)),
+            ("__Host-private=private-value; Secure; Path=/child; Path=/", (False, False, False)),
+            ("__Host-private=private-value; Secure; Path=/; Domain = private.invalid", (False, False, True)),
+            ("__Host-private=private-value; Secure; Path=/; Domain=", (False, False, False)),
+            (
+                "__Host-private=private-value; Secure; Path=/; Domain=; Domain=private.invalid",
+                (False, False, True),
+            ),
+            (
+                "__Host-private=private-value; Secure; Path=/; Domain=private.invalid; Domain=",
+                (False, False, False),
+            ),
+            (
+                "__Host-private=private-value; Secure; Path=/; Domain=private.invalid; Domain=.",
+                (False, False, False),
+            ),
+            ("__Host-private=private-value; Path=/", (True, False, False)),
+            ("__Host-private=private-value; Secure", (False, True, False)),
+        ]:
+            with self.subTest(cookie=cookie):
+                facts = self.facts(("Set-Cookie", cookie))
+                flags = facts["cookie_flags"][0]
+                self.assertEqual(flags["prefix"], "host")
+                self.assertEqual(
+                    tuple(
+                        flags[key]
+                        for key in ("prefix_missing_secure", "prefix_nonroot_path", "prefix_domain_present")
+                    ),
+                    expected,
+                )
+                self.assertEqual("cookie_prefix" in self.checks(facts), any(expected))
+                for secret in ("private", "private-value", "child", "invalid"):
+                    self.assertNotIn(secret, json.dumps(flags))
+
+    def test_prefixed_cookie_limits_and_secure_prefix_keep_response_facts_bounded(self):
+        for cookie, missing in [
+            ("__Secure-private=value", True),
+            ("__sEcUrE-private=value; Secure=false", False),
+        ]:
+            flags = self.facts(("Set-Cookie", cookie))["cookie_flags"][0]
+            self.assertEqual(flags["prefix"], "secure")
+            self.assertEqual(flags["prefix_missing_secure"], missing)
+        oversized_path = self.facts(("Set-Cookie", "__Host-x=v; Secure; Path=/; Path=/" + "x" * 1024))
+        self.assertFalse(oversized_path["cookie_flags"][0]["prefix_nonroot_path"])
+        oversized_domain = self.facts(("Set-Cookie", "__Host-x=v; Secure; Path=/; Domain=" + "x" * 1025))
+        self.assertFalse(oversized_domain["cookie_flags"][0]["prefix_domain_present"])
+        malformed = self.facts(("Set-Cookie", "__Host-x=v; Secure\x00; Path=/"))
+        self.assertEqual(malformed["cookie_flags"], [{"parse_error": True}])
+        self.assertNotIn("cookie_prefix", self.checks(malformed))
+
+    def test_software_indicators_never_retain_banners_or_claim_a_known_vulnerability(self):
+        facts = self.facts(
+            ("Server", "Apache/2.4.49 synthetic-private-banner"),
+            ("X-Powered-By", "synthetic-private-runtime"),
+        )
+        self.assertEqual(facts["software_indicators"]["server"], {"present": True, "version_pattern": True})
+        self.assertEqual(
+            facts["software_indicators"]["x-powered-by"], {"present": True, "version_pattern": False}
+        )
+        self.assertNotIn("synthetic-private", json.dumps(facts))
+        observation = {"facts": facts, "url": "https://127.0.0.1/example", "status_code": 200}
+        finding = next(f for f in _findings(observation) if f["evidence"]["check"] == "software_indicators")
+        self.assertEqual(finding["severity"], "info")
+        self.assertNotIn("CVE", finding["description"])
+        # The standard Server field is observed, not an automatic vulnerability.
+        self.assertNotIn("software_indicators", self.checks(self.facts(("Server", "Apache/2.4.49"))))
+
     def facts(self, *headers):
         return _header_facts(
             [("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer"), *headers]

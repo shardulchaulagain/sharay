@@ -18,6 +18,7 @@ from pathlib import Path
 from sqlalchemy import text
 
 from aegis.auth import consume_recovery, issue_recovery, provision_owner
+from aegis.backup import backup_database, restore_database
 from aegis.config import ROOT, Settings
 from aegis.database import create_database
 from aegis.lifecycle import watch_parent_stdin
@@ -160,6 +161,10 @@ def main(argv=None):
     sub.add_parser("reset-password", help="Consume a recovery token once and revoke existing sessions")
     sub.add_parser("preflight", help="Report dependency status without running external scanners")
     sub.add_parser("migrate", help="Apply forward-only Alembic migrations")
+    backup = sub.add_parser("backup", help="Create a new private consistent database snapshot")
+    backup.add_argument("destination", type=Path)
+    restore = sub.add_parser("restore", help="Restore a snapshot into a brand-new --data-dir")
+    restore.add_argument("snapshot", type=Path)
     api = sub.add_parser("serve", help="Run loopback API and worker without a window")
     api.add_argument("--parent-stdin", action="store_true", help=argparse.SUPPRESS)
     window = sub.add_parser("desktop", help="Start the native app; this is the default")
@@ -186,6 +191,12 @@ def main(argv=None):
             )
         elif args.command == "serve":
             serve(settings, args.parent_stdin)
+        elif args.command == "backup":
+            print(json.dumps({"backup": "created", **backup_database(settings.data_dir, args.destination)}))
+        elif args.command == "restore":
+            if args.data_dir is None:
+                raise ValueError("Restoration requires an explicit new --data-dir.")
+            print(json.dumps({"restore": "created", **restore_database(args.snapshot, settings.data_dir)}))
         elif args.command in {"init-owner", "issue-recovery", "reset-password", "migrate"}:
             engine, sessions = create_database(settings)
             try:
