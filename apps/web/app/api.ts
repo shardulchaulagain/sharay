@@ -68,6 +68,13 @@ export function post<T>(path: string, data: unknown = {}) {
   return api<T>(path, { method: "POST", body: JSON.stringify(data) });
 }
 
+export function projectFields(name: string, description: string) {
+  name = name.trim();
+  if (!name || Array.from(name).length > 160) throw new Error("Enter a project name between 1 and 160 characters.");
+  if (Array.from(description).length > 4000) throw new Error("Keep the project description within 4000 characters.");
+  return { name, description };
+}
+
 export function readable(value: string) { return value.replaceAll("_", " "); }
 export function date(value?: string) {
   if (!value) return "—";

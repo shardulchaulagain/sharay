@@ -18,7 +18,7 @@ function load(name) {
   const module = { exports: {} }; cache.set(name, module);
   let source = readFileSync(new URL(`../app/${name}.${name === "api" ? "ts" : "tsx"}`, import.meta.url), "utf8");
   if (name === "assessments") source += "\nexport { AssessmentDetail };";
-  if (name === "projects") source += "\nexport { TargetRegistration, TargetRow, Launch };";
+  if (name === "projects") source += "\nexport { TargetRegistration, TargetRow, Launch, ProjectDetail, ProjectSettings };";
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   new Function("require", "module", "exports", code)(id => id.startsWith("./") ? load(id.slice(2)) : require(id), module, module.exports);
   return module.exports;
@@ -35,6 +35,104 @@ function text(value) {
   return React.isValidElement(value) ? text(value.props.children) : "";
 }
 const button = (tree, label) => nodes(tree).find(node => node.type === "button" && text(node.props.children) === label);
+
+function settingsHarness() {
+  const projects = load("projects"), api = load("api"), state = controlledState();
+  const original = { api: api.api, FormData: globalThis.FormData };
+  const requests = []; let refreshed = 0;
+  let project = { id: "project/1", name: "Original", description: "Before", archived: false };
+  let fields = { name: "Updated", description: "" };
+  globalThis.FormData = class { get(name) { return fields[name]; } };
+  api.api = async (route, options) => { requests.push({ route, ...options, fields: JSON.parse(options.body) }); };
+  const render = () => state.render(() => projects.ProjectSettings({ project, refresh() { refreshed++; } }));
+  return { api, requests, render, refreshed: () => refreshed, setProject(value) { project = { ...project, ...value }; }, setFields(value) { fields = value; }, restore() { state.restore(); api.api = original.api; globalThis.FormData = original.FormData; } };
+}
+
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const submitSettings = tree => nodes(tree).find(node => node.type === "form").props.onSubmit({ preventDefault() {}, currentTarget: {} });
+
+test("project settings are available only to managers and archived history remains readable", () => {
+  const projects = load("projects"), components = load("components");
+  const original = components.useResource;
+  const project = { id: "project-1", name: "History", description: "Preserved", archived: true, targets: [], assessments: [{ id: "assessment-1" }] };
+  components.useResource = () => ({ data: project, loading: false });
+  try {
+    for (const role of ["owner", "security_administrator", "analyst", "viewer"]) {
+      const state = controlledState();
+      try {
+        const tree = state.render(() => projects.ProjectDetail({ id: project.id, user: { role }, revision: 0, refresh() {}, back() {}, openAssessment() {} }));
+        assert.equal(nodes(tree).some(node => node.type === projects.ProjectSettings), ["owner", "security_administrator"].includes(role));
+        assert.equal(button(tree, "Register target"), undefined);
+        assert.ok(nodes(tree).some(node => node.props.items === project.assessments));
+      } finally { state.restore(); }
+    }
+  } finally { components.useResource = original; }
+});
+
+test("project settings preserve a failed edit and close only after a successful PATCH", async () => {
+  const harness = settingsHarness();
+  try {
+    button(harness.render(), "Edit project").props.onClick();
+    let tree = harness.render();
+    assert.equal(nodes(tree).find(node => node.type === "input").props.maxLength, 320);
+    assert.equal(nodes(tree).find(node => node.type === "textarea").props.maxLength, 8000);
+    harness.setFields({ name: "  ", description: "" }); submitSettings(tree); await flush();
+    assert.equal(harness.requests.length, 0);
+    assert.match(renderToStaticMarkup(harness.render()), /between 1 and 160/);
+    harness.setFields({ name: " Updated ", description: "" });
+    harness.api.api = async () => { throw new Error("Synthetic PATCH denial"); };
+    submitSettings(harness.render()); await flush();
+    tree = harness.render();
+    assert.ok(button(tree, "Save project settings"));
+    assert.match(renderToStaticMarkup(tree), /Synthetic PATCH denial/);
+    assert.equal(harness.refreshed(), 0);
+    let finish;
+    harness.api.api = async (route, options) => { harness.requests.push({ route, ...options, fields: JSON.parse(options.body) }); await new Promise(resolve => { finish = resolve; }); };
+    submitSettings(tree);
+    tree = harness.render();
+    assert.equal(button(tree, "Saving…").props.disabled, true);
+    assert.ok(nodes(tree).find(node => node.type === "input").props.disabled);
+    finish(); await flush();
+    assert.equal(button(harness.render(), "Save project settings"), undefined);
+    assert.equal(harness.refreshed(), 1);
+    assert.equal(harness.requests[0].route, "/projects/project%2F1");
+    assert.equal(harness.requests[0].method, "PATCH");
+    assert.deepEqual(harness.requests[0].fields, { name: "Updated", description: "" });
+  } finally { harness.restore(); }
+});
+
+test("observed metadata changes invalidate an open project edit until reopened", async () => {
+  const harness = settingsHarness();
+  try {
+    button(harness.render(), "Edit project").props.onClick();
+    harness.setProject({ name: "Changed externally" });
+    submitSettings(harness.render()); await flush();
+    assert.equal(harness.requests.length, 0);
+    assert.match(renderToStaticMarkup(harness.render()), /changed while you were editing/);
+    button(harness.render(), "Close settings").props.onClick();
+    button(harness.render(), "Edit project").props.onClick();
+    assert.equal(nodes(harness.render()).find(node => node.type === "input").props.defaultValue, "Changed externally");
+    submitSettings(harness.render()); await flush();
+    assert.equal(harness.requests.length, 1);
+  } finally { harness.restore(); }
+});
+
+test("archive and restore PATCH only the inventory flag and preserve an open metadata draft", async () => {
+  const harness = settingsHarness();
+  try {
+    button(harness.render(), "Edit project").props.onClick();
+    button(harness.render(), "Archive project").props.onClick(); await flush();
+    harness.setProject({ archived: true });
+    const tree = harness.render();
+    assert.ok(button(tree, "Save project settings"));
+    assert.equal(nodes(tree).find(node => node.type === "textarea").props.defaultValue, "Before");
+    assert.match(renderToStaticMarkup(tree), /Already queued or running assessments continue/);
+    button(tree, "Restore project").props.onClick(); await flush();
+    assert.deepEqual(harness.requests.map(request => request.fields), [{ archived: true }, { archived: false }]);
+    assert.equal(harness.refreshed(), 2);
+    assert.ok(button(harness.render(), "Save project settings"));
+  } finally { harness.restore(); }
+});
 
 function controlledState() {
   const original = React.useState;

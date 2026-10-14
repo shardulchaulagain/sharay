@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { api, ApiError, date, laboratoryScope, localDateTime, post, scopeActionError, scopeIsActive, type Assessment, type Collection, type Project, type Scope, type Target, type User } from "./api";
+import { api, ApiError, date, laboratoryScope, localDateTime, post, projectFields, scopeActionError, scopeIsActive, type Assessment, type Collection, type Project, type Scope, type Target, type User } from "./api";
 import { Badge, Empty, ErrorNotice, Icon, Loading, Panel, SectionHead, useResource } from "./components";
 import { AssessmentTable } from "./assessments";
 import ScopePreview from "./scope-preview";
@@ -14,14 +14,14 @@ export default function Projects({ user, revision, refresh, openAssessment }: { 
   const resource = useResource<Collection<Project>>("/projects?limit=100", revision);
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const data = new FormData(event.currentTarget); setBusy(true); setError(undefined);
-    try { const project = await post<Project>("/projects", { name: data.get("name"), description: data.get("description") }); refresh(); setCreating(false); setSelected(project.id); }
+    try { const project = await post<Project>("/projects", projectFields(String(data.get("name") ?? ""), String(data.get("description") ?? ""))); refresh(); setCreating(false); setSelected(project.id); }
     catch (error) { setError(error instanceof Error ? error : new Error("Project creation failed.")); } finally { setBusy(false); }
   }
   if (selected) return <ProjectDetail id={selected} user={user} revision={revision} refresh={refresh} back={() => setSelected(undefined)} openAssessment={openAssessment}/>;
   return <>
     <SectionHead eyebrow="WORKSPACE / PROJECTS" title="Projects" action={user.role !== "viewer" && <button className="primary" onClick={() => setCreating(value => !value)}><Icon name={creating ? "close" : "plus"}/>{creating ? "Close form" : "New project"}</button>}>Keep targets, scope and assessment history together.</SectionHead>
-    {creating && <Panel title="Create a project"><form className="project-form" onSubmit={create}><label>Project name<input name="name" placeholder="e.g. Local API laboratory" required maxLength={160}/></label><label>Description<textarea name="description" placeholder="What are you assessing, and why?" maxLength={2000} rows={3}/></label><ErrorNotice error={error}/><button className="primary" disabled={busy}>{busy ? "Creating…" : "Create project"}<Icon name="arrow"/></button></form></Panel>}
-    {resource.loading ? <Loading/> : resource.error ? <ErrorNotice error={resource.error}/> : <Panel title="All projects" action={<span className="muted">{resource.data?.total ?? resource.data?.items.length} projects</span>}>{!resource.data?.items.length ? <Empty title="Give your work a home" action={user.role !== "viewer" && <button className="secondary" onClick={() => setCreating(true)}><Icon name="plus" size={16}/>Create your first project</button>}>A project groups your authorized targets, assessments, evidence and remediation.</Empty> : <div className="project-list">{resource.data.items.map(project => <button key={project.id} className="project-row" onClick={() => setSelected(project.id)}><span className="project-icon"><Icon name="projects" size={22}/></span><span><strong>{project.name}</strong><small>{project.description || "No description"}</small></span><span className="project-date">Created {date(project.created_at)}</span><Icon name="arrow"/></button>)}</div>}</Panel>}
+    {creating && <Panel title="Create a project"><form className="project-form" onSubmit={create}><label>Project name<input name="name" placeholder="e.g. Local API laboratory" required maxLength={320}/></label><label>Description<textarea name="description" placeholder="What are you assessing, and why?" maxLength={8000} rows={3}/></label><ErrorNotice error={error}/><button className="primary" disabled={busy}>{busy ? "Creating…" : "Create project"}<Icon name="arrow"/></button></form></Panel>}
+    {resource.loading ? <Loading/> : resource.error ? <ErrorNotice error={resource.error}/> : <Panel title="All projects" action={<span className="muted">{resource.data?.total ?? resource.data?.items.length} projects</span>}>{!resource.data?.items.length ? <Empty title="Give your work a home" action={user.role !== "viewer" && <button className="secondary" onClick={() => setCreating(true)}><Icon name="plus" size={16}/>Create your first project</button>}>A project groups your authorized targets, assessments, evidence and remediation.</Empty> : <div className="project-list">{resource.data.items.map(project => <button key={project.id} className="project-row" onClick={() => setSelected(project.id)}><span className="project-icon"><Icon name="projects" size={22}/></span><span><strong>{project.name}{project.archived && " · Archived"}</strong><small>{project.description || "No description"}</small></span><span className="project-date">Created {date(project.created_at)}</span><Icon name="arrow"/></button>)}</div>}</Panel>}
   </>;
 }
 
@@ -38,6 +38,7 @@ function ProjectDetail({ id, user, revision, refresh, back, openAssessment }: { 
     <button className="text-button back-button" onClick={back}>← All projects</button>
     <SectionHead eyebrow="PROJECT WORKSPACE" title={project.name} action={canManage && !project.archived && <button className="primary" onClick={() => { setAdding(value => !value); setEditing(undefined); setLaunch(undefined); }}><Icon name={adding ? "close" : "plus"}/>{adding ? "Close form" : "Register target"}</button>}>{project.description || "Authorized targets and assessment history."}</SectionHead>
     {project.archived && <div className="notice">This project is archived. Scope editing, authorization and new assessments are unavailable.</div>}
+    {canManage && <ProjectSettings key={project.id} project={project} refresh={refresh}/>}
     {adding && !project.archived && <TargetRegistration projectId={id} done={() => { setAdding(false); refresh(); }}/>}
     {editing && !project.archived && <TargetRegistration key={`${editing.id}:${editing.scope_version}`} projectId={id} target={editing} done={() => { setEditing(undefined); refresh(); }} cancel={() => setEditing(undefined)}/>}
     {launch && !project.archived && <Launch key={`${launch.id}:${launch.scope_version}`} target={launch} done={assessment => { setLaunch(undefined); refresh(); openAssessment(assessment.id); }} cancel={() => setLaunch(undefined)} reload={() => { setLaunch(undefined); refresh(); }}/>}
@@ -45,6 +46,31 @@ function ProjectDetail({ id, user, revision, refresh, back, openAssessment }: { 
     <Panel title="Assessment history">{project.assessments?.length ? <AssessmentTable items={project.assessments} open={openAssessment}/> : <p className="panel-note">No assessments for this project yet.</p>}</Panel>
     <div className="notice">Targets can include hostnames and IP addresses. The current safe HTTP worker runs approved literal 127.0.0.1 and [::1] targets, with header inspection and TLS metadata for HTTPS. DNS queries are skipped for literal IP targets. Authenticated testing and intrusive profiles remain unavailable.</div>
   </>;
+}
+
+function ProjectSettings({ project, refresh }: { project: Project; refresh: () => void }) {
+  const [editing, setEditing] = useState<{ name: string; description: string }>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<Error>();
+  async function update(fields: { name?: string; description?: string; archived?: boolean }) {
+    setBusy(true); setError(undefined);
+    try { await api(`/projects/${encodeURIComponent(project.id)}`, { method: "PATCH", body: JSON.stringify(fields) }); refresh(); if (fields.name !== undefined) setEditing(undefined); }
+    catch (error) { setError(error instanceof Error ? error : new Error("Project update failed.")); } finally { setBusy(false); }
+  }
+  function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(undefined);
+    const data = new FormData(event.currentTarget);
+    try {
+      if (editing?.name !== project.name || editing?.description !== project.description) throw new Error("Project details changed while you were editing. Close settings and reopen them to review the current values.");
+      void update(projectFields(String(data.get("name") ?? ""), String(data.get("description") ?? "")));
+    }
+    catch (error) { setError(error instanceof Error ? error : new Error("Invalid project settings.")); }
+  }
+  return <Panel title="Project settings" action={<button className="secondary compact" onClick={() => { setEditing(value => value ? undefined : { name: project.name, description: project.description }); setError(undefined); }} disabled={busy} aria-expanded={!!editing}>{editing ? "Close settings" : "Edit project"}</button>}>
+    {editing ? <form className="project-form" onSubmit={save} aria-busy={busy}><label>Project name<input name="name" defaultValue={editing.name} required maxLength={320} disabled={busy}/></label><label>Description<textarea name="description" defaultValue={editing.description} maxLength={8000} rows={4} disabled={busy}/><small>Up to 4000 characters. Clear this field to remove the description.</small></label><ErrorNotice error={error}/><button className="primary" disabled={busy}>{busy ? "Saving…" : "Save project settings"}</button></form> : <ErrorNotice error={error}/>}
+    <p className="panel-note">Archiving preserves targets and assessment history, and blocks target changes and new assessments. Already queued or running assessments continue. Restoring keeps the existing scope and authorization requirements.</p>
+    <div className="form-actions"><button className="secondary" onClick={() => { void update({ archived: !project.archived }); }} disabled={busy}>{busy ? "Updating…" : project.archived ? "Restore project" : "Archive project"}</button></div>
+  </Panel>;
 }
 
 function TargetRegistration({ projectId, target, done, cancel }: { projectId: string; target?: Target; done: () => void; cancel?: () => void }) {
