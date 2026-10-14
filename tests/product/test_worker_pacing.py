@@ -1,16 +1,25 @@
 """Synthetic worker jobs preserve origin pacing without real sockets or wall-clock waits."""
 
 import http.client
+import json
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from aegis.config import Settings
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import event, inspect, select, text
+from sqlalchemy.exc import OperationalError
+
+from aegis.config import ROOT, Settings
 from aegis.database import create_database
-from aegis.models import Assessment, Organization, Project, Target, User
-from aegis.worker import run_one
+from aegis.models import Assessment, Base, Organization, Project, Target, User
+from aegis.worker import PersistentRequestStarts, run_one
 
 
 class Clock:
@@ -63,7 +72,9 @@ class WorkerPacingTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory(prefix="worker-pacing-")
         self.addCleanup(folder.cleanup)
-        engine, self.sessions = create_database(Settings(Path(folder.name), start_worker=False))
+        self.data_dir = Path(folder.name)
+        engine, self.sessions = create_database(Settings(self.data_dir, start_worker=False))
+        self.engine = engine
         self.addCleanup(engine.dispose)
         with self.sessions() as db:
             organization = Organization(name="Synthetic pacing fixture")
@@ -84,7 +95,6 @@ class WorkerPacingTests(unittest.TestCase):
             db.commit()
         self.clock, self.requests, self.connection_starts, self.counter = Clock(), [], [], 0
         for context in (
-            patch("aegis.worker._request_starts", {}, create=True),
             patch("packages.scanner_adapters.time.monotonic", side_effect=lambda: self.clock.now),
             patch("packages.scanner_adapters.time.sleep", side_effect=self.clock.sleep),
             patch(
@@ -150,6 +160,43 @@ class WorkerPacingTests(unittest.TestCase):
     def status(self, identifier):
         with self.sessions() as db:
             return db.get(Assessment, identifier).status
+
+    def restarted_worker_requests(self):
+        # A fresh interpreter cannot inherit the first worker's origin map.
+        code = """
+import contextlib, json, sys
+from datetime import datetime
+from pathlib import Path
+from unittest.mock import patch
+from aegis.config import Settings
+from aegis.database import create_database
+from aegis.worker import run_one
+from tests.product.test_worker_pacing import Clock, Connection
+engine, sessions = create_database(Settings(Path(sys.argv[1]), start_worker=False), migrate=False)
+clock, requests = Clock(), []
+clock.utc = datetime.fromisoformat(sys.argv[2])
+try:
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch('packages.scanner_adapters.time.monotonic', side_effect=lambda: clock.now))
+        stack.enter_context(patch('packages.scanner_adapters.time.sleep', side_effect=clock.sleep))
+        stack.enter_context(patch('packages.scanner_adapters._connection', side_effect=lambda destination, timeout: Connection(clock, destination, requests)))
+        stack.enter_context(patch('socket.socket', side_effect=AssertionError('No real sockets')))
+        stack.enter_context(patch('socket.getaddrinfo', side_effect=AssertionError('No DNS')))
+        for module in ('packages.scanner_adapters', 'packages.security_policies'):
+            stack.enter_context(patch(module + '.datetime')).now.side_effect = clock.wall
+        assert run_one(sessions)
+    print(json.dumps(requests))
+finally:
+    engine.dispose()
+"""
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", code, str(self.data_dir), self.clock.utc.isoformat()],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        return json.loads(result.stdout)
 
     def test_separate_target_ids_and_paths_cannot_reset_same_origin_rate(self):
         jobs = [self.enqueue("/one"), self.enqueue("/two")]
@@ -257,6 +304,201 @@ class WorkerPacingTests(unittest.TestCase):
             run_one(self.sessions)
         self.assertEqual(len(self.requests), 2)
         self.assertGreaterEqual(self.requests[1][2] - self.requests[0][2], 1)
+
+    def test_new_worker_process_cannot_reset_the_prior_origins_cooldown(self):
+        self.enqueue()
+        self.enqueue()
+        run_one(self.sessions)
+        restarted = self.restarted_worker_requests()
+        self.assertEqual(len(restarted), 1)
+        self.assertGreaterEqual(restarted[0][2] - self.requests[0][2], 1)
+
+    def test_faster_approval_after_restart_preserves_the_prior_interval(self):
+        self.enqueue(rate=1)
+        self.enqueue(rate=5)
+        run_one(self.sessions)
+        restarted = self.restarted_worker_requests()
+        self.assertEqual(len(restarted), 1)
+        self.assertGreaterEqual(restarted[0][2] - self.requests[0][2], 1)
+
+    def test_failed_attempt_is_still_paced_after_worker_process_loss(self):
+        self.enqueue()
+        self.enqueue()
+        with patch("packages.scanner_adapters._connection", side_effect=OSError("Synthetic failure")):
+            run_one(self.sessions)
+        restarted = self.restarted_worker_requests()
+        self.assertEqual(len(restarted), 1)
+        self.assertGreaterEqual(restarted[0][2] - 100, 1)
+
+    def test_warm_worker_does_not_reset_a_cold_fence_after_idle_time(self):
+        self.enqueue()
+        self.enqueue()
+        writes = []
+
+        def record(connection, cursor, statement, parameters, context, executemany):
+            if statement.startswith(("INSERT INTO origin_cooldowns", "UPDATE origin_cooldowns")):
+                writes.append(statement)
+
+        event.listen(self.engine, "before_cursor_execute", record)
+        self.addCleanup(event.remove, self.engine, "before_cursor_execute", record)
+        run_one(self.sessions)
+        pacing = PersistentRequestStarts(self.sessions)
+        run_one(self.sessions, request_starts=pacing)
+        self.clock.now += 3
+        self.enqueue()
+        run_one(self.sessions, request_starts=pacing)
+        self.assertEqual(len(self.requests), 3)
+        for request, expected in zip(self.requests, (100, 101, 104)):
+            self.assertAlmostEqual(request[2], expected, places=7)
+        self.assertEqual(len(writes), 1)
+
+    def test_persistence_failure_starts_no_connection_and_does_not_cache_a_slot(self):
+        failed = self.enqueue()
+        pacing = PersistentRequestStarts(self.sessions)
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TRIGGER cooldown_failure BEFORE INSERT ON origin_cooldowns "
+                "BEGIN SELECT RAISE(ABORT, 'Synthetic fixture write failure'); END"
+            )
+        run_one(self.sessions, request_starts=pacing)
+        self.assertEqual(self.status(failed), "failed")
+        self.assertEqual(self.connection_starts, [])
+        self.assertEqual(pacing, {})
+
+    def test_invalid_stored_interval_fails_before_connection(self):
+        for interval in (float("inf"), -1, 0, 0.1):
+            with self.subTest(interval=interval):
+                failed = self.enqueue()
+                with self.engine.begin() as connection:
+                    connection.exec_driver_sql("DELETE FROM origin_cooldowns")
+                    connection.exec_driver_sql(
+                        "INSERT INTO origin_cooldowns(origin, interval) VALUES (?, ?)",
+                        ("http://127.0.0.1:8766", interval),
+                    )
+                run_one(self.sessions)
+                self.assertEqual(self.status(failed), "failed")
+        self.assertEqual(self.connection_starts, [])
+
+    def test_pacing_lock_wait_is_bounded_and_restores_the_connection_timeout(self):
+        pacing = PersistentRequestStarts(self.sessions)
+        with self.engine.connect() as locked:
+            locked.exec_driver_sql("BEGIN IMMEDIATE")
+            started = time.perf_counter()
+            with self.assertRaises(OperationalError):
+                pacing["http://127.0.0.1:8766"] = 100, 1
+            self.assertLess(time.perf_counter() - started, 0.5)
+            self.assertEqual(pacing, {})
+            locked.rollback()
+        with self.sessions() as db:
+            self.assertEqual(db.scalar(text("PRAGMA busy_timeout")), 10000)
+
+    def test_cancellation_during_reservation_sends_no_request(self):
+        cancelled = self.enqueue()
+        clock = self.clock
+
+        class DelayedStarts(dict):
+            def __setitem__(self, origin, slot):
+                super().__setitem__(origin, slot)
+                clock.now += 0.2
+
+        run_one(
+            self.sessions,
+            stopping=lambda: self.clock.now >= 100.1,
+            request_starts=DelayedStarts(),
+        )
+        self.assertEqual(self.status(cancelled), "cancelled")
+        self.assertEqual(self.connection_starts, [])
+
+    def test_persistence_time_consumes_the_execution_budget_before_connect(self):
+        timed_out = self.enqueue()
+        clock = self.clock
+
+        class DelayedStarts(dict):
+            def __setitem__(self, origin, slot):
+                super().__setitem__(origin, slot)
+                clock.now += 16
+
+        run_one(self.sessions, request_starts=DelayedStarts())
+        self.assertEqual(self.status(timed_out), "failed")
+        self.assertEqual(self.connection_starts, [])
+
+    def test_expiry_during_reservation_starts_no_connection(self):
+        expired = self.enqueue(lifetime=0.1)
+        clock = self.clock
+
+        class DelayedStarts(dict):
+            def __setitem__(self, origin, slot):
+                super().__setitem__(origin, slot)
+                clock.now += 0.2
+
+        run_one(self.sessions, request_starts=DelayedStarts())
+        self.assertEqual(self.status(expired), "failed")
+        self.assertEqual(self.connection_starts, [])
+
+    def test_connection_timeout_uses_budget_remaining_after_persistence(self):
+        self.enqueue(lifetime=1.5)
+        clock = self.clock
+        timeouts = []
+
+        class DelayedStarts(dict):
+            def __setitem__(self, origin, slot):
+                super().__setitem__(origin, slot)
+                clock.now += 1
+
+        def connect(destination, timeout):
+            timeouts.append(timeout)
+            return self.connect(destination, timeout)
+
+        with patch("packages.scanner_adapters._connection", side_effect=connect):
+            run_one(self.sessions, request_starts=DelayedStarts())
+        self.assertEqual(len(timeouts), 1)
+        self.assertLessEqual(timeouts[0], 0.5)
+
+    def test_additive_migration_preserves_old_records_and_is_repeatable(self):
+        self.enqueue()
+        run_one(self.sessions)
+        tables = [table for table in Base.metadata.sorted_tables if table.name != "origin_cooldowns"]
+
+        def snapshot(connection):
+            return {
+                table.name: [
+                    dict(row)
+                    for row in connection.execute(
+                        select(table).order_by(*table.primary_key.columns)
+                    ).mappings()
+                ]
+                for table in tables
+            }
+
+        with tempfile.TemporaryDirectory(prefix="old-pacing-schema-") as folder:
+            settings = Settings(Path(folder), start_worker=False)
+            old_engine, _ = create_database(settings, migrate=False)
+            try:
+                config = Config(str(ROOT / "alembic.ini"))
+                config.set_main_option("script_location", str(ROOT / "migrations"))
+                with self.engine.connect() as source, old_engine.begin() as destination:
+                    config.attributes["connection"] = destination
+                    command.upgrade(config, "0001_desktop")
+                    expected = snapshot(source)
+                    for table in tables:
+                        if expected[table.name]:
+                            destination.execute(table.insert(), expected[table.name])
+                    self.assertNotIn("origin_cooldowns", inspect(destination).get_table_names())
+                    self.assertEqual(snapshot(destination), expected)
+            finally:
+                old_engine.dispose()
+            for _ in range(2):
+                migrated, _ = create_database(settings)
+                try:
+                    with migrated.connect() as connection:
+                        self.assertIn("origin_cooldowns", inspect(connection).get_table_names())
+                        self.assertEqual(snapshot(connection), expected)
+                        self.assertEqual(
+                            connection.scalar(text("SELECT version_num FROM alembic_version")),
+                            "0002_origin_cooldowns",
+                        )
+                finally:
+                    migrated.dispose()
 
 
 if __name__ == "__main__":

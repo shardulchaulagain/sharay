@@ -21,7 +21,7 @@ from packages.security_policies import (
     validate_scope,
 )
 
-ADAPTER_VERSION = "1.1.3"
+ADAPTER_VERSION = "1.1.4"
 MAX_REQUESTS = 5
 MAX_SECONDS = 15
 REQUEST_TIMEOUT = 3
@@ -533,13 +533,15 @@ def scan(
             guard()
             # Expiry and scope are revalidated immediately before every connection.
             destination = check_url(policy, destination.url)
+            # Persistence may take time: recheck guards and timeout after the reservation.
+            pacing[destination.origin] = time.monotonic(), interval
+            guard()
+            destination = check_url(policy, destination.url)
             timeout = min(
                 REQUEST_TIMEOUT,
                 MAX_SECONDS - (time.monotonic() - started),
                 (policy.expires_at - datetime.now(UTC)).total_seconds(),
             )
-            # Reserve before connecting, including TLS-only and failed connection attempts.
-            pacing[destination.origin] = time.monotonic(), interval
             connection = _connection(destination, timeout)
             performed += 1
             if destination.scheme == "https" and "tls" in policy.categories:

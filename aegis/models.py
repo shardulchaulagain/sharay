@@ -104,6 +104,12 @@ class Assessment(Base):
     checks: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
 
 
+class OriginCooldown(Base):
+    __tablename__ = "origin_cooldowns"
+    origin: Mapped[str] = mapped_column(Text, primary_key=True)
+    interval: Mapped[float] = mapped_column(Float)
+
+
 class Observation(Base):
     __tablename__ = "observations"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)

@@ -3,11 +3,13 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 
 from sqlalchemy import select, text
 
@@ -15,13 +17,59 @@ from aegis.audit import audit
 from aegis.config import ROOT, Settings
 from aegis.database import create_database
 from aegis.lifecycle import watch_parent_stdin
-from aegis.models import Assessment, Finding, FindingEvidence, FindingHistory, Observation
+from aegis.models import Assessment, Finding, FindingEvidence, FindingHistory, Observation, OriginCooldown
 from packages.reporting import redact
 from packages.scanner_adapters import scan
 from packages.security_policies import ScopePolicy
 
-# ponytail: one local worker; durable shared pacing is required before multiworker/live release.
-_request_starts: dict[str, tuple[float, float]] = {}
+
+@contextmanager
+def _short_database_wait(db):
+    # Restore before the session returns its connection to the shared pool.
+    connection = db.connection().connection.driver_connection
+    previous = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+    connection.execute("PRAGMA busy_timeout=50")
+    try:
+        yield
+    finally:
+        connection.execute(f"PRAGMA busy_timeout={previous}")
+
+
+class PersistentRequestStarts(dict[str, tuple[float, float]]):
+    """One serialized worker: durable intervals, conservative monotonic restart fences."""
+
+    def __init__(self, sessions):
+        super().__init__()
+        self.sessions = sessions
+
+    @staticmethod
+    def _interval(value):
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0.2:
+            raise ValueError("Invalid stored request cooldown")
+        return float(value)
+
+    def get(self, origin, default=None):
+        if origin not in self:
+            with self.sessions() as db, _short_database_wait(db):
+                row = db.get(OriginCooldown, origin)
+                if row is not None:
+                    # Wall-clock/reboot elapsed time is not trusted: wait one full cooldown once.
+                    super().__setitem__(origin, (time.monotonic(), self._interval(row.interval)))
+        return super().get(origin, default)
+
+    def __setitem__(self, origin, slot):
+        interval = self._interval(slot[1])
+        previous = super().get(origin)
+        if previous is None or previous[1] != interval:
+            with self.sessions() as db:
+                with _short_database_wait(db):
+                    db.execute(text("BEGIN IMMEDIATE"))
+                    db.merge(OriginCooldown(origin=origin, interval=interval))
+                    db.flush()
+                # Persist before connection; failed writes never update the in-memory slot.
+                db.commit()
+        # GET refreshes the same durable interval without another database write.
+        super().__setitem__(origin, (max(slot[0], time.monotonic()), interval))
 
 
 def evidence_hash(value: dict) -> str:
@@ -40,7 +88,7 @@ def mark_interrupted(sessions):
         db.commit()
 
 
-def run_one(sessions, stopping=lambda: False) -> bool:
+def run_one(sessions, stopping=lambda: False, *, request_starts=None) -> bool:
     with sessions() as db:
         db.execute(text("BEGIN IMMEDIATE"))
         row = db.scalar(
@@ -84,7 +132,13 @@ def run_one(sessions, stopping=lambda: False) -> bool:
                 db.commit()
 
     try:
-        result = scan(scope, target_url, cancelled, emit, request_starts=_request_starts)
+        result = scan(
+            scope,
+            target_url,
+            cancelled,
+            emit,
+            request_starts=PersistentRequestStarts(sessions) if request_starts is None else request_starts,
+        )
     except Exception as exc:
         # Only fixed builtin names are retained: messages and custom class names can contain secrets.
         error_class = {
@@ -333,6 +387,8 @@ def main():
         except BlockingIOError:
             return 2
         engine, sessions = create_database(settings, migrate=False)
+        # ponytail: one locked worker per database; distributed/workspace pacing still needs coordination.
+        request_starts = PersistentRequestStarts(sessions)
         stop = [False]
 
         def request_stop(_signum, _frame):
@@ -345,7 +401,7 @@ def main():
                 try:
                     mark_interrupted(sessions)
                     while not stop[0]:
-                        if not run_one(sessions, lambda: stop[0]):
+                        if not run_one(sessions, lambda: stop[0], request_starts=request_starts):
                             time.sleep(0.25)
                 finally:
                     mark_interrupted(sessions)
