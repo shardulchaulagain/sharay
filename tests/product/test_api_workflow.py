@@ -202,6 +202,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/overview").json()["completed_assessments"], 2)
         self.assertEqual(self.client.get(f"/api/v1/projects/{project['id']}").status_code, 200)
 
+    def test_non_object_finding_snapshots_do_not_crash_assessment_or_exports(self):
+        target, _ = self.target()
+        assessment = self.launch(target)
+        self.assertTrue(run_one(self.sessions))
+        route = f"/api/v1/assessments/{assessment['id']}"
+        original = self.client.get(route).json()["findings"]
+        expected = {item["id"]: (item["title"], item["status"]) for item in original}
+        for data in (None, "title status", ["title", "status"], 42, False, []):
+            with self.subTest(data=data):
+                with self.sessions() as db:
+                    db.execute(
+                        text("UPDATE finding_evidence SET data=:data WHERE assessment_id=:id"),
+                        {"data": json.dumps(data), "id": assessment["id"]},
+                    )
+                    db.commit()
+                response = self.client.get(route)
+                self.assertEqual(response.status_code, 200, response.text)
+                actual = response.json()["findings"]
+                self.assertEqual({item["id"]: (item["title"], item["status"]) for item in actual}, expected)
+                self.assertTrue(all(item["evidence"][0]["data"] == data for item in actual))
+                for format in ("json", "html", "markdown", "pdf"):
+                    report = self.client.get(f"/api/v1/reports/{assessment['id']}?format={format}")
+                    self.assertEqual(report.status_code, 200)
+
     def test_cross_org_and_role_denial(self):
         target, project = self.target()
         assessment = self.launch(target)

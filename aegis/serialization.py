@@ -133,6 +133,8 @@ def finding_view(db: Session, row: Finding, assessment_id: str | None = None) ->
     if assessment_id and evidence:
         snapshot = evidence[-1]["data"]
         result["current_status"] = row.status
+        if not isinstance(snapshot, dict):
+            return result
         for field in (
             "status",
             "title",
