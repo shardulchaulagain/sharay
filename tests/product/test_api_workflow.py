@@ -112,6 +112,59 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()
 
+    def test_broad_inventory_authorization_is_versioned_and_cannot_queue_live_execution(self):
+        from tests.product.test_broad_scope import broad_scope
+
+        project = self.client.post("/api/v1/projects", json={"name": "Synthetic broad inventory"}).json()
+        with (
+            patch("socket.getaddrinfo", side_effect=AssertionError("No DNS in inventory")),
+            patch("packages.scanner_adapters._connection") as connect,
+        ):
+            for host in ("example.com", "localhost", "192.168.1.50", "2001:db8::1"):
+                scope = broad_scope(host)
+                url = scope["allowed_origins"][0] + "/"
+                registered = self.client.post(
+                    f"/api/v1/projects/{project['id']}/targets", json={"url": url, "scope": scope}
+                )
+                self.assertEqual(registered.status_code, 201, registered.text)
+                target = registered.json()
+                self.assertIn("execution requires", target["execution_blocker"])
+                approved = self.client.post(
+                    f"/api/v1/targets/{target['id']}/approve",
+                    json={
+                        "expected_scope_version": 1,
+                        "acknowledgement": "I authorize this target within the displayed scope",
+                    },
+                )
+                self.assertEqual(approved.status_code, 200, approved.text)
+                self.assertEqual(approved.json()["verification_status"], "operator_authorized")
+                rejected = self.client.post(
+                    "/api/v1/assessments",
+                    json={
+                        "target_id": target["id"],
+                        "expected_scope_version": 1,
+                        "idempotency_key": secrets.token_hex(16),
+                    },
+                )
+                self.assertEqual(rejected.status_code, 422, rejected.text)
+                self.assertIn("execution requires", rejected.json()["detail"])
+                updated = self.client.patch(
+                    f"/api/v1/targets/{target['id']}/scope",
+                    json={
+                        "url": url,
+                        "scope": scope | {"excluded_paths": ["/private"]},
+                        "expected_scope_version": 1,
+                    },
+                )
+                self.assertEqual(updated.status_code, 200, updated.text)
+                self.assertEqual(updated.json()["scope_version"], 2)
+                self.assertIsNone(updated.json()["authorized_by"])
+                self.assertEqual(updated.json()["verification_status"], "awaiting_authorization")
+            connect.assert_not_called()
+        self.assertEqual(self.client.get("/api/v1/assessments").json()["total"], 0)
+        with self.sessions() as db:
+            self.assertTrue(verify_audit(db))
+
     def test_real_worker_findings_reports_retest(self):
         target, project = self.target()
         assessment = self.launch(target)

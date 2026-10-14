@@ -42,7 +42,14 @@ from aegis.serialization import (
 )
 from packages.reporting import render_report
 from packages.scanner_adapters import preflight
-from packages.security_policies import PolicyError, ScopePolicy, normalize_url, validate_scope
+from packages.security_policies import (
+    PolicyError,
+    ScopePolicy,
+    check_execution_url,
+    normalize_url,
+    validate_execution_scope,
+    validate_scope,
+)
 from packages.shared_schemas import ProposedToolAction, adapter_roadmap
 
 COOKIE = "aegis_session"
@@ -491,14 +498,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if data.expected_scope_version != row.scope_version:
             raise HTTPException(409, "Scope changed; reload and review the current version")
         validate_scope(row.scope, row.url)
-        if data.acknowledgement != "I authorize this controlled laboratory target":
-            raise HTTPException(422, "Explicit controlled laboratory authorization is required")
-        row.verification_status, row.authorized_by, row.approved_at = "verified_lab", user.id, time.time()
+        try:
+            check_execution_url(row.scope, row.url)
+            lab = True
+        except PolicyError:
+            lab = False
+        accepted = {"I authorize this target within the displayed scope"}
+        if lab:
+            accepted.add("I authorize this controlled laboratory target")
+        if data.acknowledgement not in accepted:
+            raise HTTPException(422, "Explicit authorization of this target and displayed scope is required")
+        row.verification_status = "verified_lab" if lab else "operator_authorized"
+        row.authorized_by, row.approved_at = user.id, time.time()
         audit(
             db,
             user.organization_id,
             user.id,
-            "scope.lab_approved",
+            "scope.lab_approved" if lab else "scope.operator_authorized",
             row.id,
             {"scope_version": row.scope_version, "scope": row.scope},
         )
@@ -527,12 +543,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "Project is archived")
         if data.expected_scope_version != target.scope_version:
             raise HTTPException(409, "Scope changed; reload and review the current version")
-        if target.verification_status != "verified_lab" or not target.authorized_by:
+        if (
+            target.verification_status not in {"verified_lab", "operator_authorized"}
+            or not target.authorized_by
+        ):
             audit(db, user.organization_id, user.id, "assessment.authorization_rejected", target.id)
             db.commit()
-            raise HTTPException(403, "Approve the controlled laboratory scope before assessment")
+            raise HTTPException(403, "Approve the exact target scope before assessment")
         try:
-            validate_scope(target.scope, target.url)
+            validate_execution_scope(target.scope, target.url)
         except PolicyError as exc:
             audit(
                 db,

@@ -43,6 +43,13 @@ def project_view(row: Project) -> dict[str, Any]:
 
 
 def target_view(row: Target) -> dict[str, Any]:
+    from packages.security_policies import PolicyError, check_execution_url
+
+    try:
+        check_execution_url(row.scope, row.url)
+        execution_blocker = None
+    except PolicyError as exc:
+        execution_blocker = str(exc)
     return {
         "id": row.id,
         "project_id": row.project_id,
@@ -50,6 +57,7 @@ def target_view(row: Target) -> dict[str, Any]:
         "scope": row.scope,
         "scope_version": row.scope_version,
         "verification_status": row.verification_status,
+        "execution_blocker": execution_blocker,
         "authorized_by": row.authorized_by,
         "approved_at": timestamp(row.approved_at),
         "created_at": timestamp(row.created_at),

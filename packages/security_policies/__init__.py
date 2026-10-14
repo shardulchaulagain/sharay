@@ -1,4 +1,4 @@
-"""Deterministic, deny-by-default scope for the initial loopback laboratory."""
+"""Deterministic scope registration and the independently checked execution boundary."""
 
 import ipaddress
 import re
@@ -12,6 +12,29 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 class PolicyError(ValueError):
     """The proposed action is outside the implemented authorization boundary."""
+
+
+def _host(value: str) -> str:
+    """Canonical IPs or ASCII DNS names; never a resolver's alternate numeric spelling."""
+    if not value or len(value) > 253 or "%" in value:
+        raise PolicyError("Use a canonical IP address or ASCII hostname without a zone identifier.")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        labels = value.split(".")
+        if (
+            not value.isascii()
+            or value != value.lower()
+            or not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*", value)
+            or any(len(label) > 63 or label.startswith("-") or label.endswith("-") for label in labels)
+            or not re.search(r"[a-z]", labels[-1])
+            or re.fullmatch(r"0x[0-9a-f]+", labels[-1])
+        ):
+            raise PolicyError("Use a canonical lowercase ASCII hostname (punycode for international names).")
+    else:
+        if str(address) != value or (address.version == 6 and address.ipv4_mapped is not None):
+            raise PolicyError("Use a canonical IP address without an IPv4-mapped representation.")
+    return value
 
 
 def _path(value: str) -> str:
@@ -36,7 +59,7 @@ def _path(value: str) -> str:
 
 
 def normalize_url(value: str) -> str:
-    """Accept only unambiguous HTTP(S) URLs with literal canonical loopback IPs."""
+    """Normalize an explicit HTTP(S) target without resolving or contacting it."""
     if not isinstance(value, str) or len(value) > 2048:
         raise PolicyError("A URL string of at most 2048 characters is required.")
     if any(ord(c) <= 32 or ord(c) == 127 for c in value) or "\\" in value:
@@ -49,25 +72,22 @@ def normalize_url(value: str) -> str:
             raise PolicyError("Credentials in URLs are forbidden.")
         if parsed.query or parsed.fragment or "?" in value or "#" in value:
             raise PolicyError("Query strings and fragments are unavailable in the safe profile.")
-        host = parsed.hostname or ""
-        address = ipaddress.ip_address(host)
-        if str(address) != host or host not in {"127.0.0.1", "::1"}:
-            raise PolicyError("This increment permits only literal 127.0.0.1 or ::1 labs.")
+        host = _host(parsed.hostname or "")
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         if not 1 <= port <= 65535:
             raise PolicyError("Invalid target port.")
         # Reject alternate authority representations, trailing colons and port zero.
-        authority_host = f"[{host}]" if address.version == 6 else host
+        authority_host = f"[{host}]" if ":" in host else host
         default_port = 443 if parsed.scheme == "https" else 80
         expected = authority_host + (f":{parsed.port}" if parsed.port is not None else "")
         if parsed.netloc != expected or parsed.port == 0:
-            raise PolicyError("The URL authority must use its canonical literal representation.")
+            raise PolicyError("The URL authority must use its canonical representation.")
         authority = authority_host + (f":{port}" if port != default_port else "")
         return urlunsplit((parsed.scheme, authority, _path(parsed.path or "/"), "", ""))
     except (ValueError, UnicodeError) as exc:
         if isinstance(exc, PolicyError):
             raise
-        raise PolicyError("Invalid URL or literal address.") from exc
+        raise PolicyError("Invalid URL or target address.") from exc
 
 
 StopCondition = Literal["operator_cancel", "scope_expired", "policy_violation"]
@@ -86,16 +106,16 @@ def _stop_conditions() -> list[StopCondition]:
 class ScopePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    hosts: list[StrictString] = Field(min_length=1, max_length=2)
-    allowed_origins: list[StrictString] = Field(min_length=1, max_length=8)
+    hosts: list[StrictString] = Field(min_length=1, max_length=32)
+    allowed_origins: list[StrictString] = Field(min_length=1, max_length=64)
     allowed_paths: list[StrictString] = Field(default_factory=lambda: ["/"], min_length=1, max_length=32)
     excluded_paths: list[StrictString] = Field(default_factory=list, max_length=32)
-    allowed_cidrs: list[StrictString] = Field(min_length=1, max_length=2)
+    allowed_cidrs: list[StrictString] = Field(default_factory=list, max_length=32)
     categories: list[TestCategory] = Field(default_factory=_default_categories, min_length=1, max_length=3)
     authenticated: Literal[False] = False
     credential_refs: list[StrictString] = Field(default_factory=list, max_length=0)
-    request_rate: Annotated[float, Field(strict=True, gt=0, le=5)] = 1
-    max_concurrency: Literal[1] = 1
+    request_rate: Annotated[float, Field(strict=True, gt=0, le=10)] = 1
+    max_concurrency: Annotated[int, Field(strict=True, ge=1, le=5)] = 1
     starts_at: datetime
     expires_at: datetime
     intrusive: Literal[False] = False
@@ -122,9 +142,11 @@ class ScopePolicy(BaseModel):
 
     @field_validator("hosts")
     @classmethod
-    def literal_hosts(cls, values: list[str]) -> list[str]:
-        if any(v not in {"127.0.0.1", "::1"} for v in values) or len(values) != len(set(values)):
-            raise ValueError("Hosts must be unique literal 127.0.0.1 or ::1 addresses.")
+    def canonical_hosts(cls, values: list[str]) -> list[str]:
+        for value in values:
+            _host(value)
+        if len(values) != len(set(values)):
+            raise ValueError("Hosts must be unique.")
         return values
 
     @field_validator("allowed_origins")
@@ -149,8 +171,12 @@ class ScopePolicy(BaseModel):
     @field_validator("allowed_cidrs")
     @classmethod
     def cidrs(cls, values: list[str]) -> list[str]:
-        if any(value not in {"127.0.0.1/32", "::1/128"} for value in values):
-            raise ValueError("Only explicit 127.0.0.1/32 and ::1/128 laboratory addresses are permitted.")
+        for value in values:
+            network = ipaddress.ip_network(value, strict=True)
+            if str(network) != value or "%" in value:
+                raise ValueError("Address ranges must use canonical network CIDR notation.")
+            if network.version == 6 and network.overlaps(ipaddress.ip_network("::ffff:0:0/96")):
+                raise ValueError("IPv4-mapped address ranges are not permitted.")
         if len(values) != len(set(values)):
             raise ValueError("Duplicate address ranges are not permitted.")
         return values
@@ -167,7 +193,7 @@ class ScopePolicy(BaseModel):
         if self.expires_at <= self.starts_at:
             raise ValueError("Scope expiry must follow its start.")
         if (self.expires_at - self.starts_at).total_seconds() > 86400:
-            raise ValueError("Laboratory scopes have a maximum duration of 24 hours.")
+            raise ValueError("Scopes have a maximum duration of 24 hours.")
         if set(self.emergency_stop_conditions) != {
             "operator_cancel",
             "scope_expired",
@@ -178,11 +204,16 @@ class ScopePolicy(BaseModel):
             raise ValueError("Duplicate test categories are not permitted.")
         for origin in self.allowed_origins:
             host = urlsplit(origin).hostname
-            if (
-                host not in self.hosts
-                or f"{host}/{'32' if host == '127.0.0.1' else '128'}" not in self.allowed_cidrs
+            if host not in self.hosts:
+                raise ValueError("Every origin must have an explicitly authorized host.")
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                continue  # Registration does not resolve hostnames or establish execution readiness.
+            if self.allowed_cidrs and not any(
+                address in ipaddress.ip_network(cidr) for cidr in self.allowed_cidrs
             ):
-                raise ValueError("Every origin must have an explicitly authorized host and address.")
+                raise ValueError("Every literal origin must belong to the authorized address ranges.")
         return self
 
 
@@ -214,9 +245,6 @@ def check_url(scope: ScopePolicy | dict, url: str) -> Destination:
     host = parsed.hostname
     if origin not in policy.allowed_origins or host not in policy.hosts:
         raise PolicyError("The destination origin is outside the approved scope.")
-    address = ipaddress.ip_address(host)
-    if not any(address in ipaddress.ip_network(cidr) for cidr in policy.allowed_cidrs):
-        raise PolicyError("The destination address is outside the approved scope.")
     if not any(_matches(parsed.path, path) for path in policy.allowed_paths):
         raise PolicyError("The destination path is outside the approved scope.")
     if any(_matches(parsed.path, path) for path in policy.excluded_paths):
@@ -238,11 +266,35 @@ def validate_scope(scope: ScopePolicy | dict, target_url: str) -> ScopePolicy:
     return policy
 
 
+def check_execution_url(scope: ScopePolicy | dict, url: str) -> Destination:
+    """The current executor is separately verified for exact literal loopback labs."""
+    policy = scope if isinstance(scope, ScopePolicy) else ScopePolicy.model_validate(scope)
+    destination = check_url(policy, url)
+    required_cidr = {"127.0.0.1": "127.0.0.1/32", "::1": "::1/128"}.get(destination.host)
+    if required_cidr is None:
+        raise PolicyError(
+            "Target registered; execution requires verified target ownership, bounded DNS pinning "
+            "and enforced destination egress. These live-target controls are not connected yet. "
+            "Use an explicitly approved 127.0.0.1 or ::1 laboratory for the current safe HTTP profile."
+        )
+    if required_cidr not in policy.allowed_cidrs:
+        raise PolicyError(f"The safe HTTP laboratory profile requires explicit {required_cidr} approval.")
+    return destination
+
+
+def validate_execution_scope(scope: ScopePolicy | dict, target_url: str) -> ScopePolicy:
+    policy = scope if isinstance(scope, ScopePolicy) else ScopePolicy.model_validate(scope)
+    check_execution_url(policy, target_url)
+    return policy
+
+
 __all__ = [
     "Destination",
     "PolicyError",
     "ScopePolicy",
     "check_url",
+    "check_execution_url",
     "normalize_url",
     "validate_scope",
+    "validate_execution_scope",
 ]

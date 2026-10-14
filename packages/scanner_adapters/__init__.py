@@ -17,11 +17,15 @@ from packages.security_policies import (
     Destination,
     PolicyError,
     ScopePolicy,
-    check_url,
-    validate_scope,
+)
+from packages.security_policies import (
+    check_execution_url as check_url,
+)
+from packages.security_policies import (
+    validate_execution_scope as validate_scope,
 )
 
-ADAPTER_VERSION = "1.1.4"
+ADAPTER_VERSION = "1.1.5"
 MAX_REQUESTS = 5
 MAX_SECONDS = 15
 REQUEST_TIMEOUT = 3
@@ -89,7 +93,7 @@ def preflight() -> list[dict]:
         ("gitleaks", "gitleaks"),
         ("metasploit", "msfconsole"),
     ]
-    return [
+    result = [
         {
             "id": "safe_http",
             "name": "SHARAY safe HTTP",
@@ -99,6 +103,7 @@ def preflight() -> list[dict]:
             "status": "implemented",
             "supported_categories": ["http_headers", "tls"],
             "scope": "Explicitly approved literal loopback laboratories only",
+            "guidance": "Register broad scopes in inventory; only explicitly approved literal loopback labs can execute until verified live-target controls are connected.",
             "limits": {
                 "max_requests": MAX_REQUESTS,
                 "max_seconds": MAX_SECONDS,
@@ -109,19 +114,28 @@ def preflight() -> list[dict]:
             },
             "limitations": "TLS uses the operating-system trust store. DNS queries, authenticated testing and external scanner execution are unavailable.",
         }
-    ] + [
-        {
-            "id": name,
-            "name": name,
-            "version": None,
-            "available": bool(shutil.which(command)),
-            "runnable": False,
-            "status": "integration_not_implemented" if shutil.which(command) else "missing",
-            "supported_categories": [],
-            "limitations": "Not executed: adapter and isolated worker policy are not implemented.",
-        }
-        for name, command in tools
     ]
+    for name, command in tools:
+        available = bool(shutil.which(command))
+        result.append(
+            {
+                "id": name,
+                "name": name,
+                "version": None,
+                "available": available,
+                "runnable": False,
+                "status": "integration_not_implemented" if available else "missing",
+                "supported_categories": [],
+                "limitations": "Not executed: adapter and isolated worker policy are not implemented.",
+                "guidance": (
+                    f"Install an approved {name} distribution and make {command} available on PATH. "
+                    if not available
+                    else f"{command} detected on PATH. "
+                )
+                + "Product dispatch still requires its reviewed adapter, verified isolation/resource bounds and enforceable destination policy; executable presence does not enable assessment.",
+            }
+        )
+    return result
 
 
 def _connect(destination: Destination, timeout: float) -> _DeadlineSocket:

@@ -16,10 +16,35 @@ test("scope preview preserves the explicit target boundary and safe profile", ()
   assert.equal(scope.approval_required, true);
 });
 
-test("scope preview rejects non-laboratory destinations and ambiguous URLs", () => {
-  for (const url of ["http://example.com/", "http://localhost/", "http://192.168.1.1/", "http://127.0.0.1/?token=secret", "http://user:password@127.0.0.1/", "http://127.0.0.1/#fragment", "ftp://127.0.0.1/"]) {
+test("scope preview accepts broader inventory without manufacturing loopback ranges", () => {
+  for (const [url, host] of [["https://example.com/", "example.com"], ["http://localhost:3000/", "localhost"], ["http://192.168.1.1/", "192.168.1.1"], ["https://[2001:db8::1]/", "2001:db8::1"]]) {
+    const scope = laboratoryScope(url, "/", "", future());
+    assert.deepEqual(scope.hosts, [host]);
+    assert.deepEqual(scope.allowed_cidrs, []);
+  }
+});
+
+test("scope preview rejects malformed hosts and ambiguous URLs", () => {
+  for (const url of ["http://127.1/", "http://2130706433/", "http://example.0xabc/", "http://example.com./", "http://bad_host.example/", "http://[::ffff:127.0.0.1]/", "http://127.0.0.1/?token=secret", "http://user:password@127.0.0.1/", "http://127.0.0.1/#fragment", "ftp://127.0.0.1/"]) {
     assert.throws(() => laboratoryScope(url, "/", "", future()));
   }
+});
+
+test("broader edits preserve reviewed address ranges and reset only a changed origin", () => {
+  const original = laboratoryScope("HTTP://example.com/", "/", "", future());
+  original.allowed_cidrs = ["192.168.1.0/24"];
+  original.categories = ["http_headers"];
+  original.request_rate = 10;
+  original.max_concurrency = 5;
+  const preserved = laboratoryScope("http://example.com/app", "/app", "", original.expires_at, original, original.starts_at);
+  assert.deepEqual(preserved.allowed_cidrs, original.allowed_cidrs);
+  assert.deepEqual(preserved.categories, original.categories);
+  assert.equal(preserved.request_rate, 10);
+  assert.equal(preserved.max_concurrency, 5);
+  const replaced = laboratoryScope("http://other.example/", "/", "", original.expires_at, original, original.starts_at);
+  assert.deepEqual(replaced.hosts, ["other.example"]);
+  assert.deepEqual(replaced.allowed_cidrs, []);
+  assert.deepEqual(original.allowed_cidrs, ["192.168.1.0/24"]);
 });
 
 test("IPv6 laboratory scope is explicit and expiration is mandatory", () => {

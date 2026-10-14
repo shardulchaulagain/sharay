@@ -18,7 +18,7 @@ from sqlalchemy.exc import OperationalError
 
 from aegis.config import ROOT, Settings
 from aegis.database import create_database
-from aegis.models import Assessment, Base, Organization, Project, Target, User
+from aegis.models import Assessment, Base, Organization, OriginCooldown, Project, Target, User
 from aegis.worker import PersistentRequestStarts, run_one
 
 
@@ -368,7 +368,7 @@ finally:
         self.assertEqual(pacing, {})
 
     def test_invalid_stored_interval_fails_before_connection(self):
-        for interval in (float("inf"), -1, 0, 0.1):
+        for interval in (float("inf"), -1, 0, 0.05):
             with self.subTest(interval=interval):
                 failed = self.enqueue()
                 with self.engine.begin() as connection:
@@ -380,6 +380,18 @@ finally:
                 run_one(self.sessions)
                 self.assertEqual(self.status(failed), "failed")
         self.assertEqual(self.connection_starts, [])
+
+    def test_ten_rps_approval_has_a_durable_restart_cooldown(self):
+        first, second = self.enqueue(rate=10.0), self.enqueue(rate=10.0)
+        run_one(self.sessions)
+        run_one(self.sessions)
+        self.assertEqual(self.status(first), "completed")
+        self.assertEqual(self.status(second), "completed")
+        self.assertAlmostEqual(self.connection_starts[1] - self.connection_starts[0], 0.1, places=7)
+        with self.sessions() as db:
+            row = db.get(OriginCooldown, "http://127.0.0.1:8766")
+            assert row is not None, "Synthetic cooldown fixture is missing"
+            self.assertAlmostEqual(row.interval, 0.1)
 
     def test_pacing_lock_wait_is_bounded_and_restores_the_connection_timeout(self):
         pacing = PersistentRequestStarts(self.sessions)

@@ -52,12 +52,8 @@ class PolicyTests(unittest.TestCase):
             self.origin + "/hello%20world",
         )
 
-    def test_non_literal_private_public_metadata_and_ambiguous_authorities_denied(self):
+    def test_ambiguous_authorities_remain_denied(self):
         bad = [
-            "http://localhost/",
-            "http://example.com/",
-            "http://10.0.0.1/",
-            "http://169.254.169.254/",
             "http://2130706433/",
             "http://127.1/",
             "http://127.0.0.1./",
@@ -125,12 +121,12 @@ class PolicyTests(unittest.TestCase):
             {"intrusive": True},
             {"authenticated": True},
             {"credential_refs": ["secret"]},
-            {"request_rate": 6},
-            {"max_concurrency": 2},
+            {"request_rate": 11},
+            {"max_concurrency": 6},
             {"approval_required": False},
             {"categories": ["exploit"]},
             {"unknown": True},
-            {"allowed_cidrs": ["127.0.0.0/8"]},
+            {"allowed_cidrs": ["127.0.0.1/8"]},
             {"intrusive": 0},
             {"max_concurrency": True},
             {"emergency_stop_conditions": ["operator_cancel"]},

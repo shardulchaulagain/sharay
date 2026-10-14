@@ -44,7 +44,7 @@ class PersistentRequestStarts(dict[str, tuple[float, float]]):
 
     @staticmethod
     def _interval(value):
-        if type(value) not in (int, float) or not math.isfinite(value) or value < 0.2:
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0.1:
             raise ValueError("Invalid stored request cooldown")
         return float(value)
 

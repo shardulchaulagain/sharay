@@ -10,6 +10,7 @@ export type Scope = {
 export type Target = {
   id: string; project_id: string; url: string; scope: Scope; scope_version: number;
   verification_status: string; approved_at?: string; authorized_by?: string;
+  execution_blocker?: string | null;
 };
 export type Project = { id: string; name: string; description: string; created_at: string; archived: boolean; targets?: Target[]; assessments?: Assessment[]; findings?: Finding[] };
 export type Assessment = {
@@ -99,11 +100,16 @@ function scopePath(value: string) {
 }
 
 export function laboratoryScope(url: string, included: string, excluded: string, expires: string, existing?: Scope, starts = existing?.starts_at ?? new Date().toISOString()): Scope {
+  const raw = url.match(/^https?:\/\/(\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::([1-9]\d*))?(\/[^?#]*)?$/i);
+  if (!raw || url.length > 2048 || url.includes("\\") || [...url].some(char => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127)) throw new Error("Use a canonical HTTP or HTTPS URL without whitespace, credentials, a query string or a fragment.");
   const parsed = new URL(url);
-  if (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "[::1]") throw new Error("Use an explicit laboratory address: 127.0.0.1 or [::1].");
-  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash || parsed.search) throw new Error("Use HTTP or HTTPS without credentials, a query string or a fragment.");
-  const raw = url.match(/^https?:\/\/(127\.0\.0\.1|\[::1\])(?::([1-9]\d*))?(\/[^?#]*)?$/i);
-  if (!raw || url.length > 2048 || url.includes("\\") || [...url].some(char => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127)) throw new Error("Use a canonical literal laboratory URL without whitespace, a query string or a fragment.");
+  const host = parsed.hostname.startsWith("[") ? parsed.hostname.slice(1, -1) : parsed.hostname;
+  if (parsed.hostname !== raw[1] || host.startsWith("::ffff:")) throw new Error("Use a canonical IP address without alternate numeric or IPv4-mapped representations.");
+  if (!parsed.hostname.startsWith("[") && !/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+    const labels = host.split(".");
+    if (host.length > 253 || labels.some(label => !label || label.length > 63 || label.startsWith("-") || label.endsWith("-")) || !/[a-z]/.test(labels.at(-1)!)) throw new Error("Use a canonical lowercase ASCII hostname (punycode for international names).");
+  }
+  const defaultCidrs = host === "127.0.0.1" ? ["127.0.0.1/32"] : host === "::1" ? ["::1/128"] : [];
   const targetPath = scopePath(raw[3] || "/"); // Validate before URL can strip dot segments.
   const paths = (value: string) => value.split(/\r?\n/).map(path => path.trim()).filter(Boolean).map(scopePath);
   const allowed = paths(included), excludedPaths = paths(excluded);
@@ -122,16 +128,16 @@ export function laboratoryScope(url: string, included: string, excluded: string,
     return {
       ...existing,
       // A URL change within the registered origins preserves the complete host/IP boundary.
-      hosts: sameOrigin ? existing.hosts : [parsed.hostname === "[::1]" ? "::1" : parsed.hostname],
+      hosts: sameOrigin ? existing.hosts : [host],
       allowed_origins: sameOrigin ? existing.allowed_origins : [parsed.origin],
-      allowed_cidrs: sameOrigin ? existing.allowed_cidrs : [parsed.hostname === "[::1]" ? "::1/128" : "127.0.0.1/32"],
+      allowed_cidrs: sameOrigin ? existing.allowed_cidrs : defaultCidrs,
       allowed_paths: allowed, excluded_paths: excludedPaths,
       starts_at: savedStart ?? startsAt.toISOString(), expires_at: savedExpiry ?? expiresAt.toISOString(),
     };
   }
   return {
-    hosts: [parsed.hostname === "[::1]" ? "::1" : parsed.hostname], allowed_origins: [parsed.origin],
-    allowed_paths: allowed, excluded_paths: excludedPaths, allowed_cidrs: [parsed.hostname === "[::1]" ? "::1/128" : "127.0.0.1/32"],
+    hosts: [host], allowed_origins: [parsed.origin],
+    allowed_paths: allowed, excluded_paths: excludedPaths, allowed_cidrs: defaultCidrs,
     categories: ["http_headers", "tls", "dns"], authenticated: false, credential_refs: [], request_rate: 1,
     max_concurrency: 1, starts_at: startsAt.toISOString(), expires_at: expiresAt.toISOString(), intrusive: false,
     approval_required: true, emergency_stop_conditions: ["operator_cancel", "scope_expired", "policy_violation"],

@@ -160,3 +160,45 @@ test("authorization, launch and retest controls require an active scope window",
     }
   } finally { components.useResource = originals.resource; api.api = originals.api; }
 });
+
+test("execution blockers remain visible and disable launch and retest after authorization", async () => {
+  const projects = load("projects"), assessments = load("assessments"), components = load("components"), api = load("api");
+  const scope = api.laboratoryScope("http://127.0.0.1:8766/", "/", "", new Date(Date.now() + 3600000).toISOString());
+  const assessment = { id: "assessment-1", project_id: "project-1", target_id: "target-1", status: "completed" };
+  const originals = { resource: components.useResource, api: api.api, post: api.post };
+  const blocker = "Synthetic execution blocker: destination egress is not verified.";
+  const posts = [];
+  api.post = async (...args) => { posts.push(args); };
+  try {
+    for (const status of ["operator_authorized", "verified_lab"]) {
+      const target = { id: "target-1", project_id: "project-1", url: "http://127.0.0.1:8766/", scope, scope_version: 4, verification_status: status, execution_blocker: blocker };
+      const state = controlledState();
+      try {
+        const tree = state.render(() => projects.TargetRow({ target, canManage: true, canLaunch: true, refresh() {}, edit() {}, launch() {} }));
+        const launch = button(tree, "Review & launch");
+        assert.ok(!launch || launch.props.disabled);
+        assert.ok(renderToStaticMarkup(tree).includes(blocker));
+        assert.equal(button(tree, "Record authorization"), undefined, "Authorization must not repeat after operator approval");
+      } finally { state.restore(); }
+      const launchState = controlledState();
+      try {
+        const tree = launchState.render(() => projects.Launch({ target, done() {}, cancel() {}, reload() {} }));
+        assert.equal(button(tree, "Launch assessment").props.disabled, true);
+        assert.ok(renderToStaticMarkup(tree).includes(blocker));
+      } finally { launchState.restore(); }
+      const retestState = controlledState();
+      try {
+        components.useResource = request => ({ data: request.startsWith("/assessments/") ? assessment : { archived: false }, loading: false });
+        api.api = async () => target;
+        const render = () => retestState.render(() => assessments.AssessmentDetail({ id: assessment.id, user: { role: "owner" }, revision: 0, refresh() {}, back() {}, openAssessment() {} }));
+        button(render(), "Review retest").props.onClick();
+        await new Promise(resolve => setImmediate(resolve));
+        const tree = render();
+        assert.equal(button(tree, "Launch retest").props.disabled, true);
+        assert.equal(nodes(tree).find(node => node.type === "input" && node.props.type === "checkbox").props.disabled, true);
+        assert.ok(renderToStaticMarkup(tree).includes(blocker));
+      } finally { retestState.restore(); }
+    }
+    assert.deepEqual(posts, []);
+  } finally { components.useResource = originals.resource; api.api = originals.api; api.post = originals.post; }
+});

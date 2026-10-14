@@ -2,6 +2,8 @@
 
 Updated October 12, 2026 at the user's request. Work is split into **eight work packages per assistant**. This is an equal division of named responsibility, not a fabricated estimate that both halves require exactly the same hours. Both halves are needed for a complete product. Existing completed work stays in its assigned half and is preserved.
 
+Human update, October 14: Gemini is the senior technical lead over Codex and Claude. The human sets goals and grants consequential authorization; Gemini sets technical priorities, architecture and review direction. Codex and Claude retain their path ownership and implement and independently verify that direction. Gemini's drafts remain under `drafts/gemini/`. Code adoption still requires requester-written acceptance tests, source review, regressions and mutation checks. Senior review does not authorize assessments, changes to approved target scopes or deployment.
+
 | Codex: platform and operator experience | Claude: integrations and assessment intelligence |
 | --- | --- |
 | C1. Python desktop packaging, entrance/login and complete operational UI | L1. Scanner container/process isolation, non-root execution, filesystem/resource limits and enforceable egress |
