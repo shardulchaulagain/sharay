@@ -764,13 +764,25 @@ def scan_live(destination: Destination, allow_ip: str, *, run: Callable[..., Any
     single-destination egress runner. `curl --resolve` pins the connection to the authorized IP
     (the allowlist drops everything else, DNS included), so no name is resolved in-container. Reuses
     the safe_http header/finding logic and returns the same result shape as scan()."""
-    runner: Callable[..., Any]
     if run is None:
-        from services.scanner_worker.container import run_with_egress
-
-        runner = run_with_egress
-    else:
-        runner = run
+        # This unconnected prototype has no trusted readiness, cancellation or
+        # pacing contract yet. Only explicit test runners may exercise it.
+        return {
+            "adapter": "safe_http_live",
+            "observations": [],
+            "findings": [],
+            "checks": [
+                {
+                    "category": "http_headers",
+                    "status": "blocked",
+                    "detail": "Live execution controls have not passed independent integration verification.",
+                }
+            ],
+            "outcome": "failed",
+            "requests_performed": 0,
+            "duration_ms": 0,
+        }
+    runner = run
     started = time.monotonic()
     host, port, url = destination.host, destination.port, destination.url
     argv = [

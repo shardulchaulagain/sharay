@@ -1,14 +1,39 @@
 """Header interpretation regressions beyond the finite evaluation corpus."""
 
 import json
+import types
 import unittest
 from http.client import HTTPException, parse_headers
 from io import BytesIO
+from unittest.mock import patch
 
 from packages.scanner_adapters import MAX_HEADER_BYTES, _findings, _header_facts, _HeaderReader
 
 
 class HeaderSemanticsTests(unittest.TestCase):
+    def test_unverified_live_profile_cannot_dispatch_a_default_runner(self):
+        from packages.scanner_adapters import scan_live
+        from packages.security_policies import check_url
+        from tests.product.test_broad_scope import broad_scope
+
+        calls = []
+        runner = types.ModuleType("services.scanner_worker.container")
+
+        def stand_in(*args, **kwargs):
+            calls.append((args, kwargs))
+            return types.SimpleNamespace(outcome="failed")
+
+        runner.run_with_egress = stand_in  # type: ignore[attr-defined]
+        with patch.dict("sys.modules", {runner.__name__: runner}):
+            result = scan_live(
+                check_url(broad_scope("fixture.invalid"), "https://fixture.invalid/"), "8.8.8.8"
+            )
+        self.assertEqual(calls, [])
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["requests_performed"], 0)
+        self.assertEqual(result["observations"], [])
+        self.assertEqual(result["findings"], [])
+
     def test_cors_credentials_is_case_sensitive_and_duplicate_fields_are_not_collapsed(self):
         for values, expected in [
             (["true"], True),
