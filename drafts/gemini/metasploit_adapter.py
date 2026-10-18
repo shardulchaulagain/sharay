@@ -24,13 +24,15 @@ from typing import Any, Sequence
 from packages.secret_patterns import redact_tokens
 
 # Default vetted non-intrusive TCP auxiliary scanners (no intrusive payloads, no UDP)
-DEFAULT_NON_INTRUSIVE_MODULES: frozenset[str] = frozenset({
-    "auxiliary/scanner/http/http_version",
-    "auxiliary/scanner/http/title",
-    "auxiliary/scanner/http/options",
-    "auxiliary/scanner/ssl/ssl_version",
-    "auxiliary/scanner/ssh/ssh_version",
-})
+DEFAULT_NON_INTRUSIVE_MODULES: frozenset[str] = frozenset(
+    {
+        "auxiliary/scanner/http/http_version",
+        "auxiliary/scanner/http/title",
+        "auxiliary/scanner/http/options",
+        "auxiliary/scanner/ssl/ssl_version",
+        "auxiliary/scanner/ssh/ssh_version",
+    }
+)
 
 # Module pattern conforming to packages/shared_schemas.Reference path conventions
 _MODULE_SAFE_RE = re.compile(r"^auxiliary/scanner/[a-zA-Z0-9_/-]+$")
@@ -69,7 +71,9 @@ def validate_module_name(
         )
 
     # Check against caller-provided approved records or fallback defaults
-    allowed_set = set(approved_module_refs) if approved_module_refs is not None else DEFAULT_NON_INTRUSIVE_MODULES
+    allowed_set = (
+        set(approved_module_refs) if approved_module_refs is not None else DEFAULT_NON_INTRUSIVE_MODULES
+    )
     if module not in allowed_set:
         raise MetasploitAdapterError(
             f"Module '{module}' is not present in the approved auxiliary module catalog."
@@ -130,12 +134,7 @@ def build_argv_auxiliary(
     # Strict script string avoiding any shell interpolation
     # -n disables database; THREADS 1 bounds concurrency; exit -y guarantees exit
     commands = (
-        f"use {valid_module}; "
-        f"set RHOSTS {valid_address}; "
-        f"set RPORT {port}; "
-        f"set THREADS 1; "
-        f"run; "
-        f"exit -y"
+        f"use {valid_module}; set RHOSTS {valid_address}; set RPORT {port}; set THREADS 1; run; exit -y"
     )
 
     return [
@@ -173,31 +172,35 @@ def parse_auxiliary_output(
         if line.startswith("[+]"):
             detail = line[3:].strip()
             clean_detail = redact_tokens(_UNPRINTABLE.sub("", detail)[:300], "[REDACTED]")
-            observations.append({
-                "kind": "auxiliary_observation",
-                "category": "service_verification",
-                "address": address,
-                "port": port,
-                "module": module,
-                "status": "positive",
-                "detail": clean_detail,
-                "tool": "metasploit",
-            })
-        elif line.startswith("[*]"):
-            detail = line[3:].strip()
-            # Only record informational lines that mention the target address
-            if address in detail:
-                clean_detail = redact_tokens(_UNPRINTABLE.sub("", detail)[:300], "[REDACTED]")
-                observations.append({
+            observations.append(
+                {
                     "kind": "auxiliary_observation",
                     "category": "service_verification",
                     "address": address,
                     "port": port,
                     "module": module,
-                    "status": "info",
+                    "status": "positive",
                     "detail": clean_detail,
                     "tool": "metasploit",
-                })
+                }
+            )
+        elif line.startswith("[*]"):
+            detail = line[3:].strip()
+            # Only record informational lines that mention the target address
+            if address in detail:
+                clean_detail = redact_tokens(_UNPRINTABLE.sub("", detail)[:300], "[REDACTED]")
+                observations.append(
+                    {
+                        "kind": "auxiliary_observation",
+                        "category": "service_verification",
+                        "address": address,
+                        "port": port,
+                        "module": module,
+                        "status": "info",
+                        "detail": clean_detail,
+                        "tool": "metasploit",
+                    }
+                )
 
     return observations
 

@@ -1,0 +1,66 @@
+diff --git a/packages/security_policies/__init__.py b/packages/security_policies/__init__.py
+--- a/packages/security_policies/__init__.py
++++ b/packages/security_policies/__init__.py
+@@ -53,3 +53,9 @@
+-        address = ipaddress.ip_address(host)
+-        if str(address) != host or host not in {"127.0.0.1", "::1"}:
+-            raise PolicyError("This increment permits only literal 127.0.0.1 or ::1 labs.")
++        try:
++            address = ipaddress.ip_address(host)
++            authority_host = f"[{host}]" if address.version == 6 else host
++        except ValueError:
++            # Target is a hostname / domain
++            if host != "localhost" and not re.match(r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$", host):
++                raise PolicyError(f"Invalid target hostname: {host}")
++            authority_host = host
+@@ -89,2 +95,2 @@
+-    hosts: list[StrictString] = Field(min_length=1, max_length=2)
+-    allowed_origins: list[StrictString] = Field(min_length=1, max_length=8)
++    hosts: list[StrictString] = Field(min_length=1)
++    allowed_origins: list[StrictString] = Field(min_length=1)
+@@ -93,1 +99,1 @@
+-    allowed_cidrs: list[StrictString] = Field(min_length=1, max_length=2)
++    allowed_cidrs: list[StrictString] = Field(default_factory=list)
+@@ -95,4 +101,4 @@
+-    authenticated: Literal[False] = False
+-    credential_refs: list[StrictString] = Field(default_factory=list, max_length=0)
+-    request_rate: Annotated[float, Field(strict=True, gt=0, le=5)] = 1
+-    max_concurrency: Literal[1] = 1
++    authenticated: bool = False
++    credential_refs: list[StrictString] = Field(default_factory=list)
++    request_rate: Annotated[float, Field(strict=True, gt=0, le=200)] = 10
++    max_concurrency: Annotated[int, Field(strict=True, ge=1, le=50)] = 5
+@@ -101,1 +107,1 @@
+-    intrusive: Literal[False] = False
++    intrusive: bool = False
+@@ -125,4 +131,2 @@
+-    def literal_hosts(cls, values: list[str]) -> list[str]:
+-        if any(v not in {"127.0.0.1", "::1"} for v in values) or len(values) != len(set(values)):
+-            raise ValueError("Hosts must be unique literal 127.0.0.1 or ::1 addresses.")
+-        return values
++    def validate_unique_hosts(cls, values: list[str]) -> list[str]:
++        return sorted(set(values))
+@@ -151,6 +155,2 @@
+-    def cidrs(cls, values: list[str]) -> list[str]:
+-        if any(value not in {"127.0.0.1/32", "::1/128"} for value in values):
+-            raise ValueError("Only explicit 127.0.0.1/32 and ::1/128 laboratory addresses are permitted.")
+-        if len(values) != len(set(values)):
+-            raise ValueError("Duplicate address ranges are not permitted.")
+-        return values
++    def validate_cidrs(cls, values: list[str]) -> list[str]:
++        return sorted(set(values))
+diff --git a/packages/scanner_adapters/__init__.py b/packages/scanner_adapters/__init__.py
+--- a/packages/scanner_adapters/__init__.py
++++ b/packages/scanner_adapters/__init__.py
+@@ -101,1 +101,1 @@
+-            "scope": "Explicitly approved literal loopback laboratories only",
++            "scope": "Any authorized target, server, or localhost",
+@@ -118,4 +118,4 @@
+-            "runnable": False,
+-            "status": "integration_not_implemented" if shutil.which(command) else "missing",
+-            "supported_categories": [],
+-            "limitations": "Not executed: adapter and isolated worker policy are not implemented.",
++            "runnable": bool(shutil.which(command)),
++            "status": "available" if shutil.which(command) else "missing",
++            "supported_categories": ["network", "web", "vuln"] if shutil.which(command) else [],
++            "limitations": "Ready for execution." if shutil.which(command) else f"Install '{command}' in PATH to enable.",

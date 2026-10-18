@@ -5,6 +5,7 @@ import { api, ApiError, date, laboratoryScope, localDateTime, post, projectField
 import { Badge, Empty, ErrorNotice, Icon, Loading, Panel, SectionHead, useResource } from "./components";
 import { AssessmentTable } from "./assessments";
 import ScopePreview from "./scope-preview";
+import OperatorTerminal from "./terminal";
 
 export default function Projects({ user, revision, refresh, openAssessment }: { user: User; revision: number; refresh: () => void; openAssessment: (id: string) => void }) {
   const [selected, setSelected] = useState<string>();
@@ -30,10 +31,13 @@ function ProjectDetail({ id, user, revision, refresh, back, openAssessment }: { 
   const [adding, setAdding] = useState(false);
   const [launch, setLaunch] = useState<Target>();
   const [editing, setEditing] = useState<Target>();
+  const [terminalTarget, setTerminalTarget] = useState<Target>();
   const canManage = ["owner", "security_administrator"].includes(user.role);
   if (resource.loading) return <Loading/>;
   if (resource.error) return <ErrorNotice error={resource.error}/>;
   const project = resource.data!;
+  const currentLaunch = project.targets?.find(target => target.id === launch?.id);
+  const canLaunch = ["owner", "security_administrator", "analyst"].includes(user.role);
   return <>
     <button className="text-button back-button" onClick={back}>← All projects</button>
     <SectionHead eyebrow="PROJECT WORKSPACE" title={project.name} action={canManage && !project.archived && <button className="primary" onClick={() => { setAdding(value => !value); setEditing(undefined); setLaunch(undefined); }}><Icon name={adding ? "close" : "plus"}/>{adding ? "Close form" : "Register target"}</button>}>{project.description || "Authorized targets and assessment history."}</SectionHead>
@@ -41,10 +45,11 @@ function ProjectDetail({ id, user, revision, refresh, back, openAssessment }: { 
     {canManage && <ProjectSettings key={project.id} project={project} refresh={refresh}/>}
     {adding && !project.archived && <TargetRegistration projectId={id} done={() => { setAdding(false); refresh(); }}/>}
     {editing && !project.archived && <TargetRegistration key={`${editing.id}:${editing.scope_version}`} projectId={id} target={editing} done={() => { setEditing(undefined); refresh(); }} cancel={() => setEditing(undefined)}/>}
-    {launch && !project.archived && <Launch key={`${launch.id}:${launch.scope_version}`} target={launch} done={assessment => { setLaunch(undefined); refresh(); openAssessment(assessment.id); }} cancel={() => setLaunch(undefined)} reload={() => { setLaunch(undefined); refresh(); }}/>}
-    <Panel title="Authorized targets" action={<span className="muted">{project.targets?.length ?? 0} registered</span>}>{!project.targets?.length ? <Empty title="Define your first assessment boundary">Register a target URL, review its permitted paths and exclusions, then record authorization. Execution availability is shown for each target.</Empty> : <div className="target-list">{project.targets.map(target => <TargetRow key={`${target.id}:${target.scope_version}`} target={target} canManage={canManage && !project.archived} canLaunch={user.role !== "viewer" && !project.archived} refresh={refresh} edit={() => { setLaunch(undefined); setEditing(target); setAdding(false); }} launch={() => { setEditing(undefined); setLaunch(target); }}/>)}</div>}</Panel>
+    {currentLaunch && canLaunch && !project.archived && <Launch key={`${currentLaunch.id}:${currentLaunch.scope_version}`} target={currentLaunch} done={assessment => { setLaunch(undefined); refresh(); openAssessment(assessment.id); }} cancel={() => setLaunch(undefined)} reload={() => { setLaunch(undefined); refresh(); }}/>}
+    <Panel title="Authorized targets" action={<span className="muted">{project.targets?.length ?? 0} registered</span>}>{!project.targets?.length ? <Empty title="Define your first assessment boundary">Register a target URL, review its permitted paths and exclusions, then record authorization. Execution availability is shown for each target.</Empty> : <div className="target-list">{project.targets.map(target => <TargetRow key={`${target.id}:${target.scope_version}`} target={target} canManage={canManage && !project.archived} canLaunch={user.role !== "viewer" && !project.archived} refresh={refresh} edit={() => { setLaunch(undefined); setEditing(target); setAdding(false); }} launch={() => { setEditing(undefined); setLaunch(target); }} takeover={() => setTerminalTarget(target)}/>)}</div>}</Panel>
     <Panel title="Assessment history">{project.assessments?.length ? <AssessmentTable items={project.assessments} open={openAssessment}/> : <p className="panel-note">No assessments for this project yet.</p>}</Panel>
     <div className="notice">Targets can include hostnames and IP addresses. The current safe HTTP worker runs approved literal 127.0.0.1 and [::1] targets, with header inspection and TLS metadata for HTTPS. DNS queries are skipped for literal IP targets. Authenticated testing and intrusive profiles remain unavailable.</div>
+    {terminalTarget && <OperatorTerminal target={terminalTarget} onClose={() => setTerminalTarget(undefined)}/>}
   </>;
 }
 
@@ -111,7 +116,7 @@ function TargetRegistration({ projectId, target, done, cancel }: { projectId: st
   </Panel>;
 }
 
-function TargetRow({ target, canManage, canLaunch, refresh, edit, launch }: { target: Target; canManage: boolean; canLaunch: boolean; refresh: () => void; edit: () => void; launch: () => void }) {
+function TargetRow({ target, canManage, canLaunch, refresh, edit, launch, takeover }: { target: Target; canManage: boolean; canLaunch: boolean; refresh: () => void; edit: () => void; launch: () => void; takeover: () => void }) {
   const [accepted, setAccepted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<Error>();
@@ -122,19 +127,257 @@ function TargetRow({ target, canManage, canLaunch, refresh, edit, launch }: { ta
     try { await post(`/targets/${encodeURIComponent(target.id)}/approve`, { acknowledgement: "I authorize this target within the displayed scope", expected_scope_version: target.scope_version }); refresh(); }
     catch (error) { setAccepted(false); setError(scopeActionError(error, "Authorization failed.")); } finally { setBusy(false); }
   }
-  return <div className="target-row"><div className="target-title"><div><strong className="mono">{target.url}</strong><small>Scope v{target.scope_version} · expires {date(target.scope.expires_at)}</small></div><Badge value={expired ? "expired" : target.verification_status}/>{canManage && <button className="secondary compact" onClick={edit}>Edit scope</button>}{canLaunch && target.verification_status === "verified_lab" && !target.execution_blocker && <button className="primary compact" onClick={launch} disabled={!active}>Review & launch<Icon name="arrow" size={15}/></button>}</div><details><summary>Review scope and authorization</summary><ScopePreview scope={target.scope} url={target.url}/>{target.approved_at && <p className="panel-note">Approved {date(target.approved_at)} · authorizing user {target.authorized_by}</p>}</details>{target.execution_blocker && <p className="notice">{target.execution_blocker}</p>}{canManage && !["verified_lab", "operator_authorized"].includes(target.verification_status) && <div className="authorization"><label className="checkbox-label"><input type="checkbox" checked={accepted} onChange={event => setAccepted(event.target.checked)}/>I authorize this target within the displayed scope and time window.</label><button className="secondary compact" disabled={!accepted || busy || !active} onClick={approve}>{busy ? "Recording…" : "Record authorization"}</button></div>}<ErrorNotice error={error}/>{error instanceof ApiError && error.status === 409 && <button className="secondary compact" onClick={refresh}>Reload target</button>}</div>;
+  return <div className="target-row"><div className="target-title"><div><strong className="mono">{target.url}</strong><small>Scope v{target.scope_version} · expires {date(target.scope.expires_at)}</small></div><Badge value={expired ? "expired" : target.verification_status}/>{canManage && <button className="secondary compact" onClick={edit}>Edit scope</button>}{canLaunch && ["verified_lab", "operator_authorized"].includes(target.verification_status) && !target.execution_blocker && <><button className="secondary compact" onClick={takeover} title="Open live diagnostic and takeover console">Takeover Console</button><button className="primary compact" onClick={launch} disabled={!active}>Review & launch<Icon name="arrow" size={15}/></button></>}</div><details><summary>Review scope and authorization</summary><ScopePreview scope={target.scope} url={target.url}/>{target.approved_at && <p className="panel-note">Approved {date(target.approved_at)} · authorizing user {target.authorized_by}</p>}</details>{target.execution_blocker && <p className="notice">{target.execution_blocker}</p>}{canManage && !["verified_lab", "operator_authorized"].includes(target.verification_status) && <div className="authorization"><label className="checkbox-label"><input type="checkbox" checked={accepted} onChange={event => setAccepted(event.target.checked)}/>I authorize this target within the displayed scope and time window.</label><button className="secondary compact" disabled={!accepted || busy || !active} onClick={approve}>{busy ? "Recording…" : "Record authorization"}</button></div>}<ErrorNotice error={error}/>{error instanceof ApiError && error.status === 409 && <button className="secondary compact" onClick={refresh}>Reload target</button>}</div>;
 }
 
 function Launch({ target, done, cancel, reload }: { target: Target; done: (assessment: Assessment) => void; cancel: () => void; reload: () => void }) {
   const [accepted, setAccepted] = useState(false);
+  const [reviewedScope, setReviewedScope] = useState<string>();
+  const scopeIdentity = JSON.stringify([target.id, target.scope_version, target.url, target.scope]);
+  const reviewed = accepted && reviewedScope === scopeIdentity;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<Error>();
-  const [idempotency] = useState(() => crypto.randomUUID());
-  const ready = target.verification_status === "verified_lab" && !target.execution_blocker && scopeIsActive(target.scope);
+  const [idempotency, setIdempotency] = useState(() => crypto.randomUUID());
+  const live = target.verification_status === "operator_authorized";
+  const [profile, setProfile] = useState<"safe_http" | "approved_templates" | "comprehensive">(live ? "comprehensive" : "safe_http");
+  const [mode, setMode] = useState<"adaptive" | "standard" | "aggressive" | "passive">("adaptive");
+  const [depth, setDepth] = useState<number>(2);
+  const [rate, setRate] = useState<number>(target.scope.request_rate);
+  const [tags, setTags] = useState<string>("");
+  const [toolNmap, setToolNmap] = useState(true);
+  const [toolCrawler, setToolCrawler] = useState(true);
+  const [toolSensitive, setToolSensitive] = useState(true);
+  const [toolDiff, setToolDiff] = useState(true);
+  const [toolNuclei, setToolNuclei] = useState(true);
+  const [toolZap, setToolZap] = useState(false);
+  const [toolMsf, setToolMsf] = useState(false);
+  const [toolBrowser, setToolBrowser] = useState(true);
+  const [toolSchema, setToolSchema] = useState(true);
+  const [toolAuthMatrix, setToolAuthMatrix] = useState(true);
+  const [toolPayloadForge, setToolPayloadForge] = useState(true);
+  const [toolReproducer, setToolReproducer] = useState(true);
+  const ready = ["verified_lab", "operator_authorized"].includes(target.verification_status) && !target.execution_blocker && scopeIsActive(target.scope);
+
+  function invalidateReview() {
+    setAccepted(false); setError(undefined); setIdempotency(crypto.randomUUID());
+  }
+
+  function enableAllSOTA() {
+    setProfile("comprehensive");
+    setMode("adaptive");
+    setDepth(3);
+    setToolNmap(true);
+    setToolCrawler(true);
+    setToolSensitive(true);
+    setToolDiff(true);
+    setToolNuclei(true);
+    setToolBrowser(true);
+    setToolSchema(true);
+    setToolAuthMatrix(true);
+    setToolPayloadForge(true);
+    setToolReproducer(true);
+    setToolZap(true);
+    setToolMsf(true);
+    invalidateReview();
+  }
+
   async function start() {
+    if (!reviewed || !ready || busy) return;
     setBusy(true); setError(undefined);
-    try { done(await post<Assessment>("/assessments", { target_id: target.id, idempotency_key: idempotency, expected_scope_version: target.scope_version })); }
+    try {
+      if (!Number.isFinite(rate) || rate <= 0 || rate > 5000) throw new Error("Request rate must be positive and at most 5000 req/s.");
+      const activeTools: string[] = [];
+      if (toolNmap) activeTools.push("nmap");
+      if (toolCrawler) activeTools.push("crawler");
+      if (toolSensitive) activeTools.push("sensitive");
+      if (toolDiff) activeTools.push("diff");
+      if (toolNuclei) activeTools.push("nuclei");
+      if (toolZap) activeTools.push("zap");
+      if (toolMsf) activeTools.push("metasploit");
+      if (toolBrowser) activeTools.push("browser");
+      if (toolSchema) activeTools.push("schema");
+      if (toolAuthMatrix) activeTools.push("auth_matrix");
+      if (toolPayloadForge) activeTools.push("payload_forge");
+      if (toolReproducer) activeTools.push("reproducer");
+
+      const config = live && profile !== "safe_http" ? {
+        mode: profile === "approved_templates" ? "standard" : mode,
+        depth: profile === "approved_templates" ? 2 : Number(depth),
+        rate: Number(rate),
+        tags: tags.trim() ? tags.trim() : undefined,
+        tools: profile === "approved_templates" ? ["nuclei"] : mode === "passive" ? [] : activeTools,
+      } : undefined;
+
+      done(await post<Assessment>("/assessments", {
+        target_id: target.id,
+        idempotency_key: idempotency,
+        expected_scope_version: target.scope_version,
+        profile,
+        config,
+      }));
+    }
     catch (error) { setAccepted(false); setError(scopeActionError(error, "Launch failed.")); } finally { setBusy(false); }
   }
-  return <Panel title={`03 / Confirm assessment · scope v${target.scope_version}`}><ScopePreview scope={target.scope} url={target.url}/><p className="notice">Only the displayed safe HTTP profile will run. Redirects are rechecked against the scope. This assessment is unauthenticated and does not run exploitation payloads.</p>{!ready && <p className="notice">{target.execution_blocker || "This scope must be active and authorized before an assessment can launch."}</p>}<label className="checkbox-label"><input type="checkbox" checked={accepted} onChange={event => setAccepted(event.target.checked)} disabled={!ready || busy}/>I reviewed this exact scope and approve launching this assessment.</label><ErrorNotice error={error}/><div className="form-actions"><button className="secondary" onClick={cancel} disabled={busy}>Back</button>{error instanceof ApiError && error.status === 409 && <button className="secondary" onClick={reload}>Reload target</button>}<button className="primary" onClick={start} disabled={!accepted || !ready || busy || (error instanceof ApiError && error.status === 409)}>{busy ? "Launching…" : "Launch assessment"}<Icon name="arrow"/></button></div></Panel>;
+
+  return (
+    <Panel title={`03 / Confirm assessment · scope v${target.scope_version}`}>
+      <ScopePreview scope={target.scope} url={target.url}/>
+      <p className="notice">
+        {live && profile === "comprehensive"
+          ? "The comprehensive profile is prepared for reconnaissance, HTTP facts and selected tools. External execution remains unavailable until its controls are verified."
+          : live && profile === "approved_templates"
+          ? "The approved-templates profile is prepared for Nuclei checks. External execution remains unavailable until its controls are verified."
+          : "The safe HTTP profile inspects security headers and TLS metadata. Redirects are rechecked against the scope."}
+      </p>
+      {live && (
+        <label>
+          Assessment profile
+          <select value={profile} onChange={event => { setProfile(event.target.value as "safe_http" | "approved_templates" | "comprehensive"); invalidateReview(); }} disabled={busy}>
+            <option value="comprehensive">Comprehensive — Full Automated Pipeline (Recon + Headers + Ports + Crawler + Nuclei)</option>
+            <option value="approved_templates">Approved templates — nuclei</option>
+            <option value="safe_http">Safe HTTP — security headers &amp; TLS</option>
+          </select>
+        </label>
+      )}
+
+      {live && profile === "comprehensive" && (
+        <details open style={{ margin: "14px 20px" }}>
+          <summary className="scan-config-toggle-summary">
+            <strong>Scan Strategy &amp; Customization Controls</strong> (Click to toggle)
+          </summary>
+          <div className="scan-config-box">
+            <div className="scan-config-grid">
+              <label>
+                Scan Mode
+                <select value={mode} onChange={e => { setMode(e.target.value as "adaptive" | "standard" | "aggressive" | "passive"); invalidateReview(); }} disabled={busy}>
+                  <option value="adaptive">Adaptive — Stack intelligence &amp; tailored tags (Recommended)</option>
+                  <option value="standard">Standard — Discovery &amp; baseline active checks</option>
+                  <option value="aggressive">Aggressive — Deep crawler &amp; expanded vulnerability checks</option>
+                  <option value="passive">Passive — Baseline discovery only</option>
+                </select>
+                <small>
+                  {mode === "adaptive"
+                    ? "Detects web servers and runtimes, auto-synthesizing tailored Nuclei tags."
+                    : mode === "passive"
+                    ? "Baseline reads can send scoped HTTP/TLS requests; active subsystem selections are disabled."
+                    : mode === "aggressive"
+                    ? "Deep 3+ depth spidering and all severity template checks."
+                    : "Standard balanced testing."}
+                </small>
+              </label>
+
+              <label>
+                <div className="slider-header">
+                  <span>Crawler Link Depth</span>
+                  <span className="slider-val">{depth} level{depth > 1 ? "s" : ""}</span>
+                </div>
+                <input type="range" min={1} max={5} value={depth} onChange={e => { setDepth(Number(e.target.value)); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                <small>Recursive link spidering depth (1 = root/sitemap only, 5 = deep spidering).</small>
+              </label>
+
+              <label>
+                <div className="slider-header">
+                  <span>Request Rate Limit</span>
+                  <span className="slider-val">{rate} req/s</span>
+                </div>
+                <input type="number" min={0.1} max={5000} step="any" value={rate} onChange={e => { setRate(Number(e.target.value)); invalidateReview(); }} disabled={busy} />
+                <small>Scan throughput: {rate} req/s (Operator configurable up to 5000 req/s).</small>
+              </label>
+
+              <label>
+                Custom Nuclei Template Tags (Optional)
+                <input type="text" maxLength={512} placeholder="e.g. cve,misconfig,panel,tech" value={tags} onChange={e => { setTags(e.target.value); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                <small>Override active tags. Leave empty to use auto-synthesized adaptive tags.</small>
+              </label>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+              <div className="tool-toggles-title" style={{ margin: 0 }}>ENABLED SUBSYSTEM MODULES (12 SOTA ENGINES)</div>
+              <button
+                type="button"
+                className="secondary compact"
+                onClick={enableAllSOTA}
+                style={{
+                  background: "rgba(30,136,229,0.15)",
+                  borderColor: "#1e88e5",
+                  color: "#64b5f6",
+                  fontWeight: 600,
+                  fontSize: "12px",
+                  cursor: "pointer",
+                }}
+              >
+                ⚡ Preset: Automatic SOTA Everything
+              </button>
+            </div>
+            <div className="tool-toggles-grid">
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolNmap} onChange={e => { setToolNmap(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                Nmap Port &amp; Service Scanner
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolCrawler} onChange={e => { setToolCrawler(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                In-Scope Web Spider &amp; Sitemap
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolBrowser} onChange={e => { setToolBrowser(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                Headless Chromium DOM Sink XSS &amp; SPA Router
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolSchema} onChange={e => { setToolSchema(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                OpenAPI, GraphQL &amp; WSDL Schema Ingestion
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolAuthMatrix} onChange={e => { setToolAuthMatrix(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                Dual-Identity IDOR Authorization Matrix
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolPayloadForge} onChange={e => { setToolPayloadForge(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                Deterministic AST Payload Forge &amp; WAF Fuzzer
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolReproducer} onChange={e => { setToolReproducer(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                3x Deterministic Reproducer &amp; Negative Canary
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolSensitive} onChange={e => { setToolSensitive(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                Sensitive File Hunter (.git, .env)
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolDiff} onChange={e => { setToolDiff(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                Behavioral Differential Testing
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolNuclei} onChange={e => { setToolNuclei(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                Multi-Endpoint Nuclei Runner
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolZap} onChange={e => { setToolZap(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                OWASP ZAP Passive Web Scanner
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolMsf} onChange={e => { setToolMsf(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                Metasploit Auxiliary Verifier
+              </label>
+            </div>
+          </div>
+        </details>
+      )}
+
+      {accepted && !reviewed && <p className="notice">Scope changed; review the displayed replacement before confirming launch.</p>}
+      {!ready && <p className="notice">{target.execution_blocker || "This scope must be active and authorized before an assessment can launch."}</p>}
+      <label className="checkbox-label">
+        <input type="checkbox" checked={reviewed} onChange={event => { setAccepted(event.target.checked); setReviewedScope(scopeIdentity); if (reviewedScope !== scopeIdentity) setIdempotency(crypto.randomUUID()); }} disabled={!ready || busy}/>
+        I reviewed this exact scope and configuration and approve launching this assessment.
+      </label>
+      <ErrorNotice error={error}/>
+      <div className="form-actions">
+        <button className="secondary" onClick={cancel} disabled={busy}>Back</button>
+        {error instanceof ApiError && error.status === 409 && <button className="secondary" onClick={reload}>Reload target</button>}
+        <button className="primary" onClick={start} disabled={!reviewed || !ready || busy || (error instanceof ApiError && error.status === 409)}>
+          {busy ? "Launching…" : "Launch assessment"}
+          <Icon name="arrow"/>
+        </button>
+      </div>
+    </Panel>
+  );
 }

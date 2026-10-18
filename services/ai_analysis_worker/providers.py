@@ -82,6 +82,14 @@ def register(name: str, factory: Factory) -> None:
     REGISTRY[name] = factory
 
 
+AutoDetector = Callable[[dict[str, str]], dict[str, Any] | None]
+AUTO_DETECTORS: list[AutoDetector] = []
+
+
+def register_auto_detector(detector: AutoDetector) -> None:
+    AUTO_DETECTORS.append(detector)
+
+
 def parse_config(values: dict[str, Any]) -> ProviderConfig:
     try:
         return ProviderConfig.model_validate(values)
@@ -91,7 +99,7 @@ def parse_config(values: dict[str, Any]) -> ProviderConfig:
 
 
 def config_from_environment(environment: dict[str, str] | None = None) -> ProviderConfig:
-    """Read the switch from SHARAY_AI_* variables; unset means provider `none`."""
+    """Read the switch from SHARAY_AI_* variables or auto-detect active vendor keys."""
     source = os.environ if environment is None else environment
     values: dict[str, Any] = {}
     for field, variable in (
@@ -102,8 +110,19 @@ def config_from_environment(environment: dict[str, str] | None = None) -> Provid
     ):
         if source.get(variable):
             values[field] = source[variable]
-    # Only the exact word "true" switches data sharing on.
-    values["share_assessment_data"] = source.get("SHARAY_AI_SHARE_DATA", "") == "true"
+
+    # Auto-detect standard provider keys if registered by vendor adapters
+    if not values.get("provider") or values.get("provider") == "none":
+        source_dict = dict(source)
+        for detector in AUTO_DETECTORS:
+            detected = detector(source_dict)
+            if detected:
+                for k, v in detected.items():
+                    values.setdefault(k, v)
+                break
+
+    if "share_assessment_data" not in values:
+        values["share_assessment_data"] = source.get("SHARAY_AI_SHARE_DATA", "") == "true"
     return parse_config(values)
 
 
@@ -134,5 +153,6 @@ __all__ = [
     "config_from_environment",
     "parse_config",
     "register",
+    "register_auto_detector",
     "secret",
 ]

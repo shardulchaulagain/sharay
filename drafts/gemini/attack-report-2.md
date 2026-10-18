@@ -110,10 +110,13 @@ However, four concrete defects were uncovered:
 - **Observation**:
   `parse_xml` enforces:
   ```python
-  if len(data) > MAX_XML_BYTES: raise ValueError(...)
-  if not data.startswith(_DECLARATIONS): raise ValueError(...)
+  if len(data) > MAX_XML_BYTES:
+      raise ValueError(...)
+  if not data.startswith(_DECLARATIONS):
+      raise ValueError(...)
   rest = data.replace(_DOCTYPE, b"", 1)
-  if b"<!DOCTYPE" in rest or b"<!ENTITY" in rest: raise ValueError(...)
+  if b"<!DOCTYPE" in rest or b"<!ENTITY" in rest:
+      raise ValueError(...)
   ```
   Verified that:
   - Custom DOCTYPEs, external SYSTEM identifiers, and internal entity definitions are completely prevented.

@@ -50,41 +50,43 @@ class TargetAddress:
 
 # Denied IPv4 CIDR blocks
 _DENIED_IPV4_NETWORKS = (
-    ipaddress.ip_network("0.0.0.0/8"),         # Current network (only valid as source)
-    ipaddress.ip_network("10.0.0.0/8"),        # Private network (RFC 1918)
-    ipaddress.ip_network("100.64.0.0/10"),     # Shared Address Space / CGNAT (RFC 6598)
-    ipaddress.ip_network("127.0.0.0/8"),       # Loopback (RFC 1122)
-    ipaddress.ip_network("169.254.0.0/16"),    # Link-local / Cloud Metadata (RFC 3927)
-    ipaddress.ip_network("172.16.0.0/12"),     # Private network (RFC 1918)
-    ipaddress.ip_network("192.0.0.0/24"),      # IETF Protocol Assignments
-    ipaddress.ip_network("192.0.2.0/24"),      # TEST-NET-1 (RFC 5737)
-    ipaddress.ip_network("192.168.0.0/16"),    # Private network (RFC 1918)
-    ipaddress.ip_network("198.18.0.0/15"),     # Benchmarking (RFC 2544)
-    ipaddress.ip_network("198.51.100.0/24"),   # TEST-NET-2 (RFC 5737)
-    ipaddress.ip_network("203.0.113.0/24"),    # TEST-NET-3 (RFC 5737)
-    ipaddress.ip_network("224.0.0.0/4"),       # Multicast (RFC 5771)
-    ipaddress.ip_network("240.0.0.0/4"),       # Reserved for future use (RFC 1112)
-    ipaddress.ip_network("255.255.255.255/32"),# Limited broadcast
+    ipaddress.ip_network("0.0.0.0/8"),  # Current network (only valid as source)
+    ipaddress.ip_network("10.0.0.0/8"),  # Private network (RFC 1918)
+    ipaddress.ip_network("100.64.0.0/10"),  # Shared Address Space / CGNAT (RFC 6598)
+    ipaddress.ip_network("127.0.0.0/8"),  # Loopback (RFC 1122)
+    ipaddress.ip_network("169.254.0.0/16"),  # Link-local / Cloud Metadata (RFC 3927)
+    ipaddress.ip_network("172.16.0.0/12"),  # Private network (RFC 1918)
+    ipaddress.ip_network("192.0.0.0/24"),  # IETF Protocol Assignments
+    ipaddress.ip_network("192.0.2.0/24"),  # TEST-NET-1 (RFC 5737)
+    ipaddress.ip_network("192.168.0.0/16"),  # Private network (RFC 1918)
+    ipaddress.ip_network("198.18.0.0/15"),  # Benchmarking (RFC 2544)
+    ipaddress.ip_network("198.51.100.0/24"),  # TEST-NET-2 (RFC 5737)
+    ipaddress.ip_network("203.0.113.0/24"),  # TEST-NET-3 (RFC 5737)
+    ipaddress.ip_network("224.0.0.0/4"),  # Multicast (RFC 5771)
+    ipaddress.ip_network("240.0.0.0/4"),  # Reserved for future use (RFC 1112)
+    ipaddress.ip_network("255.255.255.255/32"),  # Limited broadcast
 )
 
 # Denied IPv6 CIDR blocks
 _DENIED_IPV6_NETWORKS = (
-    ipaddress.ip_network("::/128"),            # Unspecified address
-    ipaddress.ip_network("::1/128"),           # Loopback address
-    ipaddress.ip_network("100::/64"),          # Discard-only prefix (RFC 6666)
-    ipaddress.ip_network("2001:db8::/32"),     # Documentation prefix (RFC 3849)
-    ipaddress.ip_network("fc00::/7"),          # Unique Local Addresses (ULA)
-    ipaddress.ip_network("fe80::/10"),         # Link-local unicast
-    ipaddress.ip_network("ff00::/8"),          # Multicast
+    ipaddress.ip_network("::/128"),  # Unspecified address
+    ipaddress.ip_network("::1/128"),  # Loopback address
+    ipaddress.ip_network("100::/64"),  # Discard-only prefix (RFC 6666)
+    ipaddress.ip_network("2001:db8::/32"),  # Documentation prefix (RFC 3849)
+    ipaddress.ip_network("fc00::/7"),  # Unique Local Addresses (ULA)
+    ipaddress.ip_network("fe80::/10"),  # Link-local unicast
+    ipaddress.ip_network("ff00::/8"),  # Multicast
 )
 
 # Cloud metadata special names
-_BLOCKED_METADATA_HOSTNAMES = frozenset({
-    "metadata.google.internal",
-    "metadata.internal",
-    "instance-data",
-    "169.254.169.254",
-})
+_BLOCKED_METADATA_HOSTNAMES = frozenset(
+    {
+        "metadata.google.internal",
+        "metadata.internal",
+        "instance-data",
+        "169.254.169.254",
+    }
+)
 
 
 def classify_ip_address(
@@ -273,23 +275,27 @@ def validate_redirect_location(
 
     # Handle relative redirects
     if redirect_location.startswith("/"):
-        reconstructed = urlunsplit((
-            current_parts.scheme,
-            current_parts.netloc,
-            redirect_location,
-            "",
-            "",
-        ))
+        reconstructed = urlunsplit(
+            (
+                current_parts.scheme,
+                current_parts.netloc,
+                redirect_location,
+                "",
+                "",
+            )
+        )
     elif not redirect_location.startswith(("http://", "https://")):
         # Resolve against current path base
         base_path = current_parts.path.rsplit("/", 1)[0]
-        reconstructed = urlunsplit((
-            current_parts.scheme,
-            current_parts.netloc,
-            f"{base_path}/{redirect_location}",
-            "",
-            "",
-        ))
+        reconstructed = urlunsplit(
+            (
+                current_parts.scheme,
+                current_parts.netloc,
+                f"{base_path}/{redirect_location}",
+                "",
+                "",
+            )
+        )
     else:
         reconstructed = redirect_location
 

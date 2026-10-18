@@ -1,0 +1,69 @@
+diff --git a/scripts/log_view.py b/scripts/log_view.py
+index 2b8f906..22cdcd8 100644
+--- a/scripts/log_view.py
++++ b/scripts/log_view.py
+@@ -19,7 +19,7 @@ import stat
+ from contextlib import ExitStack
+ from pathlib import Path
+ 
+-from scripts.session_log import DEFAULT_LOG, HEADER, ROOT, WRITERS, read_log
++from scripts.session_log import DEFAULT_LOG, HEADER, LOGS, ROOT, WRITERS, read_log
+ 
+ # Every file under these folders is an input, whatever its suffix, except what is generated.
+ INPUT_FOLDERS = (
+@@ -169,6 +169,7 @@ def main(argv=None) -> int:
+     parser.add_argument("--brief", action="store_true", help="Shorten each entry to 400 characters")
+     parser.add_argument("--since", default="", help="Show entries after this entry id instead")
+     parser.add_argument("--tree", action="store_true", help="Print the source tree hash and exit")
++    parser.add_argument("--log", choices=tuple(LOGS), default="session", help="Which channel to read")
+     args = parser.parse_args(argv)
+     if args.tree:
+         try:
+@@ -179,7 +180,7 @@ def main(argv=None) -> int:
+     if not args.agent:
+         parser.error("--agent is required unless --tree is given")
+     try:
+-        entries = unread(args.agent, brief=400 if args.brief else 0, since=args.since)
++        entries = unread(args.agent, LOGS[args.log], brief=400 if args.brief else 0, since=args.since)
+     except ValueError as exc:
+         parser.error(str(exc))
+     print("\n\n".join(entries))
+diff --git a/scripts/session_log.py b/scripts/session_log.py
+index cc5871e..cce5ffd 100644
+--- a/scripts/session_log.py
++++ b/scripts/session_log.py
+@@ -18,6 +18,8 @@ from packages.reporting import redact
+ 
+ ROOT = Path(__file__).resolve().parent.parent
+ DEFAULT_LOG = ROOT / "docs" / "SESSION_LOG.md"
++# A second, separate channel for proposals and pushback on new ideas; same format, same rules.
++LOGS = {"session": DEFAULT_LOG, "ideas": ROOT / "docs" / "IDEAS_LOG.md"}
+ KINDS = (
+     "claim",
+     "checkpoint",
+@@ -172,10 +174,12 @@ def main(argv=None):
+     parser.add_argument("--next", dest="next_task", default="")
+     parser.add_argument("--reply-to", default="")
+     parser.add_argument("--recommendation", default="")
++    parser.add_argument("--log", choices=tuple(LOGS), default="session", help="Which channel to use")
+     args = parser.parse_args(argv)
++    log_path = LOGS[args.log]
+     try:
+         if args.inbox:
+-            print(inbox_text(args.agent))
++            print(inbox_text(args.agent, log_path))
+             return 0
+         print(
+             append_entry(
+@@ -188,9 +192,10 @@ def main(argv=None):
+                 reply_to=args.reply_to,
+                 recommendation=args.recommendation,
+                 to=args.to,
++                log_path=log_path,
+             )
+         )
+-        waiting = inbox(args.agent)
++        waiting = inbox(args.agent, log_path)
+         if waiting:
+             print(
+                 f"{len(waiting)} open item(s) still await your reply: "

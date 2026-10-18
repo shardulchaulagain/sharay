@@ -68,13 +68,13 @@ class TargetVerification(Base):
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
     target_id: Mapped[str] = mapped_column(ForeignKey("targets.id"), index=True)
     challenge_type: Mapped[str] = mapped_column(String(20))  # "dns_txt" | "http_well_known"
-    token_hash: Mapped[str] = mapped_column(String(64))      # SHA256 of raw secret token
-    challenge_path: Mapped[str] = mapped_column(String(255)) # "_sharay-challenge..." or "/.well-known/..."
+    token_hash: Mapped[str] = mapped_column(String(64))  # SHA256 of raw secret token
+    challenge_path: Mapped[str] = mapped_column(String(255))  # "_sharay-challenge..." or "/.well-known/..."
     status: Mapped[str] = mapped_column(String(30), default="pending_verification")
     initiated_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     verified_at: Mapped[float | None] = mapped_column(Float, nullable=True)
-    expires_at: Mapped[float] = mapped_column(Float)         # 24h challenge TTL
-    valid_until: Mapped[float | None] = mapped_column(Float) # 30d verification validity
+    expires_at: Mapped[float] = mapped_column(Float)  # 24h challenge TTL
+    valid_until: Mapped[float | None] = mapped_column(Float)  # 30d verification validity
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[float] = mapped_column(Float, default=time.time)

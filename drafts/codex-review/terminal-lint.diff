@@ -1,0 +1,80 @@
+--- a/apps/web/app/terminal.tsx
++++ b/apps/web/app/terminal.tsx
+@@ -1,7 +1,7 @@
+ "use client";
+ 
+ import { useEffect, useRef, useState, useCallback } from "react";
+-import { api, post, type Target } from "./api";
++import { post, type Target } from "./api";
+ import { Badge, Icon } from "./components";
+ 
+ export type InteractiveSessionMeta = {
+@@ -96,7 +96,7 @@
+             setOutput(prev => prev + cleanAnsi(chunk));
+           }
+         }
+-      } catch (err: unknown) {
++      } catch {
+         if (!controller.signal.aborted) {
+           setStatus("terminated");
+         }
+@@ -123,6 +123,10 @@
+       inputRef.current.focus();
+     }
+   }, []);
++
++  useEffect(() => {
++    if (status === "connected") focusInput();
++  }, [status, focusInput]);
+ 
+   // Send raw input keystrokes
+   const sendInput = useCallback(
+@@ -170,16 +174,16 @@
+     } else if (e.key === "ArrowDown") {
+       e.preventDefault();
+       void sendInput("\x1b[B");
+-    } else if (e.key === "Tab") {
++    } else if (e.key === "Tab" && !e.shiftKey) {
+       e.preventDefault();
+       void sendInput("\t");
+     }
+   };
+ 
+   return (
+-    <div className={`terminal-overlay ${isMaximized ? "maximized" : ""}`} onClick={focusInput}>
+-      <div className="terminal-window">
+-        <div className="terminal-header" onClick={e => e.stopPropagation()}>
++    <div className={`terminal-overlay ${isMaximized ? "maximized" : ""}`} role="presentation" onClick={focusInput}>
++      <dialog open className="terminal-window" style={{ position: "relative", margin: 0, padding: 0, color: "inherit" }} aria-label="Operator takeover console" onKeyDown={event => { if (event.key === "Escape") onClose(); }}>
++        <div className="terminal-header" role="presentation" onClick={e => e.stopPropagation()}>
+           <div className="terminal-title">
+             <span className={`status-dot ${status === "connected" ? "pulse-green" : "dot-red"}`} />
+             <strong>OPERATOR TAKEOVER CONSOLE</strong>
+@@ -233,7 +237,7 @@
+                   value={inputVal}
+                   onChange={e => setInputVal(e.target.value)}
+                   onKeyDown={handleKeyDown}
+-                  autoFocus
++                  aria-label="Terminal input"
+                   autoComplete="off"
+                   spellCheck={false}
+                 />
+@@ -246,7 +250,7 @@
+             )}
+           </div>
+         )}
+-      </div>
++      </dialog>
+     </div>
+   );
+ }
+@@ -257,7 +261,9 @@
+ function cleanAnsi(text: string): string {
+   // Strip control cursor positioning and color reset sequences for clean monospace rendering
+   return text
++    // eslint-disable-next-line no-control-regex -- ANSI escape removal intentionally matches ESC.
+     .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
++    // eslint-disable-next-line no-control-regex -- ANSI escape removal intentionally matches ESC.
+     .replace(/\x1b\([a-zA-Z]/g, "")
+     .replace(/\r\r+/g, "\r");
+ }

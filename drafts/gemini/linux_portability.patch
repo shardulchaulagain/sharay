@@ -1,0 +1,60 @@
+--- services/scanner_worker/__init__.py
++++ services/scanner_worker/__init__.py
+@@ -174,7 +174,8 @@
+     folder = Path(folder)
+ 
+     def unlock_folder(path: str) -> None:
+-        os.chflags(path, 0, follow_symlinks=False)
++        if sys.platform == "darwin":
++            os.chflags(path, 0, follow_symlinks=False)
+         os.chmod(path, stat.S_IRWXU, follow_symlinks=False)
+ 
+     try:
+@@ -189,7 +190,11 @@
+                 status = os.lstat(path)
+                 if stat.S_ISDIR(status.st_mode):
+                     unlock_folder(path)
+-                elif status.st_flags and (stat.S_ISLNK(status.st_mode) or status.st_nlink == 1):
++                elif (
++                    sys.platform == "darwin"
++                    and status.st_flags
++                    and (stat.S_ISLNK(status.st_mode) or status.st_nlink == 1)
++                ):
+                     # An immutable flag blocks unlinking; clear it only where no other name shares it.
+                     os.chflags(path, 0, follow_symlinks=False)
+         shutil.rmtree(folder)
+--- services/source_analysis_worker/staging.py
++++ services/source_analysis_worker/staging.py
+@@ -17,6 +17,7 @@
+ import stat
++import sys
+ from pathlib import Path
+ 
+ from services.scanner_worker import remove_tree
+@@ -73,7 +74,8 @@
+                 path = os.path.join(parent, name)
+                 if not stat.S_ISDIR(os.lstat(path).st_mode):
+                     raise ValueError("The staged tree contains a link or special entry.")
+-                os.chflags(path, 0, follow_symlinks=False)
++                if sys.platform == "darwin":
++                    os.chflags(path, 0, follow_symlinks=False)
+                 os.chmod(path, stat.S_IRWXU, follow_symlinks=False)
+                 folders += 1
+             for name in file_names:
+@@ -85,7 +87,8 @@
+                 total += status.st_size
+                 if status.st_size > max_file_bytes or total > max_total_bytes:
+                     raise ValueError("The staged tree is larger than the size budget.")
+-                os.chflags(path, 0, follow_symlinks=False)
++                if sys.platform == "darwin":
++                    os.chflags(path, 0, follow_symlinks=False)
+                 os.chmod(path, 0o600, follow_symlinks=False)
+                 digest = hashlib.sha256()
+--- tests/integration/test_staged_extraction.py
++++ tests/integration/test_staged_extraction.py
+@@ -213,6 +213,8 @@
+     def test_locked_and_immutable_entries_cannot_block_validation_or_cleanup(self):
++        if sys.platform != "darwin":
++            self.skipTest("Immutable flags require macOS/BSD.")
+         frozen = self.output / "tree" / "frozen.txt"
+         frozen.write_text("x")

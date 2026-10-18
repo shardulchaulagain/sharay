@@ -24,6 +24,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# Upper bound a caller may set for captured stdout/stderr. Matches the parsers' own
+# MAX_REPORT_BYTES (packages/scanner_adapters/integrations/_parsing.py): a report up to this
+# size is captured whole, so a large but valid scan is parsed, not truncated then rejected.
+MAX_OUTPUT_BYTES = 10 * 1024 * 1024
 
 # Paths reach the profile as -D parameters, never as interpolated text.
 # Data paths ({reads}) are readable but never executable; only {execs} are both.
@@ -248,16 +252,15 @@ def _run_sandboxed(
         raise IsolationError("argv must be a non-empty sequence of strings; shell strings are rejected.")
     if not os.path.isabs(argv[0]):
         raise IsolationError("The executable must be an absolute path.")
-    if (
-        type(max_output_bytes) is not int
-        or type(allow_fork) is not bool
-        or type(allow_scratch_writes) is not bool
-        or any(type(value) not in (int, float) for value in (max_seconds, terminate_after_seconds))
-        or not (
-            0 < max_seconds <= 300 and 0 < max_output_bytes <= 1048576 and 0 < terminate_after_seconds <= 10
-        )
-    ):
-        raise IsolationError("Budgets must be real numbers inside the supported bounds.")
+    # Actionable per-field diagnostics (the bounds are unchanged; only the messages are clearer).
+    if type(allow_fork) is not bool or type(allow_scratch_writes) is not bool:
+        raise IsolationError("allow_fork and allow_scratch_writes must be booleans.")
+    if type(max_output_bytes) is not int or not 0 < max_output_bytes <= MAX_OUTPUT_BYTES:
+        raise IsolationError(f"max_output_bytes must be an integer in 1..{MAX_OUTPUT_BYTES}.")
+    if type(max_seconds) not in (int, float) or not 0 < max_seconds <= 300:
+        raise IsolationError("max_seconds must be a number in (0, 300].")
+    if type(terminate_after_seconds) not in (int, float) or not 0 < terminate_after_seconds <= 10:
+        raise IsolationError("terminate_after_seconds must be a number in (0, 10].")
     inherited = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
     if inherited != resource.RLIM_INFINITY and inherited <= max_output_bytes:
         # A lower inherited cap would truncate output without the overflow byte that reveals it.
@@ -473,6 +476,7 @@ def attest() -> dict:
 
 
 __all__ = [
+    "MAX_OUTPUT_BYTES",
     "IsolatedResult",
     "IsolationError",
     "attest",

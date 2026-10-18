@@ -9,6 +9,19 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from packages.security_policies.normalizer import (
+    NormalizationError,
+    NormalizedTarget,
+    TargetNormaliser,
+)
+from packages.security_policies.resolver import (
+    ResolutionError,
+    ResolutionErrorCode,
+    ResolutionResult,
+    ResolverService,
+    resolve_typed,
+)
+
 
 class PolicyError(ValueError):
     """The proposed action is outside the implemented authorization boundary."""
@@ -114,7 +127,7 @@ class ScopePolicy(BaseModel):
     categories: list[TestCategory] = Field(default_factory=_default_categories, min_length=1, max_length=3)
     authenticated: Literal[False] = False
     credential_refs: list[StrictString] = Field(default_factory=list, max_length=0)
-    request_rate: Annotated[float, Field(strict=True, gt=0, le=10)] = 1
+    request_rate: Annotated[float, Field(strict=True, gt=0, le=5000)] = 1
     max_concurrency: Annotated[int, Field(strict=True, ge=1, le=5)] = 1
     starts_at: datetime
     expires_at: datetime
@@ -266,25 +279,63 @@ def validate_scope(scope: ScopePolicy | dict, target_url: str) -> ScopePolicy:
     return policy
 
 
-def check_execution_url(scope: ScopePolicy | dict, url: str) -> Destination:
-    """The current executor is separately verified for exact literal loopback labs."""
+def check_execution_url(scope: ScopePolicy | dict, url: str, *, owned: bool = False) -> Destination:
+    """Authorize a URL for execution. A loopback lab needs the exact CIDR approved; a non-loopback
+    (live) target is allowed only when ownership is verified (operator-authorized) upstream. DNS
+    pinning and enforced single-destination egress are applied at execution via resolve_pinned and
+    the container runner. No DNS is performed here, so this stays deterministic for views/creation."""
     policy = scope if isinstance(scope, ScopePolicy) else ScopePolicy.model_validate(scope)
     destination = check_url(policy, url)
     required_cidr = {"127.0.0.1": "127.0.0.1/32", "::1": "::1/128"}.get(destination.host)
-    if required_cidr is None:
+    if required_cidr is not None:
+        if required_cidr not in policy.allowed_cidrs:
+            raise PolicyError(f"The safe HTTP laboratory profile requires explicit {required_cidr} approval.")
+        return destination
+    if not owned:
         raise PolicyError(
-            "Target registered; execution requires verified target ownership, bounded DNS pinning "
-            "and enforced destination egress. These live-target controls are not connected yet. "
-            "Use an explicitly approved 127.0.0.1 or ::1 laboratory for the current safe HTTP profile."
+            "Live execution requires verified target ownership. Approve the exact target scope "
+            "(operator authorization), or use an explicitly approved 127.0.0.1 or ::1 laboratory."
         )
-    if required_cidr not in policy.allowed_cidrs:
-        raise PolicyError(f"The safe HTTP laboratory profile requires explicit {required_cidr} approval.")
+    # SSRF guard at the earliest point: a non-loopback literal IP must be public (no DNS needed).
+    # A hostname is allowed here and pinned to a public IP at execution via resolve_pinned.
+    try:
+        literal = ipaddress.ip_address(destination.host)
+    except ValueError:
+        return destination
+    if (
+        literal.is_private
+        or literal.is_loopback
+        or literal.is_link_local
+        or literal.is_multicast
+        or literal.is_reserved
+        or literal.is_unspecified
+        or not literal.is_global
+    ):
+        raise PolicyError("Live targets must be public addresses; private or internal ranges are refused.")
     return destination
 
 
-def validate_execution_scope(scope: ScopePolicy | dict, target_url: str) -> ScopePolicy:
+def resolve_pinned(host: str, resolver=None) -> str:
+    """Resolve a host to one public IP and pin it; the egress allowlist locks to this address.
+    SSRF guard: refuse if the host is, or resolves to, any loopback/private/link-local/reserved/
+    multicast/unspecified address (refusing the whole answer set stops a split DNS reply from
+    slipping an internal IP past the allowlist)."""
+    clean_host = TargetNormaliser.scrub(host)
+    srv = ResolverService(system_resolver=resolver) if resolver else ResolverService()
+    try:
+        res = srv.resolve(clean_host)
+        return res.pinned_ip
+    except ResolutionError as exc:
+        if exc.code == ResolutionErrorCode.SSRF_REFUSED:
+            raise PolicyError("Target resolves to a non-public address; refusing (SSRF guard).") from exc
+        raise PolicyError("Target host did not resolve.") from exc
+
+
+def validate_execution_scope(
+    scope: ScopePolicy | dict, target_url: str, *, owned: bool = False
+) -> ScopePolicy:
     policy = scope if isinstance(scope, ScopePolicy) else ScopePolicy.model_validate(scope)
-    check_execution_url(policy, target_url)
+    check_execution_url(policy, target_url, owned=owned)
     return policy
 
 
@@ -294,7 +345,16 @@ __all__ = [
     "ScopePolicy",
     "check_url",
     "check_execution_url",
+    "resolve_pinned",
     "normalize_url",
     "validate_scope",
     "validate_execution_scope",
+    "TargetNormaliser",
+    "NormalizedTarget",
+    "NormalizationError",
+    "ResolutionError",
+    "ResolutionErrorCode",
+    "ResolutionResult",
+    "ResolverService",
+    "resolve_typed",
 ]

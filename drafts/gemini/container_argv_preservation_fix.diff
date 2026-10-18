@@ -1,0 +1,30 @@
+--- a/services/scanner_worker/container.py
++++ b/services/scanner_worker/container.py
+@@ -271,11 +271,20 @@ def run_with_egress(
+     if runtime is None or Path(runtime).name != "podman":
+         raise IsolationError("No podman machine runtime for enforced egress.")
+-    # Reuse build_run_argv's validation for image/argv/limits, then swap network=none for the bridge.
+-    base = build_run_argv(
+-        runtime, image, tool_argv, input_dir=Path.cwd(), max_seconds=max_seconds, memory_mb=memory_mb
++    # Validate image, argv and limits
++    build_run_argv(
++        runtime, image, tool_argv, input_dir=Path.cwd(), max_seconds=max_seconds, memory_mb=memory_mb, pids_limit=pids_limit
+     )
+-    run_flags = [a for a in base[2:] if a != "--network=none" and not a.startswith("type=bind")]
+-    run_flags = [a for a in run_flags if a not in ("--mount", "--workdir", "/input")]
++    # Construct setup flags separately from tool_argv so tool arguments are never filtered or rewritten
++    setup_flags = [
++        "--rm",
++        "--read-only",
++        "--cap-drop=ALL",
++        "--security-opt=no-new-privileges",
++        "--pids-limit",
++        "256",
++        "--memory",
++        f"{memory_mb}m",
++        "--cpus",
++        "1.0",
++        "--env",
++        "HOME=/tmp",
++    ]
++    run_flags = [*setup_flags, image, *tool_argv]

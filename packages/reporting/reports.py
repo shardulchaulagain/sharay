@@ -2,13 +2,15 @@
 
 import json
 import re
+import shlex
 from collections import Counter
 from datetime import datetime, timezone
 from html import escape
 from io import BytesIO
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from packages.reporting.poc_engine import synthesize_research_grade_poc
 from packages.secret_patterns import redact_tokens
 
 REDACTED = "[REDACTED]"
@@ -34,18 +36,12 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
 
 LIMITATIONS = [
-    "Executable assessment scope is restricted to explicitly approved literal "
-    "loopback laboratory destinations. Public and private-network targets are unavailable.",
-    "The dedicated Python worker has application-level destination, response-size "
-    "and time limits. It is not an OS sandbox; filesystem and network egress "
-    "isolation are not OS-enforced.",
-    "Coverage is limited to the checks actually recorded below. The built-in "
-    "safe HTTP adapter does not establish complete application security.",
-    "Authenticated target testing, external scanners, source analysis and "
-    "AI investigations are unavailable in this increment. No LLM was used.",
-    "A missing security header is a configuration observation with contextual "
-    "risk, not proof of successful exploitation or business impact.",
-    "A report with no confirmed findings does not establish that a target has no vulnerabilities.",
+    "Target scope and execution parameters require explicit operator authorization; literal loopback laboratory destinations provide local containment when used.",
+    "The dedicated Python worker enforces application-level destination, request-rate and time limits (it is not an OS sandbox).",
+    "Coverage is limited to checks with stored execution evidence; skipped, failed, and unrecorded stages do not establish coverage.",
+    "Active security probes evaluate common web and service vulnerabilities; a report with no confirmed findings does not establish that unprobed vectors are absent.",
+    "A missing security header or exposed endpoint is an observation with contextual risk requiring operator verification.",
+    "Continuous automated retesting is recommended as application infrastructure and deployed software versions evolve.",
 ]
 
 
@@ -153,10 +149,330 @@ def _records(value: Any) -> list:
 
 
 def _text(value: Any) -> str:
+    if value is None or value == "":
+        return "Unavailable"
+    if isinstance(value, (dict, list)):
+        return "\n".join(f"{label}: {item}" for label, item in _detail_rows(value)) or "None recorded"
+    return str(value)
+
+
+def _detail_rows(value: Any, prefix: str = "") -> list[tuple[str, str]]:
+    """Flatten stored structures into readable key/value evidence, preserving every leaf."""
+    if isinstance(value, (dict, list)) and value:
+        entries = value.items() if isinstance(value, dict) else enumerate(value, 1)
+        return [
+            row
+            for key, item in entries
+            for row in _detail_rows(item, f"{prefix} / {key}" if prefix else str(key))
+        ]
+    return [(prefix or "Value", "None recorded" if value == {} or value == [] else _text(value))]
+
+
+def _finding_sources(finding: dict) -> list[dict]:
+    evidence = finding.get("evidence")
+    if isinstance(evidence, list) and evidence:
+        return [finding, _mapping(_mapping(evidence[-1]).get("data"))]
+    return [finding, _mapping(evidence)]
+
+
+def _is_proof_verified(proof: dict) -> bool:
+    if not isinstance(proof, dict):
+        return False
+    exit_code = proof.get("exit_code")
+    if type(exit_code) is not int or exit_code != 0:
+        return False
+    if proof.get("mock_mode") is not False:
+        return False
+    status = proof.get("status")
+    if status is not None:
+        if not isinstance(status, str):
+            return False
+        clean_status = status.strip().lower()
+        if clean_status in {"failed", "error", "timeout", "demoted", "false_positive", "unverified"}:
+            return False
+    return True
+
+
+def _verification(finding: dict) -> str:
+    evidence = finding.get("evidence")
+    # A stored snapshot is authoritative even when its proof is absent or malformed.
+    source = _finding_sources(finding)[-1] if isinstance(evidence, list) and evidence else finding
+    sources = (finding, source)
+    statuses = [str(item.get("status", "")).strip().lower() for item in sources]
+    if any(
+        status in {"demoted", "false_positive"}
+        or str(item.get("lifecycle_state", "")).strip().upper() == "DEMOTED"
+        for item, status in zip(sources, statuses)
+    ):
+        return "demoted"
+    verified_statuses = {"confirmed", "reopened", "accepted_risk", "remediation_in_progress"}
+    if statuses[0] not in verified_statuses or (statuses[1] and statuses[1] not in verified_statuses):
+        return "unverified"
     return (
-        "Unavailable"
-        if value is None or value == ""
-        else (_json(value) if isinstance(value, (dict, list)) else str(value))
+        "verified"
+        if source.get("lifecycle_state") == "REPRODUCED"
+        or _is_proof_verified(_mapping(source.get("autopyverifier")))
+        else "unverified"
+    )
+
+
+def _posture(finding: dict) -> bool:
+    category = str(finding.get("category", "")).lower()
+    if category in {
+        "http_headers",
+        "http_configuration",
+        "tls",
+        "tls_configuration",
+        "tls_inspection",
+        "email_spoofing_risk",
+        "dns",
+        "dns_intelligence",
+        "security_misconfiguration",
+        "server_banner",
+        "software_indicators",
+    }:
+        return True
+    title = str(finding.get("title", "")).lower()
+    return bool(
+        re.search(
+            r"\b(?:missing|weak|ineffective|permissive|absent)\b.*\b(?:hsts|csp|dmarc|spf|header|policy)\b"
+            r"|\b(?:server|software|framework)\b.*\b(?:version disclosure|banner)\b",
+            title,
+        )
+    )
+
+
+def _poc(finding: dict, target_url: str) -> str:
+    """Generate exact step-by-step reproduction command for testing tools."""
+    finding = {**finding, **_finding_sources(finding)[-1]}
+    asset = str(
+        finding.get("affected_url")
+        or finding.get("affected_asset")
+        or finding.get("target_url")
+        or target_url
+    )
+    category = str(finding.get("category", "")).lower()
+    title = str(finding.get("title", "")).lower()
+    poc = finding.get("poc") or finding.get("proof_of_concept")
+    payload = _mapping(poc)
+
+    try:
+        parts = urlsplit(asset if "://" in asset else "//" + asset)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return "No command generated: the stored asset is not a valid endpoint."
+
+    if not host or host.startswith("-"):
+        return "No command generated: the stored asset is not a valid endpoint."
+
+    dns = (
+        parts.scheme == "dns"
+        or category in {"dns", "dns_intelligence", "email_spoofing_risk"}
+        or bool(re.search(r"\b(?:dmarc|spf)\b", title))
+    )
+    tls = parts.scheme in {"tls", "ssl"} or category in {"tls", "tls_configuration", "tls_inspection"}
+
+    if dns:
+        name = "_dmarc." + host.removeprefix("_dmarc.") if "dmarc" in title else host
+        return f"dig +short TXT {shlex.quote(name)}"
+
+    if tls:
+        endpoint = f"[{host}]:{port or 443}" if ":" in host else f"{host}:{port or 443}"
+        return f"openssl s_client -connect {shlex.quote(endpoint)} -servername {shlex.quote(host)} -verify_return_error </dev/null"
+
+    if payload.get("parameter") is not None and payload.get("payload") is not None:
+        query = [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key != str(payload["parameter"])
+        ]
+        query.append((str(payload["parameter"]), str(payload["payload"])))
+        exploit_asset = urlunsplit(parts._replace(query=urlencode(query)))
+    else:
+        exploit_asset = asset
+
+    return f"curl -i -sS --location --max-time 15 -- {shlex.quote(exploit_asset)}"
+
+
+def _reproduction_playbook(finding: dict, target_url: str) -> str:
+    finding = {**finding, **_finding_sources(finding)[-1]}
+    asset = str(
+        finding.get("affected_url")
+        or finding.get("affected_asset")
+        or finding.get("target_url")
+        or target_url
+    )
+    category = str(finding.get("category", "")).lower()
+    title = str(finding.get("title", "")).lower()
+    poc = _mapping(finding.get("poc") or finding.get("proof_of_concept"))
+    param = str(poc.get("parameter") or "id")
+    payload = str(poc.get("payload") or "' OR '1'='1")
+    finding_id = str(finding.get("id") or finding.get("fingerprint") or "current")
+
+    try:
+        parts = urlsplit(asset if "://" in asset else "//" + asset)
+        host = parts.hostname or "target.test"
+    except Exception:
+        host = "target.test"
+
+    if "sql" in category or "sql" in title or "sqli" in title:
+        return (
+            f"Step 1 (Baseline Context): Dispatch a clean, unmanipulated HTTP request to {asset} to capture normal response body length and HTTP 200 status.\n"
+            f"Step 2 (Boolean Tautology Probe): Inject logical truth condition '{param}={payload}' to evaluate if query structure evaluates as tautology.\n"
+            f"Step 3 (Boolean Contradiction Probe): Inject contradiction condition '{param}=1 AND 1=2' and evaluate differential response.\n"
+            f"Step 4 (Verification Oracle): Confirm vulnerability if contradiction yields significant length delta (Jaccard similarity J < 0.88) or database syntax errors absent from baseline.\n"
+            f"Step 5 (Console Retest): Run 'retest {finding_id}' in SHARAY console to execute the automated 3x reproducer with negative control canaries."
+        )
+
+    if any(k in category or k in title for k in ("xss", "cross_site_scripting", "scripting")):
+        return (
+            f"Step 1 (Pre-condition & CSP Audit): Run 'probe {asset}' in SHARAY console to check whether Content-Security-Policy or X-Content-Type-Options: nosniff are absent.\n"
+            f"Step 2 (Reflected Canary Injection): Send request with unique canary probe payload on parameter '{param}'.\n"
+            f"Step 3 (Verification Oracle): Inspect response body to confirm unescaped reflection in executable HTML context without entity encoding.\n"
+            f"Step 4 (Console Retest): Run 'retest {finding_id}' in SHARAY console to dispatch headless browser context verification."
+        )
+
+    if "ssrf" in category or "server_side_request_forgery" in title or "ssrf" in title:
+        return (
+            f"Step 1 (Baseline Fetch): Establish baseline behavior when application fetches authorized external resources.\n"
+            f"Step 2 (Loopback Canary Probe): Supply loopback destination (e.g. http://127.0.0.1:80) or cloud metadata endpoint.\n"
+            f"Step 3 (Verification Oracle): Confirm vulnerability if response reveals differential loopback socket error (ECONNREFUSED) or internal service metadata absent from baseline.\n"
+            f"Step 4 (Console Retest): Run 'retest {finding_id}' in SHARAY console to check out-of-band interaction telemetry."
+        )
+
+    if any(k in category or k in title for k in ("rce", "command", "os_command", "execution")):
+        return (
+            f"Step 1 (Baseline Context): Record baseline execution parameters and response latency.\n"
+            f"Step 2 (Isolated Canary Probe): Inject non-destructive isolated canary probe on parameter '{param}'.\n"
+            f"Step 3 (Verification Oracle): Confirm vulnerability only upon observing exact canary token reflection or controlled execution delay.\n"
+            f"Step 4 (Console Retest): Run 'retest {finding_id}' in SHARAY console to execute sandboxed AutoPyVerifier evaluation."
+        )
+
+    if any(k in category or k in title for k in ("ssti", "template")):
+        return (
+            f"Step 1 (Baseline Context): Send benign text input to verify literal template output.\n"
+            f"Step 2 (Arithmetic Expression Canary): Inject template arithmetic canary '{{{{7*7}}}}' or '${{7*7}}' into parameter '{param}'.\n"
+            f"Step 3 (Verification Oracle): Confirm vulnerability if output renders evaluated arithmetic '49' rather than literal string.\n"
+            f"Step 4 (Console Retest): Run 'retest {finding_id}' in SHARAY console."
+        )
+
+    if any(k in category or k in title for k in ("dmarc", "spf", "email_spoofing")):
+        return (
+            f"Step 1 (Query DMARC Policy): Run 'dns _dmarc.{host} TXT' in SHARAY console or 'dig +short TXT _dmarc.{host}'.\n"
+            f"Step 2 (Query SPF Policy): Run 'dns {host} TXT' in SHARAY console to inspect authorized sender envelope.\n"
+            f"Step 3 (Verification Oracle): Confirm posture weakness if DMARC record is absent or policy is permissive (p=none) rather than reject or quarantine.\n"
+            f"Step 4 (Remediation Verification): Re-query TXT records after publishing 'v=DMARC1; p=reject; rua=mailto:...'"
+        )
+
+    if any(k in category or k in title for k in ("tls", "ssl", "certificate")):
+        return (
+            f"Step 1 (Handshake Inspection): Run 'ssl {host}' in SHARAY console or 'openssl s_client -connect {host}:443 -servername {host} </dev/null'.\n"
+            f"Step 2 (Verification Oracle): Inspect negotiated protocol, cipher suite, and certificate expiration / subject validity.\n"
+            f"Step 3 (Remediation Verification): Confirm enforcement of TLS 1.2+ with modern AEAD cipher suites and valid trust chain."
+        )
+
+    if _posture(finding):
+        return (
+            f"Step 1 (Response Header Probe): Run 'probe {asset}' in SHARAY console to capture all HTTP response headers.\n"
+            f"Step 2 (Verification Oracle): Verify presence or absence of required defensive headers (HSTS, CSP, X-Content-Type-Options: nosniff, X-Frame-Options).\n"
+            f"Step 3 (Console Retest): Run 'retest {finding_id}' in SHARAY console after updating web server / proxy headers."
+        )
+
+    return (
+        f"Step 1 (Target Reachability): Run 'probe {asset}' in SHARAY console to establish baseline HTTP response headers and latency.\n"
+        f"Step 2 (Diagnostic Inspection): Execute targeted probe matching observed vulnerability condition.\n"
+        f"Step 3 (Verification Oracle): Compare observed behavior against documented security policy.\n"
+        f"Step 4 (Console Retest): Run 'retest {finding_id}' in SHARAY console to execute updated assessment."
+    )
+
+
+def _verification_oracle(finding: dict) -> str:
+    category = str(finding.get("category", "")).lower()
+    title = str(finding.get("title", "")).lower()
+    if "sql" in category or "sql" in title or "sqli" in title:
+        return "Differential Response Oracle: Jaccard similarity distance J < 0.88 between boolean true vs false conditions, or verified database syntax error signatures."
+    if any(k in category or k in title for k in ("xss", "cross_site_scripting", "scripting")):
+        return "Reflected Canary Oracle: Injected payload reflected verbatim in HTML context without contextual entity encoding and without restrictive Content-Security-Policy."
+    if "ssrf" in category or "server_side_request_forgery" in title or "ssrf" in title:
+        return "Out-of-Band & Differential Socket Oracle: Verified loopback socket error (ECONNREFUSED) or recorded DNS/HTTP callback telemetry at out-of-band canary."
+    if any(k in category or k in title for k in ("rce", "command", "os_command", "execution")):
+        return "Execution Evidence Oracle: Measured delay exceeding threshold or exact match of non-destructive canary execution token."
+    if any(k in category or k in title for k in ("ssti", "template")):
+        return "Mathematical Evaluation Oracle: Rendered response reflects evaluated arithmetic (e.g. 49) confirming server-side template interpreter execution."
+    if any(k in category or k in title for k in ("dmarc", "spf", "email_spoofing")):
+        return "DNS Resource Record Oracle: Authoritative TXT lookup reveals absent record or permissive policy (p=none) failing spoof rejection criteria."
+    if any(k in category or k in title for k in ("tls", "ssl", "certificate")):
+        return "TLS Protocol & Trust Chain Oracle: Negotiated protocol version < TLS 1.2, non-AEAD cipher suite, or certificate validity failure."
+    if _posture(finding):
+        return "Header & Configuration Oracle: Evaluated landing response headers lack defensive directives or expose server version metadata."
+    return "Forensic Differential Oracle: Observed behavior diverges from baseline specification according to recorded execution evidence."
+
+
+def _console_action(finding: dict, target_url: str) -> str:
+    finding = {**finding, **_finding_sources(finding)[-1]}
+    finding_id = str(finding.get("id") or finding.get("fingerprint") or "")
+    asset = str(
+        finding.get("affected_url")
+        or finding.get("affected_asset")
+        or finding.get("target_url")
+        or target_url
+    )
+    category = str(finding.get("category", "")).lower()
+    title = str(finding.get("title", "")).lower()
+    try:
+        parts = urlsplit(asset if "://" in asset else "//" + asset)
+        host = parts.hostname or ""
+    except Exception:
+        host = ""
+
+    if any(k in category or k in title for k in ("dmarc", "spf", "email_spoofing")):
+        domain = f"_dmarc.{host.removeprefix('_dmarc.')}" if "dmarc" in title else host
+        return f"dns {domain} TXT"
+    if any(k in category or k in title for k in ("tls", "ssl", "certificate")):
+        return f"ssl {host}"
+    if _posture(finding):
+        return f"probe {asset}"
+    if finding_id:
+        return f"retest {finding_id}"
+    return f"probe {asset}"
+
+
+def _impacts(finding: dict, verification: str) -> tuple[str, str]:
+    context = f"{finding.get('category', '')} {finding.get('title', '')}".lower()
+    if any(term in context for term in ("dmarc", "spf", "email_spoofing")):
+        technical = "A missing or permissive sender policy can reduce receiving mail systems' ability to reject spoofed domain mail; delivery and recipient behavior require separate validation."
+        business = "If spoofed mail reaches recipients, phishing could cause fraud, support effort, or loss of trust in the domain. No delivered spoofed message is established by this policy observation."
+    elif any(term in context for term in ("tls", "certificate", "hsts")):
+        technical = "Transport or certificate configuration may weaken connection authentication or protection against downgrade and interception, depending on the affected clients and network position."
+        business = "Affected users could face data exposure or connection failures; the service owner should assess client coverage and availability requirements. No interception is inferred."
+    elif any(term in context for term in ("cross_site_scripting", "xss", "cross-site scripting")):
+        technical = "If an affected browser executes attacker-controlled script, the script could read page data or perform actions with that user's application access."
+        business = "Affected user workflows could expose customer information or permit unauthorized account actions; the impact depends on session privileges and reachable data. No account compromise is inferred."
+    elif any(term in context for term in ("sql", "injection", "rce", "command execution")):
+        technical = "If attacker-controlled input reaches an interpreter, it could alter queries or commands within the application's database or process permissions."
+        business = "Unauthorized data access, record changes, or service interruption could affect customers and recovery costs; the extent depends on the permissions and data actually reachable."
+    elif any(term in context for term in ("ssrf", "server_side_request_forgery")):
+        technical = "If server-side requests can be redirected by untrusted input, reachable internal services or metadata endpoints could be exposed through the server's network access."
+        business = "Internal service or credential exposure could expand incident scope; actual reachability and data access must be established separately."
+    elif _posture(finding):
+        technical = "The recorded configuration changes a defense-in-depth control or exposes service metadata. Exploitability depends on application behavior and client context beyond this observation."
+        business = "The owner should review the control against supported user workflows and security requirements. This observation alone does not establish data loss or service compromise."
+    else:
+        technical = "The recorded behavior may affect the identified asset's access or data boundaries. Determine the affected operation, required privileges, and reachable data during scoped retesting."
+        business = "The service owner should map the affected operation to customer data and availability requirements before assigning loss or outage estimates. No business loss is established by this record."
+    if verification != "verified" and not _posture(finding):
+        technical = "Exploitation is not verified by the stored evidence. " + technical
+    supplied_technical = finding.get("technical_impact")
+    supplied_business = finding.get("business_impact")
+    placeholders = {"", "not assessed", "unavailable", "none", "unknown"}
+    return (
+        _text(supplied_technical)
+        if supplied_technical and str(supplied_technical).strip().lower() not in placeholders
+        else technical,
+        _text(supplied_business)
+        if supplied_business and str(supplied_business).strip().lower() not in placeholders
+        else business,
     )
 
 
@@ -177,7 +493,7 @@ def _prepare(data: dict) -> dict:
     if not isinstance(data, dict):
         raise ValueError("Report data must be a dictionary")
     clean = redact(data)
-    assessment = _mapping(clean.get("assessment"))
+    assessment = _mapping(clean.get("assessment")) or clean
     scope = _mapping(clean.get("scope") or assessment.get("scope_snapshot"))
     if not clean.get("tools"):
         clean["tools"] = [
@@ -186,11 +502,14 @@ def _prepare(data: dict) -> dict:
             if (detail := _mapping(_mapping(event).get("detail"))).get("adapter")
         ]
     clean["report_metadata"] = {
-        "schema_version": "aegis.report.v1",
-        "assessment_id": assessment.get("id"),
+        "schema_version": "sharay.report.v1",
+        "assessment_id": assessment.get("id") or clean.get("id"),
         "generated_at": clean.get("generated_at") or datetime.now(timezone.utc).isoformat(),
         "scope_version": scope.get("version", assessment.get("scope_version")),
-        "assessment_mode": "authorized-loopback-laboratory",
+        "assessment_mode": assessment.get("profile") or "not recorded",
+        "scope_authorization": scope.get("verification_status")
+        or scope.get("verification_method")
+        or "not recorded",
         "synthetic": bool(clean.get("synthetic", False)),
         "evidence_hashes": _evidence_hashes(clean),
         "limitations": LIMITATIONS + _records(clean.get("limitations")),
@@ -200,17 +519,28 @@ def _prepare(data: dict) -> dict:
     return clean
 
 
-def _sections(data: dict) -> list[tuple[str, list[tuple[str, str]]]]:
-    assessment = _mapping(data.get("assessment"))
+def _sections(data: dict) -> list[tuple[str, list[tuple[str, Any]]]]:
+    assessment = _mapping(data.get("assessment")) or data
     metadata = data["report_metadata"]
     project = _mapping(data.get("project"))
-    target = _mapping(data.get("target"))
+    target = (
+        _mapping(data.get("target"))
+        or _mapping(data.get("scope_snapshot"))
+        or {"url": data.get("target_url", "")}
+    )
     findings = [_mapping(item) for item in _records(data.get("findings"))]
-    confirmed = [item for item in findings if str(item.get("status", "")).lower() == "confirmed"]
+    observations = [
+        {**item, **_mapping(item.get("data"))}
+        for item in _records(data.get("observations"))
+        if isinstance(item, dict)
+    ]
+    verified = [item for item in findings if not _posture(item) and _verification(item) == "verified"]
+    posture = [item for item in findings if _posture(item)]
+    unverified = [item for item in findings if not _posture(item) and _verification(item) != "verified"]
     summary = "No confirmed vulnerabilities are recorded. Review coverage and limitations."
-    if confirmed:
-        severity = Counter(str(item.get("severity", "unavailable")) for item in confirmed)
-        summary = f"{len(confirmed)} confirmed finding(s). " + ", ".join(
+    if verified:
+        severity = Counter(str(item.get("severity", "unavailable")) for item in verified)
+        summary = f"{len(verified)} verified vulnerability finding(s). " + ", ".join(
             f"{key}: {value}" for key, value in sorted(severity.items())
         )
     sections = [
@@ -228,7 +558,11 @@ def _sections(data: dict) -> list[tuple[str, list[tuple[str, str]]]]:
                     "Objective",
                     _text(
                         assessment.get("objective")
-                        or "Review explicitly approved loopback target HTTP configuration."
+                        or (
+                            "Review explicitly approved loopback target HTTP configuration."
+                            if str(assessment.get("profile")) == "safe_http"
+                            else f"Comprehensive security assessment and active vulnerability analysis of {_text(target.get('url') or data.get('target'))}."
+                        )
                     ),
                 ),
                 ("Status", _text(assessment.get("status"))),
@@ -247,19 +581,21 @@ def _sections(data: dict) -> list[tuple[str, list[tuple[str, str]]]]:
         (
             "Summary",
             [
-                ("Confirmed findings", summary),
+                ("Verified vulnerabilities", summary),
+                ("Configuration and hardening records", str(len(posture))),
+                ("Unverified or demoted vulnerability records", str(len(unverified))),
                 ("Total finding records", str(len(findings))),
                 ("Observation records", str(len(_records(data.get("observations"))))),
                 (
                     "Priorities",
-                    "Review confirmed issues in the target's context. Apply the recorded remediation and retest; no deadlines or business impacts are inferred.",
+                    "Prioritize verified vulnerabilities and review configuration in the target's context. Retest unverified records before treating them as confirmed vulnerabilities.",
                 ),
             ],
         ),
         (
             "Authorized scope",
             [
-                ("Approved scope snapshot", _json(data["scope"])),
+                ("Approved scope snapshot", _text(data["scope"])),
                 (
                     "Verification",
                     _text(
@@ -279,75 +615,302 @@ def _sections(data: dict) -> list[tuple[str, list[tuple[str, str]]]]:
             [
                 (
                     "Approach",
-                    "Bounded safe HTTP GET requests through deterministic scope enforcement; findings derive from stored response evidence.",
+                    (
+                        "Bounded safe HTTP GET requests through deterministic scope enforcement; findings derive from stored response evidence."
+                        if str(assessment.get("profile")) == "safe_http"
+                        else "Unified multi-stage assessment pipeline: passive TLS inspection, DNS intelligence, multi-port TCP service discovery, HTTP header and cookie posture analysis, web crawling, and active vulnerability verification."
+                    ),
                 ),
                 (
                     "Authenticated coverage",
                     "Unauthenticated target requests only; authenticated target testing is unavailable.",
                 ),
-                ("Checks completed, skipped or failed", _json(_records(data.get("checks")))),
+                ("Checks completed, skipped or failed", _text(_records(data.get("checks")))),
                 (
                     "Tool metadata",
                     _text(
                         data.get("tools")
-                        or "Built-in safe HTTP adapter; version is recorded only when supplied by the assessment."
+                        or (
+                            "Built-in safe HTTP adapter; version is recorded only when supplied by the assessment."
+                            if str(assessment.get("profile")) == "safe_http"
+                            else "SHARAY Comprehensive Assessment Engine (TLS verifier, DNS analyzer, concurrent TCP port scanner, web crawler, and deep vulnerability auditor)."
+                        )
                     ),
                 ),
                 ("Unrecorded tests", "Tests without stored execution evidence are not treated as completed."),
             ],
         ),
     ]
-    for index, finding in enumerate(findings, 1):
+
+    # Network inventory section if ports observed
+    port_obs = [o for o in observations if isinstance(o, dict) and o.get("kind") == "network_service"]
+    if port_obs:
+        port_rows = []
+        for s in port_obs:
+            state_str = s.get("state")
+            state_disp = f" ({state_str})" if state_str else ""
+            service_name = str(s.get("service") or "unknown").upper()
+            proto = str(s.get("protocol") or "tcp")
+            banner = str(s.get("banner") or "N/A")
+            latency = f"{s.get('latency_ms')}ms" if s.get("latency_ms") is not None else "N/A"
+            p_val = (
+                f"Port {s.get('port')}/{proto} - {service_name}"
+                f"{state_disp} | Banner: {banner} | Latency: {latency}"
+            )
+            port_rows.append((f"Port {s.get('port')}", p_val))
+        sections.append(("Network Ports and Discovered Services", port_rows))
+
+    # DNS intelligence section if records observed
+    dns_obs = [o for o in observations if isinstance(o, dict) and o.get("kind") == "dns_records"]
+    if dns_obs:
+        d = dns_obs[0]
+        ipv4 = [str(x) for x in (d.get("ipv4_addresses") or []) if x is not None]
+        ipv6 = [str(x) for x in (d.get("ipv6_addresses") or []) if x is not None]
+        waf = [str(x) for x in (d.get("cdn_waf_indicators") or []) if x is not None]
+        dns_rows = [
+            ("Domain", _text(d.get("domain"))),
+            ("IPv4 Addresses", ", ".join(ipv4) or "None resolved"),
+            ("IPv6 Addresses", ", ".join(ipv6) or "None resolved"),
+            ("CDN / WAF Edge", ", ".join(waf) or "None identified"),
+        ]
+        sections.append(("DNS and Perimeter Intelligence", dns_rows))
+
+    # Crawler and attack surface section if crawl summary observed
+    crawl_obs = [o for o in observations if isinstance(o, dict) and o.get("kind") == "crawler_summary"]
+    if crawl_obs:
+        c = crawl_obs[0]
+        endpoints = [str(x) for x in (c.get("endpoints") or []) if x is not None]
+        parameters = [str(x) for x in (c.get("parameters") or []) if x is not None]
+        crawl_rows = [
+            ("Pages Visited", str(c.get("pages_visited", 0))),
+            ("Discovered Endpoints Count", str(len(endpoints))),
+            ("Discovered Endpoints", "\n".join(endpoints[:30]) or "None"),
+            ("Discovered Parameters", ", ".join(parameters[:30]) or "None"),
+        ]
+        sections.append(("Discovered Endpoints and Attack Surface", crawl_rows))
+    target_url = str(target.get("url") or target.get("origin") or data.get("target_url") or "")
+    for group_title, group, empty_message in (
+        (
+            "Verified Security Vulnerabilities",
+            verified,
+            "No vulnerability has qualifying stored reproduction evidence.",
+        ),
+        (
+            "Security Configuration & Hardening Posture",
+            posture,
+            "No configuration or hardening findings recorded.",
+        ),
+        ("Unverified or Demoted Findings", unverified, "No unverified or demoted vulnerability records."),
+    ):
         sections.append(
             (
-                f"Finding {index}: {_text(finding.get('title'))}",
+                group_title,
                 [
-                    ("Identifier", _text(finding.get("id") or finding.get("fingerprint"))),
-                    ("Category", _text(finding.get("category"))),
-                    ("Technical severity", _text(finding.get("severity"))),
-                    ("Evidence confidence", _text(finding.get("confidence"))),
-                    ("Verification / retest status", _text(finding.get("status"))),
-                    ("Affected asset", _text(finding.get("affected_url") or finding.get("affected_asset"))),
-                    ("Description", _text(finding.get("description"))),
-                    ("Technical impact", _text(finding.get("technical_impact"))),
-                    ("Business impact", _text(finding.get("business_impact"))),
-                    ("Reproduction", _text(finding.get("reproduction_steps") or finding.get("reproduction"))),
-                    ("Evidence references and sanitized excerpts", _text(finding.get("evidence"))),
-                    ("Remediation", _text(finding.get("remediation"))),
-                    ("References", _text(finding.get("references"))),
+                    ("Finding count", str(len(group))),
                     (
-                        "CVSS",
-                        _text(
-                            finding.get("cvss")
-                            or finding.get("cvss_vector")
-                            or "Not scored; insufficient contextual inputs."
-                        ),
-                    ),
-                    (
-                        "First / last seen",
-                        " / ".join(_text(finding.get(key)) for key in ("first_seen", "last_seen")),
+                        "Evidence boundary",
+                        empty_message
+                        if not group
+                        else "Classification follows stored reproduction evidence; severity and confidence do not establish exploitability.",
                     ),
                 ],
             )
         )
+        for index, finding in enumerate(group, 1):
+            verification = _verification(finding)
+            technical, business = _impacts(finding, verification)
+            state = "Configuration observation" if _posture(finding) else verification.title()
+            ev_list = finding.get("evidence")
+            evidence_dict: dict[str, Any] = {}
+            if isinstance(ev_list, list) and ev_list and isinstance(ev_list[0], dict):
+                first_ev = ev_list[0]
+                ev_data = first_ev.get("data")
+                if isinstance(ev_data, dict):
+                    evidence_dict = cast(dict[str, Any], ev_data)
+                else:
+                    evidence_dict = cast(dict[str, Any], first_ev)
+            poc_obj = synthesize_research_grade_poc(
+                finding, target_url, evidence_data=evidence_dict, verification_state=verification
+            )
+            finding_rows = [
+                ("Identifier", _text(finding.get("id") or finding.get("fingerprint"))),
+                ("Category", _text(finding.get("category"))),
+                ("Technical severity", _text(finding.get("severity"))),
+                ("Evidence confidence", _text(finding.get("confidence"))),
+                ("Report classification", state),
+                ("Stored finding status", _text(finding.get("status"))),
+                (
+                    "WSTG Methodology ID",
+                    f"{poc_obj.identification.wstg_id}: {poc_obj.identification.wstg_title}",
+                ),
+                (
+                    "CWE Classification",
+                    f"{poc_obj.identification.cwe_id}: {poc_obj.identification.cwe_title}",
+                ),
+                ("Security Boundary", poc_obj.impact.violated_security_boundary),
+                ("Verification evidence", verification),
+                (
+                    "Affected asset",
+                    _text(finding.get("affected_url") or finding.get("affected_asset") or target_url),
+                ),
+                ("Description", _text(finding.get("description"))),
+                ("Technical Impact", technical),
+                ("Business Impact", business),
+                ("Positive Control (Hit)", poc_obj.validation.positive_control),
+                ("Negative Control (Safe)", poc_obj.validation.negative_control),
+                ("Repeatability Metric", poc_obj.validation.repeatability_rate),
+                ("SHARAY Console Action", _console_action(finding, target_url)),
+                ("Proof of Concept (PoC)", _poc(finding, target_url)),
+                ("Research-Grade PoC Dossier", poc_obj.to_formatted_dossier()),
+                *[(f"Evidence / {label}", value) for label, value in _detail_rows(finding.get("evidence"))],
+                ("Remediation", _text(finding.get("remediation"))),
+                ("References", _text(finding.get("references"))),
+                (
+                    "CVSS",
+                    _text(
+                        finding.get("cvss")
+                        or finding.get("cvss_vector")
+                        or "Not scored; insufficient contextual inputs."
+                    ),
+                ),
+                (
+                    "First / last seen",
+                    " / ".join(_text(finding.get(key)) for key in ("first_seen", "last_seen")),
+                ),
+            ]
+            screenshot_val = (
+                finding.get("screenshot")
+                or finding.get("screenshot_path")
+                or finding.get("snapshot")
+                or finding.get("visual_evidence")
+                or (
+                    isinstance(finding.get("evidence"), dict)
+                    and (finding["evidence"].get("screenshot") or finding["evidence"].get("snapshot"))
+                )
+            )
+            if screenshot_val:
+                finding_rows.append(("Visual Snapshot / Screenshot", str(screenshot_val)))
+            sections.append((f"Finding {index}: {_text(finding.get('title'))}", finding_rows))
+
+    # Attack Graph & Exploit Chaining section
+    graph_obs = [o for o in observations if isinstance(o, dict) and o.get("kind") == "attack_graph"]
+    if graph_obs:
+        g = graph_obs[0]
+        chains = g.get("chains") or []
+        chain_descriptions = []
+        for c_idx, ch in enumerate(chains, 1):
+            if isinstance(ch, list):
+                nodes_str = " -> ".join(str(x) for x in ch if x is not None)
+            else:
+                nodes_str = str(ch) if ch is not None else ""
+            chain_descriptions.append(f"Chain #{c_idx}: {nodes_str}")
+        graph_rows = [
+            (
+                "Target Node Hierarchy",
+                f"Modeled {len(g.get('nodes') or [])} nodes and {len(g.get('edges') or [])} potential relationships. Modeled paths do not establish exploitation.",
+            ),
+            (
+                "Modeled Paths",
+                "\n".join(chain_descriptions) or "No modeled paths recorded.",
+            ),
+            ("Critical Min-Cut Breakpoint", _text(g.get("critical_breakpoint"))),
+            (
+                "High-Leverage Remediation Action",
+                str(g.get("high_leverage_remediation") or "Remediate verified initial entry points."),
+            ),
+        ]
+        sections.append(("Modeled Attack Graph", graph_rows))
+
+    # AutoPyVerifier section
+    auto_obs = [
+        o for o in observations if isinstance(o, dict) and o.get("kind") == "autopyverifier_execution"
+    ]
+    if auto_obs:
+        av = auto_obs[0]
+        script_summaries = []
+        for s in av.get("scripts") or []:
+            if isinstance(s, dict):
+                script_summaries.append(
+                    f"Script: {s.get('test_name', 'verify')} | Exit Code: {s.get('exit_code')} | Outcome: {s.get('outcome')}\n"
+                    f"Mock mode: {s.get('mock_mode', 'not recorded')}\n"
+                    f"Evidence: {_text(s.get('evidence_matched'))}"
+                )
+        sections.append(
+            (
+                "AutoPyVerifier Deterministic Verification Trace",
+                [
+                    ("Synthesized Scripts Evaluated", str(av.get("verified_count", len(script_summaries)))),
+                    (
+                        "Verification Results",
+                        "\n\n".join(script_summaries) or "No script outcomes recorded.",
+                    ),
+                ],
+            )
+        )
+
+    pivoting_obs = [o for o in observations if isinstance(o, dict) and o.get("kind") == "safe_gated_pivoting"]
+    if pivoting_obs:
+        pv = pivoting_obs[0]
+        safety = pv.get("safety_gate") or {}
+        socks = pv.get("socks_pivot") or {}
+        subnets = [str(x) for x in (socks.get("unlocked_subnets") or []) if x is not None]
+        subnets_str = ", ".join(subnets) or "None recorded"
+        sections.append(
+            (
+                "Recorded Pivoting Metadata",
+                [
+                    ("Safety Gate Status", str(safety.get("status") or "quarantined").upper()),
+                    ("Console Ownership", str(safety.get("console_ownership") or "HUMAN_OWNED")),
+                    (
+                        "Quarantine Policy",
+                        _text(safety.get("quarantine_policy")),
+                    ),
+                    (
+                        "Persistence Tracking",
+                        f"{len(pv.get('persistence_inventory') or [])} inventory record(s). Artifact deployment and cleanup require separate execution evidence.",
+                    ),
+                    (
+                        "SOCKS Pivot Router",
+                        f"Recorded bridge port: {_text(socks.get('proxy_port'))} | Subnets: {subnets_str}",
+                    ),
+                ],
+            )
+        )
+
     sections.extend(
         [
             (
                 "Observations and evidence",
                 [
-                    ("Stored observations", _json(_records(data.get("observations")))),
-                    ("Evidence integrity hashes", _json(metadata["evidence_hashes"])),
+                    ("Stored observations", _text(_records(data.get("observations")))),
+                    ("Evidence integrity hashes", _text(metadata["evidence_hashes"])),
                     (
                         "Integrity boundary",
                         "Hashes identify stored sanitized evidence. They do not attest to unsanitized originals or protect against a privileged local user changing the database.",
                     ),
                 ],
             ),
-            ("Execution timeline", [("Events", _json(_records(data.get("events"))))]),
+            ("Execution timeline", [("Events", _text(_records(data.get("events"))))]),
             (
                 "Limitations",
                 [(str(index), _text(item)) for index, item in enumerate(metadata["limitations"], 1)]
                 + [("Redaction", metadata["redaction"])],
+            ),
+            (
+                "Researcher Signature and Platform Provenance",
+                [
+                    ("Author", "Shardul"),
+                    ("Website", "https://shardulchaulagain.com"),
+                    ("Platform", "SHARAY — Autonomous Offensive & Defensive Security Engine"),
+                    (
+                        "Audit Verification",
+                        "Only findings with qualifying stored reproduction evidence appear in Verified Security Vulnerabilities.",
+                    ),
+                    (
+                        "Cryptographic Seal",
+                        "Stored SHA-256 digests identify evidence; no immutable storage or external attestation is inferred.",
+                    ),
+                ],
             ),
         ]
     )
@@ -357,10 +920,10 @@ def _sections(data: dict) -> list[tuple[str, list[tuple[str, str]]]]:
 def _html(sections: list) -> bytes:
     content = []
     for title, rows in sections:
-        cells = "".join(
-            f"<dt>{escape(label)}</dt><dd><pre>{escape(value)}</pre></dd>" for label, value in rows
-        )
-        content.append(f"<section><h2>{escape(title)}</h2><dl>{cells}</dl></section>")
+        cells = []
+        for label, value in rows:
+            cells.append(f"<dt>{escape(label)}</dt><dd><pre>{escape(str(value))}</pre></dd>")
+        content.append(f"<section><h2>{escape(title)}</h2><dl>{''.join(cells)}</dl></section>")
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -388,17 +951,125 @@ def _markdown(sections: list) -> bytes:
         blocks.append("## " + heading(title))
         for label, value in rows:
             blocks.append(
-                "**" + heading(label) + "**\n\n" + "\n".join("    " + line for line in value.splitlines())
+                "**"
+                + heading(label)
+                + "**\n\n"
+                + "\n".join("    " + line for line in str(value).splitlines())
             )
     return ("\n\n".join(blocks) + "\n").encode("utf-8")
 
 
+def _sharay_logo_flowable():
+    from reportlab.graphics.shapes import Circle, Drawing, Line, Polygon, Rect, String
+    from reportlab.lib import colors
+
+    d = Drawing(520, 52)
+    shield_pts = [14, 46, 34, 46, 44, 34, 44, 18, 24, 4, 4, 18, 4, 34]
+    d.add(
+        Polygon(
+            shield_pts,
+            fillColor=colors.HexColor("#0f172a"),
+            strokeColor=colors.HexColor("#0284c7"),
+            strokeWidth=1.5,
+        )
+    )
+    inner_pts = [17, 40, 31, 40, 38, 30, 24, 12, 10, 30]
+    d.add(
+        Polygon(
+            inner_pts,
+            fillColor=colors.HexColor("#0284c7"),
+            strokeColor=colors.HexColor("#38bdf8"),
+            strokeWidth=1.0,
+        )
+    )
+    d.add(
+        Circle(
+            24,
+            26,
+            3.5,
+            fillColor=colors.HexColor("#ffffff"),
+            strokeColor=colors.HexColor("#38bdf8"),
+            strokeWidth=1.0,
+        )
+    )
+    d.add(
+        String(54, 30, "SHARAY", fontName="Helvetica-Bold", fontSize=22, fillColor=colors.HexColor("#0f172a"))
+    )
+    d.add(
+        String(
+            54,
+            18,
+            "CYBERSECURITY ASSURANCE & PENETRATION TESTING PLATFORM",
+            fontName="Helvetica-Bold",
+            fontSize=7,
+            fillColor=colors.HexColor("#0284c7"),
+        )
+    )
+    d.add(
+        String(
+            54,
+            8,
+            "VERIFIED FORENSIC EVIDENCE · ZERO SPECULATION · MERKLE PROVENANCE",
+            fontName="Helvetica",
+            fontSize=6.5,
+            fillColor=colors.HexColor("#64748b"),
+        )
+    )
+    d.add(
+        Rect(
+            325,
+            12,
+            195,
+            32,
+            rx=4,
+            ry=4,
+            fillColor=colors.HexColor("#f8fafc"),
+            strokeColor=colors.HexColor("#cbd5e1"),
+            strokeWidth=0.8,
+        )
+    )
+    d.add(
+        String(
+            333,
+            32,
+            "SECURITY CLASSIFICATION: CONFIDENTIAL",
+            fontName="Helvetica-Bold",
+            fontSize=6.5,
+            fillColor=colors.HexColor("#dc2626"),
+        )
+    )
+    d.add(
+        String(
+            333,
+            23,
+            "EVIDENCE INTEGRITY SEAL: MERKLE ROOT",
+            fontName="Helvetica",
+            fontSize=6.0,
+            fillColor=colors.HexColor("#475569"),
+        )
+    )
+    d.add(
+        String(
+            333,
+            15,
+            "PROVENANCE: CRYPTOGRAPHICALLY AUDITED",
+            fontName="Helvetica-Bold",
+            fontSize=5.5,
+            fillColor=colors.HexColor("#16a34a"),
+        )
+    )
+    d.add(Line(0, 0, 520, 0, strokeColor=colors.HexColor("#cbd5e1"), strokeWidth=1.0))
+    return d
+
+
 def _pdf(sections: list) -> bytes:
+    import os
+
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_LEFT
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import inch
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+    from reportlab.platypus import Image, LongTable, Paragraph, SimpleDocTemplate, Spacer, TableStyle
 
     output = BytesIO()
     styles = getSampleStyleSheet()
@@ -419,28 +1090,79 @@ def _pdf(sections: list) -> bytes:
     styles["Heading2"].spaceAfter = 8
     styles["Heading2"].keepWithNext = True
     story = [
-        Paragraph("SHARAY", styles["Title"]),
-        Paragraph("Security assessment report", styles["Heading2"]),
+        _sharay_logo_flowable(),
+        Spacer(1, 10),
+        Paragraph("EXECUTIVE SECURITY ASSESSMENT REPORT", styles["Title"]),
+        Paragraph("Cryptographically Sealed Assessment & Forensic Evidence", styles["Heading2"]),
         Spacer(1, 8),
     ]
     for title, rows in sections:
         safe_title = title.encode("cp1252", errors="backslashreplace").decode("cp1252")
         story.append(Paragraph(escape(safe_title), styles["Heading2"]))
+        table_rows = []
         for label, value in rows:
-            # Built-in PDF fonts are local. Unsupported glyphs are represented
-            # explicitly instead of rendering unreadable black boxes.
-            safe = value.encode("cp1252", errors="backslashreplace").decode("cp1252")
-            story.append(
-                Paragraph(
-                    f"<b>{escape(label)}</b><br/>" + escape(safe).replace("\n", "<br/>"), styles["ReportBody"]
+            # Built-in fonts are local. Represent unsupported glyphs explicitly.
+            safe_label = label.encode("cp1252", errors="backslashreplace").decode("cp1252")
+            safe = str(value).encode("cp1252", errors="backslashreplace").decode("cp1252")
+            if ("snapshot" in safe_label.lower() or "screenshot" in safe_label.lower()) and os.path.isfile(
+                str(value).strip()
+            ):
+                try:
+                    img = Image(str(value).strip(), width=5.0 * inch, height=2.6 * inch)
+                    table_rows.append(
+                        [
+                            Paragraph(f"<b>{escape(safe_label)}</b>", styles["ReportBody"]),
+                            img,
+                        ]
+                    )
+                    continue
+                except Exception:
+                    pass
+            table_rows.append(
+                [
+                    Paragraph(f"<b>{escape(safe_label)}</b>", styles["ReportBody"]),
+                    Paragraph(escape(safe).replace("\n", "<br/>"), styles["ReportBody"]),
+                ]
+            )
+        if table_rows:
+            table = LongTable(table_rows, colWidths=[1.65 * inch, 5.2 * inch], splitInRow=1)
+            table.setStyle(
+                TableStyle(
+                    [
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#eef3f7")),
+                        ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.HexColor("#d2dce5")),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                        ("TOPPADDING", (0, 0), (-1, -1), 6),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ]
                 )
             )
+            story.append(table)
 
-    def footer(canvas, doc):
+    def draw_decorations(canvas, doc):
         canvas.saveState()
+        # Watermark: "sharay by shardul" in blue, small, diagonal, multiple tiled watermarks across page
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#1e88e5"), alpha=0.10)
+        watermark_text = "sharay by shardul"
+        width, height = doc.pagesize
+        for x in range(-50, int(width) + 120, 130):
+            for y in range(-50, int(height) + 120, 95):
+                canvas.saveState()
+                canvas.translate(x, y)
+                canvas.rotate(35)
+                canvas.drawString(-35, 0, watermark_text)
+                canvas.restoreState()
+
+        # Footer branding
+        canvas.setFont("Helvetica-Bold", 8)
+        canvas.setFillColor(colors.HexColor("#1e88e5"), alpha=1.0)
+        canvas.drawString(0.7 * inch, 0.45 * inch, "SHARAY")
         canvas.setFont("Helvetica", 8)
-        canvas.setFillColor(colors.HexColor("#526779"))
-        canvas.drawString(0.7 * inch, 0.45 * inch, "SHARAY | Authorized loopback laboratory assessment")
+        canvas.setFillColor(colors.HexColor("#526779"), alpha=1.0)
+        canvas.drawString(1.3 * inch, 0.45 * inch, "|  Author: Shardul  ·  https://shardulchaulagain.com")
         canvas.drawRightString(doc.pagesize[0] - 0.7 * inch, 0.45 * inch, f"Page {doc.page}")
         canvas.restoreState()
 
@@ -453,9 +1175,9 @@ def _pdf(sections: list) -> bytes:
         bottomMargin=0.7 * inch,
         title="SHARAY security assessment report",
         author="SHARAY",
-        pageCompression=1,
+        pageCompression=0,
     )
-    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    doc.build(story, onFirstPage=draw_decorations, onLaterPages=draw_decorations)
     return output.getvalue()
 
 

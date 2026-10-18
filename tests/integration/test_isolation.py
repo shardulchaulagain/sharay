@@ -14,7 +14,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from services.scanner_worker import NOT_ENFORCED, PROBED, IsolationError, attest, run_isolated
+from services.scanner_worker import (
+    MAX_OUTPUT_BYTES,
+    NOT_ENFORCED,
+    PROBED,
+    IsolationError,
+    attest,
+    run_isolated,
+)
 
 PYTHON = os.path.realpath(sys.executable)
 PREFIX = Path(sys.base_prefix)
@@ -276,6 +283,17 @@ print(run_isolated(["/usr/bin/true"], max_seconds=300).outcome, attest()["availa
         )
         self.assertEqual(written, [errno.EFBIG] + [0] * 8)
         self.assertIn("scratch_quota_for_writing_tools", NOT_ENFORCED)
+
+    def test_a_report_larger_than_one_mib_is_captured_whole_up_to_the_parser_budget(self):
+        # Regression: the runner cap must reach the parsers' 10 MiB MAX_REPORT_BYTES, or a valid
+        # 1-10 MiB scan is truncated here and then rejected by the parser as over budget.
+        size = 2 * 1024 * 1024
+        whole = run_python(f"import sys; sys.stdout.write('x' * {size})", max_output_bytes=MAX_OUTPUT_BYTES)
+        self.assertEqual(
+            (whole.outcome, len(whole.stdout), whole.output_truncated), ("completed", size, False)
+        )
+        with self.assertRaises(IsolationError):
+            run_isolated([PYTHON, "-c", "pass"], max_output_bytes=MAX_OUTPUT_BYTES + 1)
 
     def test_nothing_is_writable_unless_scratch_writes_are_granted(self):
         actions = """[

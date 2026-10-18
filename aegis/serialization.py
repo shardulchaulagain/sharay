@@ -46,7 +46,7 @@ def target_view(row: Target) -> dict[str, Any]:
     from packages.security_policies import PolicyError, check_execution_url
 
     try:
-        check_execution_url(row.scope, row.url)
+        check_execution_url(row.scope, row.url, owned=row.verification_status == "operator_authorized")
         execution_blocker = None
     except PolicyError as exc:
         execution_blocker = str(exc)
@@ -95,7 +95,17 @@ def observation_view(row: Observation) -> dict[str, Any]:
 
 
 def finding_view(db: Session, row: Finding, assessment_id: str | None = None) -> dict[str, Any]:
-    query = select(FindingEvidence).where(FindingEvidence.finding_id == row.id)
+    query = (
+        select(FindingEvidence)
+        .join(Assessment, Assessment.id == FindingEvidence.assessment_id)
+        .where(FindingEvidence.finding_id == row.id)
+        .order_by(
+            Assessment.finished_at.asc().nullsfirst(),
+            Assessment.created_at,
+            Assessment.id,
+            FindingEvidence.id,
+        )
+    )
     if assessment_id:
         query = query.where(FindingEvidence.assessment_id == assessment_id)
     evidence: list[dict[str, Any]] = [
@@ -144,6 +154,9 @@ def finding_view(db: Session, row: Finding, assessment_id: str | None = None) ->
             "description",
             "remediation",
             "affected_url",
+            "poc",
+            "autopyverifier",
+            "lifecycle_state",
         ):
             if field in snapshot:
                 result[field] = snapshot[field]

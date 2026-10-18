@@ -1,0 +1,51 @@
+{
+  "target": "vulnerable_mock_server",
+  "version": "1.0",
+  "vulnerabilities": [
+    {
+      "id": "GT-SQLI-01",
+      "vulnerability_class": "sql_injection",
+      "cwe": "CWE-89",
+      "severity": "critical",
+      "endpoint": "/vulnerabilities/sqli/",
+      "parameter": "id",
+      "reproducible": true
+    },
+    {
+      "id": "GT-CMDI-01",
+      "vulnerability_class": "command_injection",
+      "cwe": "CWE-78",
+      "severity": "critical",
+      "endpoint": "/ping.php",
+      "parameter": "ip",
+      "reproducible": true
+    },
+    {
+      "id": "GT-SSRF-01",
+      "vulnerability_class": "ssrf",
+      "cwe": "CWE-918",
+      "severity": "high",
+      "endpoint": "/fetch.php",
+      "parameter": "url",
+      "reproducible": true
+    },
+    {
+      "id": "GT-INFO-01",
+      "vulnerability_class": "information_disclosure",
+      "cwe": "CWE-200",
+      "severity": "medium",
+      "endpoint": "/phpinfo.php",
+      "parameter": null,
+      "reproducible": true
+    },
+    {
+      "id": "GT-SECRET-01",
+      "vulnerability_class": "secret_exposure",
+      "cwe": "CWE-522",
+      "severity": "high",
+      "endpoint": "/.env",
+      "parameter": null,
+      "reproducible": true
+    }
+  ]
+}

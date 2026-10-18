@@ -78,6 +78,29 @@ class UpdateCoreTests(unittest.TestCase):
         os.mkfifo(fifo)
         self.refused(good, fifo, text="published size")  # and it does not hang
 
+    def test_only_a_darwin_arm64_asset_is_accepted_on_this_host(self):
+        # Accept the arm64 build of each tool; refuse linux/x86_64/darwin-x64.
+        ok = {
+            "gitleaks": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz",
+            "nuclei": "https://github.com/projectdiscovery/nuclei/releases/download/v3.0.0/nuclei_3.0.0_macOS_arm64.zip",
+            "semgrep": "https://files.pythonhosted.org/packages/x/semgrep-1.0.0-cp39-cp39-macosx_11_0_arm64.whl",
+            "semgrep_pure": "https://files.pythonhosted.org/packages/x/semgrep-1.0.0-py3-none-any.whl",
+        }
+        core._require_darwin_arm64("gitleaks", ok["gitleaks"])
+        core._require_darwin_arm64("nuclei", ok["nuclei"])
+        core._require_darwin_arm64("semgrep", ok["semgrep"])
+        core._require_darwin_arm64("semgrep", ok["semgrep_pure"])
+        bad = {
+            "gitleaks": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz",
+            "nuclei": "https://github.com/projectdiscovery/nuclei/releases/download/v3.0.0/nuclei_3.0.0_linux_amd64.zip",
+            "semgrep": "https://files.pythonhosted.org/packages/x/semgrep-1.0.0-cp39-cp39-manylinux_2_17_x86_64.whl",
+        }
+        for component, url in bad.items():
+            with self.assertRaisesRegex(UpdateRefused, "darwin-arm64"):
+                core._require_darwin_arm64(component, url)
+        # And it is wired into activate(): a wrong-arch gitleaks asset is refused end to end.
+        self.refused(self.candidate(url=bad["gitleaks"]), text="darwin-arm64")
+
     def test_only_the_components_official_source_is_accepted(self):
         name = "v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz"
         for url in (

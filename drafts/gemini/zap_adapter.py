@@ -106,31 +106,35 @@ def generate_automation_plan(
 
     # Only include spider if explicitly requested by authorized profile
     if include_spider:
-        jobs.append({
-            "type": "spider",
-            "parameters": {
-                "context": "sharay_context",
-                "maxDuration": max_duration_mins,
-                "maxDepth": 1,
-            },
-        })
+        jobs.append(
+            {
+                "type": "spider",
+                "parameters": {
+                    "context": "sharay_context",
+                    "maxDuration": max_duration_mins,
+                    "maxDepth": 1,
+                },
+            }
+        )
 
-    jobs.extend([
-        {
-            "type": "passiveScan-wait",
-            "parameters": {
-                "maxDuration": max_duration_mins,
+    jobs.extend(
+        [
+            {
+                "type": "passiveScan-wait",
+                "parameters": {
+                    "maxDuration": max_duration_mins,
+                },
             },
-        },
-        {
-            "type": "report",
-            "parameters": {
-                "template": "traditional-json",
-                "reportDir": report_dir,
-                "reportFile": report_filename,
+            {
+                "type": "report",
+                "parameters": {
+                    "template": "traditional-json",
+                    "reportDir": report_dir,
+                    "reportFile": report_filename,
+                },
             },
-        },
-    ])
+        ]
+    )
 
     plan_dict = {
         "env": {
@@ -207,17 +211,19 @@ def parse_json_report(data: bytes, target_url: str) -> list[dict[str, Any]]:
             clean_desc = redact_tokens(_UNPRINTABLE.sub("", description)[:400], "[REDACTED]")
             clean_solution = redact_tokens(_UNPRINTABLE.sub("", solution)[:400], "[REDACTED]")
 
-            findings.append({
-                "kind": "zap_alert",
-                "plugin_id": plugin_id,
-                "title": _UNPRINTABLE.sub("", name)[:120],
-                "severity": _RISK_MAP.get(risk_code, "info"),
-                "confidence": _CONFIDENCE_MAP.get(confidence_code, "medium"),
-                "description": clean_desc,
-                "remediation": clean_solution,
-                "affected_uris": instance_uris[:10],
-                "tool": "zap",
-            })
+            findings.append(
+                {
+                    "kind": "zap_alert",
+                    "plugin_id": plugin_id,
+                    "title": _UNPRINTABLE.sub("", name)[:120],
+                    "severity": _RISK_MAP.get(risk_code, "info"),
+                    "confidence": _CONFIDENCE_MAP.get(confidence_code, "medium"),
+                    "description": clean_desc,
+                    "remediation": clean_solution,
+                    "affected_uris": instance_uris[:10],
+                    "tool": "zap",
+                }
+            )
 
     return findings
 

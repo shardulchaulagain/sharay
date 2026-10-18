@@ -1,5 +1,5 @@
-import Aegis from "./workspace";
+import Sharay from "./workspace";
 
 export default function Page() {
-  return <Aegis />;
+  return <Sharay />;
 }

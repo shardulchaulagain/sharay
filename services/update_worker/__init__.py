@@ -33,6 +33,21 @@ MAX_ARTIFACT_BYTES = 200 * 1024 * 1024
 MAX_LEDGER_BYTES = 1024 * 1024
 # After the official prefix: plain path segments only, so no dot segment, encoding, query or host trick.
 _REST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9][A-Za-z0-9._+-]*)*$")
+# This host is Apple Silicon (see docs/STATE.md): only the darwin-arm64 asset of each tool will
+# exec under the Seatbelt runner, so a linux/x86_64/darwin-x64 download is refused outright.
+_DARWIN_ARM64 = {
+    "gitleaks": (re.compile(r"_darwin_arm64\.tar\.gz$"),),
+    "nuclei": (re.compile(r"_macOS_arm64\.zip$"),),
+    # semgrep is a wheel: the macOS arm64 build, or a pure-python (none-any) wheel; never x86_64.
+    "semgrep": (re.compile(r"macosx_[0-9_]+_arm64\.whl$"), re.compile(r"-none-any\.whl$")),
+}
+
+
+def _require_darwin_arm64(component: str, url: str) -> None:
+    if not any(pattern.search(url) for pattern in _DARWIN_ARM64[component]):
+        raise UpdateRefused("The update asset is not the darwin-arm64 build this host requires.")
+
+
 Version = Annotated[str, Field(strict=True, pattern=r"^[0-9]{1,6}(\.[0-9]{1,6}){1,3}$")]
 Digest = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
 
@@ -168,6 +183,7 @@ def activate(ledger_path: Path | str, candidate: Candidate, artifact: Path | str
     url, prefix = candidate.url, SOURCES[candidate.component]
     if not url.startswith(prefix) or not _REST.match(url[len(prefix) :]):
         raise UpdateRefused("The update does not come from this component's official source.")
+    _require_darwin_arm64(candidate.component, url)
     if candidate.version in ledger.withdrawn.get(candidate.component, []):
         raise UpdateRefused("This version was rolled back and needs a person to re-approve it.")
     current = ledger.active.get(candidate.component)

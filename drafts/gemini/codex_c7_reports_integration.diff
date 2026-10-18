@@ -1,0 +1,84 @@
+--- a/packages/reporting/__init__.py
++++ b/packages/reporting/__init__.py
+@@ -1,5 +1,16 @@
+ """Local assessment exports. Rendering never executes target content."""
+ 
++from .provenance import (
++    PROVENANCE_SCHEMA,
++    build_assessment_reconstruction,
++    compute_provenance_envelope,
++    verify_report_provenance,
++)
+ from .reports import redact, render_report
+ 
+-__all__ = ["redact", "render_report"]
++__all__ = [
++    "PROVENANCE_SCHEMA",
++    "build_assessment_reconstruction",
++    "compute_provenance_envelope",
++    "redact",
++    "render_report",
++    "verify_report_provenance",
++]
+--- a/packages/reporting/reports.py
++++ b/packages/reporting/reports.py
+@@ -10,6 +10,7 @@
+ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+ 
+ from packages.secret_patterns import redact_tokens
++from .provenance import compute_provenance_envelope
+ 
+ REDACTED = "[REDACTED]"
+ _SECRET_KEY = re.compile(
+@@ -185,6 +186,9 @@
+         "redaction": "Pattern-based recursive secret redaction; not an exhaustive personal-data classifier.",
+     }
+     clean["scope"] = scope
++    provenance = compute_provenance_envelope(clean)
++    clean["report_metadata"]["provenance"] = provenance
++    clean["report_metadata"]["reconstruction"] = provenance["reconstruction"]
+     return clean
+ 
+ 
+@@ -297,6 +301,7 @@
+                     ("Verification / retest status", _text(finding.get("status"))),
+                     ("Affected asset", _text(finding.get("affected_url") or finding.get("affected_asset"))),
+                     ("Description", _text(finding.get("description"))),
++                    ("Root cause", _text(finding.get("root_cause") or finding.get("description"))),
+                     ("Technical impact", _text(finding.get("technical_impact"))),
+                     ("Business impact", _text(finding.get("business_impact"))),
+                     ("Reproduction", _text(finding.get("reproduction_steps") or finding.get("reproduction"))),
+@@ -318,13 +323,33 @@
+                 ],
+             )
+         )
++    provenance = _mapping(metadata.get("provenance"))
++    reconstruction = _mapping(metadata.get("reconstruction"))
+     sections.extend(
+         [
++            (
++                "Verification, session duration and impact calibration",
++                [
++                    ("Total diagnostic sessions", str(reconstruction.get("total_sessions_established", 0))),
++                    (
++                        "Total session duration (seconds)",
++                        str(reconstruction.get("total_session_duration_seconds", 0.0)),
++                    ),
++                    ("Cleanup verification status", _text(reconstruction.get("cleanup_status"))),
++                    (
++                        "Bug bounty & verification submissions",
++                        _json(_records(reconstruction.get("bug_bounty_submissions"))),
++                    ),
++                ],
++            ),
+             (
+                 "Observations and evidence",
+                 [
+                     ("Stored observations", _json(_records(data.get("observations")))),
+                     ("Evidence integrity hashes", _json(metadata["evidence_hashes"])),
++                    ("SHARAY provenance schema", _text(provenance.get("schema"))),
++                    ("SHARAY manifest SHA-256", _text(provenance.get("manifest_sha256"))),
++                    ("SHARAY section digests", _json(_mapping(provenance.get("section_digests")))),
+                     (
+                         "Integrity boundary",
+                         "Hashes identify stored sanitized evidence. They do not attest to unsanitized originals or protect against a privileged local user changing the database.",

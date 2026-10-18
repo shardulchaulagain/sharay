@@ -59,11 +59,15 @@ class GitleaksParserTests(unittest.TestCase):
 
     def test_rejection_non_object_element(self):
         with self.assertRaises(ValueError):
-            parse_gitleaks_json(json.dumps([{"RuleID": "r", "File": "f.txt", "StartLine": 1}, "string_item"]).encode("utf-8"))
+            parse_gitleaks_json(
+                json.dumps([{"RuleID": "r", "File": "f.txt", "StartLine": 1}, "string_item"]).encode("utf-8")
+            )
 
     def test_rejection_wrong_field_types(self):
         with self.assertRaises(ValueError):
-            parse_gitleaks_json(json.dumps([{"RuleID": "r", "File": 12345, "StartLine": "not_an_int"}]).encode("utf-8"))
+            parse_gitleaks_json(
+                json.dumps([{"RuleID": "r", "File": 12345, "StartLine": "not_an_int"}]).encode("utf-8")
+            )
 
     def test_rejection_deeply_nested_json_recursion(self):
         with self.assertRaises(ValueError) as ctx:
@@ -75,7 +79,9 @@ class GitleaksParserTests(unittest.TestCase):
             parse_gitleaks_json(b"[" + b" " * (6 * 1024 * 1024) + b"]")
 
     def test_rejection_path_traversal(self):
-        payload = json.dumps([{"RuleID": "r", "File": "../../../etc/passwd", "StartLine": 10}]).encode("utf-8")
+        payload = json.dumps([{"RuleID": "r", "File": "../../../etc/passwd", "StartLine": 10}]).encode(
+            "utf-8"
+        )
         with self.assertRaises(ValueError) as ctx:
             parse_gitleaks_json(payload)
         self.assertIn("traversal", str(ctx.exception))

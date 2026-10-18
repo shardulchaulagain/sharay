@@ -121,7 +121,7 @@ class PolicyTests(unittest.TestCase):
             {"intrusive": True},
             {"authenticated": True},
             {"credential_refs": ["secret"]},
-            {"request_rate": 11},
+            {"request_rate": 5001},
             {"max_concurrency": 6},
             {"approval_required": False},
             {"categories": ["exploit"]},

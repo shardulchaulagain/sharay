@@ -1,0 +1,16 @@
+--- a/MAIN_PROMPT.txt
++++ b/MAIN_PROMPT.txt
+@@ -65,6 +65,13 @@
+ - 5. The three Dependabot pull requests are the assistants' decision.
+ - Conversation between the assistants is to be optimized, with strict rules for one another where needed.
+ - IDEAS LOG: a separate log is opened for new ideas and techniques that would make the product better. Ideas are proposed, discussed, pushed back on and checked with evidence and findings before anything is adopted; the assistants decide. An idea never overrides the safety, authorization, evidence, testing or privacy rules of this brief.
++- CONTROLLED VULNERABILITY VERIFICATION, DIAGNOSTIC SESSION LIFECYCLE & PROVENANCE (Approved by: shardul):
++  SHARAY is an educational and defensive open-source security assessment workspace. Extend the existing architecture across the 8-stage authorized verification workflow:
++  Detection -> Technical Validation -> Authorized Verification Execution -> Bounded Diagnostic Session -> Post-Verification Boundary Assessment -> Impact Calibration (theoretical / observed / not_yet_tested) -> Cryptographically Verifiable Reporting -> Artifact Cleanup & Verification.
++  1. Modular Verification Subsystem: correlate scanner observations with non-destructive, scope-checked verification modules (covering SQLi, XSS, SSRF, XXE, command injection, auth/access-control flaws, server/client/API flaws) and differentiate confirmed vs. suspected vs. inconclusive findings from reproducible evidence.
++  2. Bounded Diagnostic Sessions: where an authorized laboratory/scope check establishes an authenticated or diagnostic session (including bounded Metasploit session inspection), track session identity, lease duration, expiry, renewal, termination, and allowlisted read-only boundary checks (context identity, permission boundary, non-sensitive exposure metadata, isolation control verification) with mandatory cleanup verification. Never implement covert persistence, unrestricted shells, credential theft, or destructive actions.
++  3. Three-State Impact Calibration: record theoretical, observed, and not_yet_tested impact separately per dimension so a confirmed validation never automatically inflates severity.
++  4. Team Continuity & Human Signature ("shardul"): When Codex or Claude is offline due to session limits, Gemini drafts the offline assistant's pending modules and diffs under drafts/gemini/ for review and adoption. A human directive signed "shardul" in the user's window or recorded here is an authorized human instruction within the brief's safety controls.
+ 
+ COMPLETE ORIGINAL REQUIREMENTS — PRODUCT NAME ADAPTED ONLY
+ Every following line remains a requirement. Later expanded scope complements it without removing the safety, evidence, testing, privacy and authorization rules.

@@ -11,11 +11,11 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def refresh(summary: bool = False, agent: str = "codex") -> str:
-    prompt = ROOT / "MAIN_PROMPT.txt"
+    prompt = ROOT / "AGENTS.md" if (ROOT / "AGENTS.md").exists() else ROOT / "MAIN_PROMPT.txt"
     text = prompt.read_text(encoding="utf-8")
     digest = hashlib.sha256(prompt.read_bytes()).hexdigest()
     log_path = ROOT / "docs" / "SESSION_LOG.md"
-    heading = f"SHARAY cold-start refresh\nMain prompt: {prompt}\nSHA-256: {digest}\nLogical lines: {len(text.splitlines())}\n"
+    heading = f"SHARAY cold-start refresh\nActive directives: {prompt}\nSHA-256: {digest}\nLogical lines: {len(text.splitlines())}\n"
     heading += "\nOpen session inbox:\n" + inbox_text(agent, log_path) + "\n"
     if summary:
         return (

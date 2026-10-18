@@ -13,18 +13,28 @@ export type Target = {
   execution_blocker?: string | null;
 };
 export type Project = { id: string; name: string; description: string; created_at: string; archived: boolean; targets?: Target[]; assessments?: Assessment[]; findings?: Finding[] };
+export type ScanConfig = {
+  mode: "passive" | "standard" | "adaptive" | "aggressive";
+  tags?: string;
+  rate: number;
+  depth: number;
+  tools?: string[];
+};
 export type Assessment = {
   id: string; project_id: string; target_id: string; target_url?: string; status: string; stage: string;
   created_at: string; started_at?: string; finished_at?: string; error?: string; retest_of?: string;
-  observations?: Observation[]; findings?: Finding[]; checks?: Check[]; events?: Event[]; scope_snapshot?: Scope & { target_url?: string }; scope_version?: number; profile?: string;
+  observations?: Observation[]; findings?: Finding[]; checks?: Check[]; events?: Event[]; scope_snapshot?: Scope & { target_url?: string; scan_config?: ScanConfig }; scope_version?: number; profile?: string;
 };
 export type Observation = { id: string; assessment_id: string; evidence_hash: string; observed_at: string; data: Record<string, unknown> };
 export type Finding = {
   id: string; title: string; severity: string; confidence: string | number; status: string;
+  project_id?: string; target_id?: string;
   verification_status?: string; affected_asset?: string; affected_url?: string; asset?: string; description?: string;
   remediation?: string; category?: string; first_seen?: string; last_seen?: string;
+  cwe_id?: string; fingerprint?: string;
   assessment_id?: string; assessment_ids?: string[]; evidence?: Record<string, unknown>[];
   history?: Record<string, unknown>[];
+  poc?: unknown;
 };
 export type Check = { name?: string; category?: string; status: string; reason?: string; message?: string; [key: string]: unknown };
 export type Event = { id: string; action?: string; event?: string; message?: string; created_at?: string; timestamp?: string; actor?: string; actor_id?: string; resource_id?: string; [key: string]: unknown };
@@ -33,6 +43,90 @@ export type Overview = {
   open_findings: number; projects: number; assets: number; recent_assessments: Assessment[]; recent_events: Event[];
 };
 export type Integration = { id?: string; name: string; status: string; version?: string; description?: string; reason?: string; [key: string]: unknown };
+
+export type AIStatus = {
+  active_provider: string;
+  model: string;
+  api_key_configured: boolean;
+  share_assessment_data: boolean;
+  supported_providers: string[];
+  status: string;
+};
+
+export type AttackGraphNode = {
+  id: string;
+  kind: string;
+  label: string;
+  attributes: Record<string, unknown>;
+};
+
+export type AttackGraphEdge = {
+  source: string;
+  target: string;
+  relationship: string;
+  risk_weight: number;
+  description: string;
+};
+
+export type AttackPath = {
+  path_id: string;
+  severity: string;
+  steps: string[];
+  root_exposure: string;
+  target_vulnerability: string;
+  category: string;
+  remediation: string;
+};
+
+export type RootCauseItem = {
+  category: string;
+  cwe_id: string;
+  owasp_category: string;
+  severity: string;
+  finding_count: number;
+  affected_items: string[];
+  mechanism: string;
+  blast_radius: string;
+  strategic_fix: string;
+};
+
+export type RemediationPatch = {
+  id: string;
+  title: string;
+  file_type: string;
+  target_component: string;
+  description: string;
+  diff: string;
+};
+
+export type KillChainPhase = {
+  phase: string;
+  tools: string[];
+  summary: string;
+  status: string;
+};
+
+export type AIInvestigation = {
+  assessment_id: string;
+  created_at?: string;
+  target_url: string;
+  posture_score: number;
+  graph: {
+    nodes_count: number;
+    edges_count: number;
+    nodes: AttackGraphNode[];
+    edges: AttackGraphEdge[];
+    attack_paths: AttackPath[];
+  };
+  attack_paths: AttackPath[];
+  hypotheses: Array<{ id: string; statement: string; severity: string; status: string }>;
+  root_causes: RootCauseItem[];
+  remediation_patches: RemediationPatch[];
+  red_team_kill_chain: KillChainPhase[];
+  ai_executive_summary: string;
+  total_findings: number;
+  total_observations: number;
+};
 
 export class ApiError extends Error {
   status: number;
@@ -145,8 +239,8 @@ export function laboratoryScope(url: string, included: string, excluded: string,
   return {
     hosts: [host], allowed_origins: [parsed.origin],
     allowed_paths: allowed, excluded_paths: excludedPaths, allowed_cidrs: defaultCidrs,
-    categories: ["http_headers", "tls", "dns"], authenticated: false, credential_refs: [], request_rate: 1,
-    max_concurrency: 1, starts_at: startsAt.toISOString(), expires_at: expiresAt.toISOString(), intrusive: false,
+    categories: ["http_headers", "tls", "dns"], authenticated: false, credential_refs: [], request_rate: 150,
+    max_concurrency: 5, starts_at: startsAt.toISOString(), expires_at: expiresAt.toISOString(), intrusive: false,
     approval_required: true, emergency_stop_conditions: ["operator_cancel", "scope_expired", "policy_violation"],
   };
 }

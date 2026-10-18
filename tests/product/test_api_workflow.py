@@ -112,7 +112,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()
 
-    def test_broad_inventory_authorization_is_versioned_and_cannot_queue_live_execution(self):
+    def test_broad_inventory_authorization_is_versioned_and_gates_live_execution(self):
         from tests.product.test_broad_scope import broad_scope
 
         project = self.client.post("/api/v1/projects", json={"name": "Synthetic broad inventory"}).json()
@@ -138,7 +138,7 @@ class WorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(approved.status_code, 200, approved.text)
                 self.assertEqual(approved.json()["verification_status"], "operator_authorized")
-                rejected = self.client.post(
+                queued = self.client.post(
                     "/api/v1/assessments",
                     json={
                         "target_id": target["id"],
@@ -146,8 +146,13 @@ class WorkflowTests(unittest.TestCase):
                         "idempotency_key": secrets.token_hex(16),
                     },
                 )
-                self.assertEqual(rejected.status_code, 422, rejected.text)
-                self.assertIn("execution requires", rejected.json()["detail"])
+                if host in {"192.168.1.50", "2001:db8::1"}:
+                    # internal literal addresses are refused at creation by the DNS-free SSRF guard
+                    self.assertEqual(queued.status_code, 422, queued.text)
+                    self.assertIn("public addresses", queued.json()["detail"])
+                else:
+                    # an owned public host queues with no DNS or connection performed at queue time
+                    self.assertEqual(queued.status_code, 201, queued.text)
                 updated = self.client.patch(
                     f"/api/v1/targets/{target['id']}/scope",
                     json={
@@ -161,9 +166,105 @@ class WorkflowTests(unittest.TestCase):
                 self.assertIsNone(updated.json()["authorized_by"])
                 self.assertEqual(updated.json()["verification_status"], "awaiting_authorization")
             connect.assert_not_called()
-        self.assertEqual(self.client.get("/api/v1/assessments").json()["total"], 0)
+        # example.com and localhost (public/non-literal hosts) queued; the two internal literals did
+        # not. Queueing performed no DNS or connection — enforcement happens when the worker runs.
+        self.assertEqual(self.client.get("/api/v1/assessments").json()["total"], 2)
         with self.sessions() as db:
             self.assertTrue(verify_audit(db))
+
+    def test_worker_routes_a_live_target_through_enforced_egress(self):
+        from tests.product.test_broad_scope import broad_scope
+
+        project = self.client.post("/api/v1/projects", json={"name": "Live"}).json()
+        scope = broad_scope("example.com")
+        url = scope["allowed_origins"][0] + "/"
+        target = self.client.post(
+            f"/api/v1/projects/{project['id']}/targets", json={"url": url, "scope": scope}
+        ).json()
+        approved = self.client.post(
+            f"/api/v1/targets/{target['id']}/approve",
+            json={
+                "acknowledgement": "I authorize this target within the displayed scope",
+                "expected_scope_version": target["scope_version"],
+            },
+        )
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertEqual(approved.json()["verification_status"], "operator_authorized")
+        assessment = self.launch(approved.json())
+        canned = {
+            "outcome": "completed",
+            "observations": [],
+            "findings": [],
+            "checks": [{"category": "http_headers", "status": "completed", "detail": "ok"}],
+            "requests_performed": 1,
+            "duration_ms": 1,
+        }
+        seen = {}
+
+        def fake_scan_live(dest, allow_ip, **kw):
+            seen.update(host=dest.host, allow_ip=allow_ip)
+            return canned
+
+        with (
+            patch("aegis.worker.resolve_pinned", return_value="93.184.216.34"),
+            patch("aegis.worker.scan_live", side_effect=fake_scan_live),
+        ):
+            self.assertTrue(run_one(self.sessions))
+        # The live branch pinned the host and handed the runner the resolved IP, never the loopback scanner.
+        self.assertEqual(seen, {"host": "example.com", "allow_ip": "93.184.216.34"})
+        self.assertEqual(
+            self.client.get(f"/api/v1/assessments/{assessment['id']}").json()["status"], "completed"
+        )
+
+    def test_worker_routes_approved_templates_profile_to_nuclei(self):
+        from tests.product.test_broad_scope import broad_scope
+
+        project = self.client.post("/api/v1/projects", json={"name": "Nuclei"}).json()
+        scope = broad_scope("example.com")
+        url = scope["allowed_origins"][0] + "/"
+        target = self.client.post(
+            f"/api/v1/projects/{project['id']}/targets", json={"url": url, "scope": scope}
+        ).json()
+        self.client.post(
+            f"/api/v1/targets/{target['id']}/approve",
+            json={
+                "acknowledgement": "I authorize this target within the displayed scope",
+                "expected_scope_version": target["scope_version"],
+            },
+        )
+        created = self.client.post(
+            "/api/v1/assessments",
+            json={
+                "target_id": target["id"],
+                "expected_scope_version": target["scope_version"],
+                "idempotency_key": secrets.token_hex(16),
+                "profile": "approved_templates",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        assessment = created.json()
+        seen = {}
+
+        def fake_nuclei(dest, allow_ip, **kw):
+            seen.update(host=dest.host, allow_ip=allow_ip)
+            return {
+                "outcome": "completed",
+                "observations": [],
+                "findings": [],
+                "checks": [{"category": "nuclei", "status": "completed", "detail": "ok"}],
+                "requests_performed": 1,
+                "duration_ms": 1,
+            }
+
+        with (
+            patch("aegis.worker.resolve_pinned", return_value="93.184.216.34"),
+            patch("aegis.worker.scan_live_nuclei", side_effect=fake_nuclei),
+        ):
+            self.assertTrue(run_one(self.sessions))
+        self.assertEqual(seen, {"host": "example.com", "allow_ip": "93.184.216.34"})  # dispatched to nuclei
+        self.assertEqual(
+            self.client.get(f"/api/v1/assessments/{assessment['id']}").json()["status"], "completed"
+        )
 
     def test_real_worker_findings_reports_retest(self):
         target, project = self.target()
@@ -196,8 +297,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(all(f["status"] == "fixed" for f in findings))
         historical = self.client.get(f"/api/v1/reports/{assessment['id']}?format=json").json()
         self.assertTrue(
-            all(f["status"] == "confirmed" for f in historical["findings"]),
-            "Retest must not rewrite historical confirmation evidence",
+            all(f["status"] == "suspected" for f in historical["findings"]),
+            "Retest must preserve the original unverified configuration evidence",
         )
         self.assertEqual(self.client.get("/api/v1/overview").json()["completed_assessments"], 2)
         self.assertEqual(self.client.get(f"/api/v1/projects/{project['id']}").status_code, 200)
@@ -475,7 +576,7 @@ class WorkflowTests(unittest.TestCase):
         original = [f for f in self.client.get("/api/v1/findings").json()["items"] if f["id"] in original_ids]
         self.assertTrue(original)
         self.assertTrue(
-            all(f["status"] == "confirmed" for f in original),
+            all(f["status"] == "suspected" for f in original),
             "The repaired /other endpoint does not establish a fix for the unvisited /app",
         )
 

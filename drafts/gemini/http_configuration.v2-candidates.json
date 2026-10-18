@@ -1,0 +1,418 @@
+{
+  "id": "http-configuration",
+  "version": 2,
+  "adapter": "safe_http",
+  "labels": "Independent evaluation corpus v2 authored by Gemini without altering detection rules. Tests complex CSP multiple headers, scheme and port wildcards, XFO conflicts and obsolescence, Referrer-Policy quoting, typos, and token parsing, and Set-Cookie attribute isolation across 30 cases.",
+  "cases": [
+    {
+      "id": "csp-multiple-headers-framing-protected",
+      "subset": "clear",
+      "description": "Two CSP headers: first defines default-src, second defines frame-ancestors 'none'.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'self'"],
+        ["Content-Security-Policy", "frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": []
+    },
+    {
+      "id": "csp-multiple-headers-conflict-ancestors",
+      "subset": "ineffective-value",
+      "description": "Two CSP headers: first has frame-ancestors https://trusted.example.com, second has frame-ancestors *.",
+      "response_headers": [
+        ["Content-Security-Policy", "frame-ancestors https://trusted.example.com"],
+        ["Content-Security-Policy", "frame-ancestors *"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [],
+      "basis": "CSP headers intersect policies: the stricter policy (trusted.example.com) restricts framing even if the other policy allows all."
+    },
+    {
+      "id": "csp-frame-ancestors-self",
+      "subset": "clear",
+      "description": "CSP frame-ancestors 'self' explicitly restricts framing to the origin.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'self'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "strict-origin-when-cross-origin"]
+      ],
+      "expected": []
+    },
+    {
+      "id": "csp-frame-ancestors-scheme-only-http",
+      "subset": "ineffective-value",
+      "description": "CSP frame-ancestors allows all http: schemes.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors http:"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_frame_policy"
+      ],
+      "basis": "frame-ancestors http: allows embedding by arbitrary web origins over HTTP."
+    },
+    {
+      "id": "csp-frame-ancestors-scheme-only-https",
+      "subset": "ineffective-value",
+      "description": "CSP frame-ancestors allows all https: schemes.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors https:"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_frame_policy"
+      ],
+      "basis": "frame-ancestors https: allows embedding by arbitrary secure web origins."
+    },
+    {
+      "id": "csp-frame-ancestors-wildcard-port",
+      "subset": "ineffective-value",
+      "description": "CSP frame-ancestors allows *:* allowing all origins and ports.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors *:*"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_frame_policy"
+      ],
+      "basis": "frame-ancestors *:* allows embedding by any host on any port."
+    },
+    {
+      "id": "csp-semicolons-only",
+      "subset": "ineffective-value",
+      "description": "Content-Security-Policy contains only whitespace and semicolons.",
+      "response_headers": [
+        ["Content-Security-Policy", "  ;;;  "],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_csp",
+        "missing_frame_policy"
+      ],
+      "basis": "A policy consisting only of semicolons defines no directives and restricts nothing."
+    },
+    {
+      "id": "csp-empty-frame-ancestors-directive",
+      "subset": "ineffective-value",
+      "description": "CSP specifies frame-ancestors directive with no source expressions.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [],
+      "basis": "Under CSP Level 3, an empty frame-ancestors directive matches no origins (equivalent to 'none'), restricting framing."
+    },
+    {
+      "id": "xfo-deny-sameorigin-conflict",
+      "subset": "ineffective-value",
+      "description": "X-Frame-Options specifies both DENY and SAMEORIGIN in comma-separated list.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'"],
+        ["X-Frame-Options", "DENY, SAMEORIGIN"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [],
+      "basis": "Browsers treat conflicting recognized X-Frame-Options tokens as fail-closed (denying framing)."
+    },
+    {
+      "id": "xfo-allow-from-obsolete",
+      "subset": "ineffective-value",
+      "description": "X-Frame-Options uses obsolete ALLOW-FROM URI directive without CSP.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'"],
+        ["X-Frame-Options", "ALLOW-FROM https://partner.example.com"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_frame_policy"
+      ],
+      "basis": "ALLOW-FROM is obsolete and ignored by modern browsers; without CSP framing is unrestricted."
+    },
+    {
+      "id": "xfo-repeated-sameorigin",
+      "subset": "clear",
+      "description": "X-Frame-Options specifies SAMEORIGIN repeatedly across headers.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'"],
+        ["X-Frame-Options", "SAMEORIGIN"],
+        ["X-Frame-Options", "SAMEORIGIN"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": []
+    },
+    {
+      "id": "xfo-invalid-multiple-tokens",
+      "subset": "ineffective-value",
+      "description": "X-Frame-Options has multiple unrecognized tokens.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'"],
+        ["X-Frame-Options", "INVALID1, INVALID2"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_frame_policy"
+      ],
+      "basis": "Multiple unrecognized tokens do not match any recognized XFO directive and allow framing."
+    },
+    {
+      "id": "csp-overrides-xfo-broad",
+      "subset": "ineffective-value",
+      "description": "X-Frame-Options DENY is present, but CSP frame-ancestors * overrides it per spec.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors *"],
+        ["X-Frame-Options", "DENY"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_frame_policy"
+      ],
+      "basis": "When frame-ancestors is present in CSP, user agents ignore X-Frame-Options. frame-ancestors * permits all framing."
+    },
+    {
+      "id": "xcto-quoted-nosniff",
+      "subset": "ineffective-value",
+      "description": "X-Content-Type-Options carries quoted 'nosniff'.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "'nosniff'"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_nosniff"
+      ],
+      "basis": "X-Content-Type-Options must be the unquoted token nosniff; quoted strings are not parsed as nosniff."
+    },
+    {
+      "id": "xcto-multiple-nosniff-comma",
+      "subset": "ineffective-value",
+      "description": "X-Content-Type-Options has duplicate nosniff in a single comma-separated header.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff, nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_nosniff"
+      ],
+      "basis": "Strict token equality rejects 'nosniff, nosniff' unless specifically parsed as token list."
+    },
+    {
+      "id": "referrer-policy-quoted-valid",
+      "subset": "ineffective-value",
+      "description": "Referrer-Policy has quoted token 'no-referrer'.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "\"no-referrer\""]
+      ],
+      "expected": [
+        "missing_referrer_policy"
+      ],
+      "basis": "W3C Referrer Policy tokens are unquoted identifiers; quotes are not stripped and cause token mismatch."
+    },
+    {
+      "id": "referrer-policy-legacy-never",
+      "subset": "ineffective-value",
+      "description": "Referrer-Policy contains legacy meta token 'never'.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "never"]
+      ],
+      "expected": [
+        "missing_referrer_policy"
+      ],
+      "basis": "The token 'never' was only in legacy meta tag drafts; HTTP Referrer-Policy requires 'no-referrer'."
+    },
+    {
+      "id": "referrer-policy-multiple-tokens-fallback",
+      "subset": "clear",
+      "description": "Referrer-Policy specifies comma-separated valid tokens with fallback.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer-when-downgrade, strict-origin-when-cross-origin"]
+      ],
+      "expected": []
+    },
+    {
+      "id": "referrer-policy-strict-origin",
+      "subset": "clear",
+      "description": "Referrer-Policy uses strict-origin.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "strict-origin"]
+      ],
+      "expected": []
+    },
+    {
+      "id": "cookie-all-httponly-multiple",
+      "subset": "clear",
+      "description": "Three Set-Cookie headers all include HttpOnly.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"],
+        ["Set-Cookie", "a=1; HttpOnly; SameSite=Lax"],
+        ["Set-Cookie", "b=2; httponly; Secure"],
+        ["Set-Cookie", "c=3; HTTPONLY"]
+      ],
+      "expected": []
+    },
+    {
+      "id": "cookie-one-lacks-httponly-among-three",
+      "subset": "clear",
+      "description": "Three Set-Cookie headers; the middle one omits HttpOnly.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"],
+        ["Set-Cookie", "session=valid; HttpOnly"],
+        ["Set-Cookie", "pref=dark"],
+        ["Set-Cookie", "auth=token; HttpOnly"]
+      ],
+      "expected": [
+        "cookie_httponly"
+      ]
+    },
+    {
+      "id": "cookie-httponly-as-cookie-value",
+      "subset": "ineffective-value",
+      "description": "Set-Cookie has cookie name or value containing httponly, but no HttpOnly attribute.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"],
+        ["Set-Cookie", "token=httponly; Path=/"]
+      ],
+      "expected": [
+        "cookie_httponly"
+      ],
+      "basis": "The attribute HttpOnly must appear as a separate directive; 'foo=httponly' sets the cookie value, not the security flag."
+    },
+    {
+      "id": "cookie-malformed-missing-equals",
+      "subset": "ineffective-value",
+      "description": "Set-Cookie has no '=' separator.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"],
+        ["Set-Cookie", "malformed_cookie_no_value"]
+      ],
+      "expected": [],
+      "basis": "A cookie without '=' fails parsing in SimpleCookie and does not set a valid session cookie."
+    },
+    {
+      "id": "all-security-headers-missing-and-insecure-cookie",
+      "subset": "clear",
+      "description": "No security headers at all and one cookie without HttpOnly.",
+      "response_headers": [
+        ["Set-Cookie", "user=123; Path=/"]
+      ],
+      "expected": [
+        "missing_csp",
+        "missing_frame_policy",
+        "missing_nosniff",
+        "missing_referrer_policy",
+        "cookie_httponly"
+      ]
+    },
+    {
+      "id": "csp-frame-ancestors-http-wildcard-with-xfo-sameorigin",
+      "subset": "ineffective-value",
+      "description": "CSP frame-ancestors http://* with X-Frame-Options SAMEORIGIN.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors http://*"],
+        ["X-Frame-Options", "SAMEORIGIN"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_frame_policy"
+      ],
+      "basis": "CSP frame-ancestors overrides X-Frame-Options; http://* permits framing by arbitrary HTTP web hosts."
+    },
+    {
+      "id": "csp-frame-ancestors-https-wildcard-with-xfo-deny",
+      "subset": "ineffective-value",
+      "description": "CSP frame-ancestors https://* with X-Frame-Options DENY.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors https://*"],
+        ["X-Frame-Options", "DENY"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_frame_policy"
+      ],
+      "basis": "CSP frame-ancestors overrides X-Frame-Options; https://* permits framing by arbitrary HTTPS web hosts."
+    },
+    {
+      "id": "xcto-trailing-semicolon",
+      "subset": "ineffective-value",
+      "description": "X-Content-Type-Options has trailing semicolon 'nosniff;'.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff;"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": [
+        "missing_nosniff"
+      ],
+      "basis": "Fetch specification expects exact token match 'nosniff'; trailing semicolon is invalid."
+    },
+    {
+      "id": "referrer-policy-typo-missing-hyphen",
+      "subset": "ineffective-value",
+      "description": "Referrer-Policy has common typo 'origin-when-crossorigin' (missing hyphen).",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "origin-when-crossorigin"]
+      ],
+      "expected": [
+        "missing_referrer_policy"
+      ],
+      "basis": "W3C token is 'origin-when-cross-origin'; without the second hyphen the token is unrecognized and ignored."
+    },
+    {
+      "id": "cookie-multiple-set-cookie-one-invalid-syntax",
+      "subset": "ineffective-value",
+      "description": "Two Set-Cookie headers: first has HttpOnly, second is '=' with no name.",
+      "response_headers": [
+        ["Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"],
+        ["Set-Cookie", "valid=1; HttpOnly; SameSite=Strict"],
+        ["Set-Cookie", "=emptyname; Secure"]
+      ],
+      "expected": [],
+      "basis": "Cookie parsing error on second header; first valid cookie has HttpOnly."
+    },
+    {
+      "id": "csp-multiple-directives-frame-ancestors-not-first",
+      "subset": "clear",
+      "description": "CSP has multiple directives (script-src, style-src, frame-ancestors 'none') where frame-ancestors is third.",
+      "response_headers": [
+        ["Content-Security-Policy", "script-src 'self'; style-src 'self'; frame-ancestors 'none'; default-src 'none'"],
+        ["X-Content-Type-Options", "nosniff"],
+        ["Referrer-Policy", "no-referrer"]
+      ],
+      "expected": []
+    }
+  ]
+}

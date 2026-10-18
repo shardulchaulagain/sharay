@@ -57,6 +57,7 @@ In `run_one()`, wrap the `cancelled()` callback with a 200ms timestamp throttle:
 _last_cancel_check = 0.0
 _cached_cancel = False
 
+
 def cancelled() -> bool:
     nonlocal _last_cancel_check, _cached_cancel
     if stopping():
@@ -81,6 +82,7 @@ Flush the buffer:
 ```python
 buffered_events: list[dict] = []
 
+
 def emit(event: dict) -> None:
     buffered_events.append(event)
 ```
@@ -88,8 +90,12 @@ def emit(event: dict) -> None:
 In the completion transaction:
 ```python
 for event in buffered_events:
-    current.stage = "Collecting HTTP evidence" if event.get("type") == "observation" else "Checking scope and coverage"
-    audit(db, organization_id, "worker", "scanner." + event.get("type", "event"), assessment_id, redact(event))
+    current.stage = (
+        "Collecting HTTP evidence" if event.get("type") == "observation" else "Checking scope and coverage"
+    )
+    audit(
+        db, organization_id, "worker", "scanner." + event.get("type", "event"), assessment_id, redact(event)
+    )
 audit(db, organization_id, "worker", "assessment." + outcome, assessment_id, summary_payload)
 db.commit()
 ```

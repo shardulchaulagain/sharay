@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import process from "node:process";
 import { test } from "node:test";
@@ -16,7 +16,8 @@ const cache = new Map();
 function load(name) {
   if (cache.has(name)) return cache.get(name).exports;
   const module = { exports: {} }; cache.set(name, module);
-  let source = readFileSync(new URL(`../app/${name}.${name === "api" ? "ts" : "tsx"}`, import.meta.url), "utf8");
+  const tsx = new URL(`../app/${name}.tsx`, import.meta.url);
+  let source = readFileSync(existsSync(tsx) ? tsx : new URL(`../app/${name}.ts`, import.meta.url), "utf8");
   if (name === "assessments") source += "\nexport { AssessmentDetail };";
   if (name === "projects") source += "\nexport { TargetRegistration, TargetRow, Launch, ProjectDetail, ProjectSettings };";
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;

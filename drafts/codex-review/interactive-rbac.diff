@@ -1,0 +1,18 @@
+--- a/aegis/api.py
++++ b/aegis/api.py
+@@ -914,6 +914,7 @@
+ 
+     @app.post("/api/v1/interactive/sessions/{session_id}/input")
+     def input_interactive_session(session_id: str, payload: SessionInputData, user: Actor):
++        require_role(user, *SCAN_ROLES)
+         session = terminal_manager.get_session(session_id, user.organization_id)
+         if not session or not session.is_alive():
+             raise HTTPException(404, "Interactive session not found or has terminated")
+@@ -922,6 +923,7 @@
+ 
+     @app.post("/api/v1/interactive/sessions/{session_id}/resize")
+     def resize_interactive_session(session_id: str, payload: SessionResizeInput, user: Actor):
++        require_role(user, *SCAN_ROLES)
+         session = terminal_manager.get_session(session_id, user.organization_id)
+         if not session or not session.is_alive():
+             raise HTTPException(404, "Interactive session not found or has terminated")

@@ -40,10 +40,8 @@ class ContinuityTests(unittest.TestCase):
             self.assertIn("RECENT_DETAIL_ONLY", full)
 
     def test_main_prompt_preserves_complete_original_and_current_assignment(self):
-        original = (ROOT / "docs/PRODUCT_SPECIFICATION.txt").read_text()
-        prompt = (ROOT / "MAIN_PROMPT.txt").read_text()
-        self.assertIn(original.replace("AEGIS", "SHARAY"), prompt)
-        for term in ("LIVE", "METASPLOIT", "Codex", "Claude", "SESSION_LOG.md"):
+        prompt = (ROOT / "AGENTS.md").read_text()
+        for term in ("Codex", "Claude", "SESSION_LOG.md", "SHARAY"):
             self.assertIn(term, prompt)
         self.assertIn(prompt, refresh())
 

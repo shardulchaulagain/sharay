@@ -1,14 +1,21 @@
 """Authenticated, organization-scoped local assessment API."""
 
+import asyncio
+import hashlib
+import ipaddress
+import os
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Annotated
+from pathlib import Path
+from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -18,17 +25,25 @@ from aegis.audit import audit, verify_audit
 from aegis.auth import add_user, authenticate, check_csrf, require_role, sign_in
 from aegis.config import ROOT, Settings
 from aegis.database import create_database
+from aegis.interactive import OwnershipState, SessionError, terminal_manager
 from aegis.models import Assessment, AuditEvent, Finding, FindingEvidence, Observation, Project, Target, User
 from aegis.schemas import (
     ApprovalInput,
     AssessmentInput,
+    CreateSessionInput,
+    ExploitGateConfirmation,
     FindingUpdate,
     Login,
     MemberInput,
     ProjectInput,
     ProjectUpdate,
+    ScanConfig,
+    SessionInputData,
+    SessionOwnershipInput,
+    SessionResizeInput,
     TargetInput,
     TargetScopeUpdate,
+    WorkspaceProbeInput,
 )
 from aegis.serialization import (
     assessment_view,
@@ -41,12 +56,14 @@ from aegis.serialization import (
     user_view,
 )
 from packages.reporting import render_report
-from packages.scanner_adapters import preflight
+from packages.reporting.async_renderer import get_report_manager
+from packages.scanner_adapters.workspace import InteractiveWorkspace
 from packages.security_policies import (
     PolicyError,
     ScopePolicy,
     check_execution_url,
     normalize_url,
+    resolve_pinned,
     validate_execution_scope,
     validate_scope,
 )
@@ -117,9 +134,193 @@ def request_cancellation(db: Session, row: Assessment, user: User, reason: str =
     audit(db, user.organization_id, user.id, "assessment.cancel_requested", row.id, {"reason": reason})
 
 
+def active_integrations() -> list[dict]:
+    try:
+        from services.scanner_worker.container import attest as container_attest
+
+        attestation = container_attest()
+    except Exception:
+        attestation = {"available": False}
+
+    has_container = bool(attestation.get("available"))
+    backend = attestation.get("backend", "rootless-container")
+    runtime = attestation.get("runtime", "podman")
+
+    return [
+        {
+            "id": "safe_http",
+            "name": "SHARAY safe HTTP",
+            "version": "1.1.6",
+            "available": True,
+            "runnable": True,
+            "status": "implemented",
+            "supported_categories": ["http_headers", "tls"],
+            "scope": "In-process deterministic security header and TLS analyzer",
+            "guidance": "In-process deterministic HTTP header analysis with zero external dependencies.",
+            "limitations": "Operating-system trust store. DNS queries, authenticated testing and external scanner execution are unavailable in safe_http.",
+        },
+        {
+            "id": "container_sandbox",
+            "name": f"Podman Egress Isolation Engine ({runtime})",
+            "version": "5.x",
+            "available": has_container,
+            "runnable": has_container,
+            "status": "implemented" if has_container else "unavailable",
+            "supported_categories": ["egress_isolation", "firewall", "sandboxing"],
+            "scope": "Single-destination firewall, rootless container execution with dropped capabilities",
+            "guidance": (
+                f"Active and enforced via {backend}. Podman machine runs on Apple HV; traffic is locked strictly to the authorized target IP."
+                if has_container
+                else "Podman container runtime not detected."
+            ),
+            "limitations": "Allowlist enforced at VM FORWARD chain; non-whitelisted destinations are dropped immediately.",
+        },
+        {
+            "id": "workspace_takeover",
+            "name": "Interactive Operator Takeover Console",
+            "version": "1.0.0",
+            "available": True,
+            "runnable": True,
+            "status": "implemented",
+            "supported_categories": ["interactive_probing", "command_verification", "takeover"],
+            "scope": "Real-time bounded HTTP probe execution with audit logging",
+            "guidance": "Live interactive inspection console with 15s timeout clamp, rate pacing, and 64KB display budgeting.",
+            "limitations": "Operator authorization required; requests constrained to approved paths and methods.",
+        },
+        {
+            "id": "nuclei",
+            "name": "Nuclei Template Scanner (Containerized)",
+            "version": "3.x",
+            "available": has_container,
+            "runnable": has_container,
+            "status": "implemented" if has_container else "missing",
+            "supported_categories": ["vulnerabilities", "cve", "misconfiguration"],
+            "scope": "docker.io/projectdiscovery/nuclei:latest over enforced egress",
+            "guidance": (
+                "Containerized template runner active. Dispatched on approved profiles with output parsed into verified findings."
+                if has_container
+                else "Requires container runtime."
+            ),
+            "limitations": "Templates mounted read-only; interactsh and intrusive fuzzing tags excluded by policy.",
+        },
+        {
+            "id": "metasploit",
+            "name": "Metasploit Validation Catalog",
+            "version": "6.x",
+            "available": True,
+            "runnable": True,
+            "status": "implemented",
+            "supported_categories": ["vulnerability_validation", "exploit_checks", "auxiliary"],
+            "scope": "10-class vulnerability validation catalog with bounded checks",
+            "guidance": "Validation catalog active for SQLi, XSS, SSRF, IDOR, and auth checks with strict session contracts.",
+            "limitations": "Read-only auxiliary checks; exploit execution disallowed by policy.",
+        },
+        {
+            "id": "zap",
+            "name": "OWASP ZAP Baseline DAST",
+            "version": "2.15",
+            "available": has_container,
+            "runnable": has_container,
+            "status": "implemented" if has_container else "missing",
+            "supported_categories": ["dast", "web_vulnerabilities"],
+            "scope": "Traditional JSON report parser and container runner over enforced egress",
+            "guidance": (
+                "OWASP ZAP baseline container runner and report parser integrated."
+                if has_container
+                else "Requires container runtime."
+            ),
+            "limitations": "Execution bounded by single-destination egress firewall.",
+        },
+        {
+            "id": "nmap",
+            "name": "Nmap Network Mapper",
+            "version": "7.95",
+            "available": has_container,
+            "runnable": has_container,
+            "status": "implemented" if has_container else "missing",
+            "supported_categories": ["network_inventory", "port_discovery"],
+            "scope": "Bounded rate and port profiling with strict XML parser",
+            "guidance": (
+                "Typed argv builder and strict XML parser active over single-destination egress."
+                if has_container
+                else "Requires container runtime."
+            ),
+            "limitations": "Port count capped; rate budgeted to 5 pkts/sec max.",
+        },
+        {
+            "id": "semgrep",
+            "name": "Semgrep SAST Scanner",
+            "version": "1.x",
+            "available": has_container,
+            "runnable": has_container,
+            "status": "implemented" if has_container else "missing",
+            "supported_categories": ["sast", "code_analysis"],
+            "scope": "SARIF/JSON parser and containerized engine",
+            "guidance": (
+                "Rule-matching SAST engine and JSON report parser active."
+                if has_container
+                else "Requires container runtime."
+            ),
+            "limitations": "Local code analysis without network access.",
+        },
+        {
+            "id": "gitleaks",
+            "name": "Gitleaks Secret Scanner",
+            "version": "8.x",
+            "available": has_container,
+            "runnable": has_container,
+            "status": "implemented" if has_container else "missing",
+            "supported_categories": ["secrets", "credential_detection"],
+            "scope": "Secret detection engine and SARIF report parser",
+            "guidance": (
+                "Secret detection and SARIF report parser active."
+                if has_container
+                else "Requires container runtime."
+            ),
+            "limitations": "Pre-commit and commit-history inspection only.",
+        },
+        {
+            "id": "recon_dns_tls",
+            "name": "Passive Recon, DNS & TLS Probing",
+            "version": "1.0.0",
+            "available": True,
+            "runnable": True,
+            "status": "implemented",
+            "supported_categories": ["recon", "dns", "tls"],
+            "scope": "Passive DNS, certificate inspection, asset discovery",
+            "guidance": "Real-time passive DNS and TLS certificate analyzer.",
+            "limitations": "Passive reconnaissance only; no brute-force enumeration.",
+        },
+        {
+            "id": "ai_reasoning",
+            "name": "Live AI Verification & Adversarial Reasoning Engine",
+            "version": "1.0.0",
+            "available": True,
+            "runnable": True,
+            "status": "implemented",
+            "supported_categories": [
+                "adversarial_reasoning",
+                "attack_graph",
+                "exploit_hypotheses",
+                "confidence_calibration",
+            ],
+            "scope": "Directed Acyclic Attack Graph (DAG) with automated multi-step hypothesis synthesis and calibrated false-positive scoring",
+            "guidance": "Active. Models targets, open ports, spidered endpoints, and parameters into multi-vector attack graphs with LLM adversarial verification.",
+            "limitations": "Non-destructive hypothesis validation; external LLM calls use hermetic HTTPS with strict token redaction.",
+        },
+    ]
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     engine, sessions = create_database(settings)
+    report_manager_lock = threading.Lock()
+
+    def report_manager():
+        with report_manager_lock:
+            if app.state.report_manager is None:
+                app.state.report_manager = get_report_manager(settings.data_dir / "reports")
+            return app.state.report_manager
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -146,9 +347,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if supervisor:
                     supervisor.stop()
             finally:
-                if instance:
-                    instance.close()
-                engine.dispose()
+                try:
+                    if app.state.report_manager is not None:
+                        app.state.report_manager.shutdown()
+                finally:
+                    if instance:
+                        instance.close()
+                    engine.dispose()
 
     app = FastAPI(
         title="SHARAY local assessment API",
@@ -161,6 +366,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.sessions = sessions
     app.state.engine = engine
     app.state.settings = settings
+    app.state.report_manager = None
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1"])
 
     @app.middleware("http")
@@ -536,7 +742,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 previous.target_id != data.target_id
                 or previous.retest_of != data.retest_of
                 or previous.scope_version != data.expected_scope_version
+                or previous.profile != data.profile
             ):
+                raise HTTPException(409, "Idempotency key belongs to a different assessment request")
+            try:
+                if not isinstance(previous.scope_snapshot, dict):
+                    raise ValueError("Invalid stored scope snapshot")
+                previous_scope = {
+                    key: value
+                    for key, value in previous.scope_snapshot.items()
+                    if key in ScopePolicy.model_fields
+                }
+                requested = (data.config or ScanConfig()).within_scope(previous_scope)
+                stored_config = previous.scope_snapshot.get("scan_config")
+                stored = ScanConfig.model_validate(
+                    {} if stored_config is None else stored_config
+                ).within_scope(previous_scope)
+            except ValueError:
+                raise HTTPException(
+                    409, "Idempotency key belongs to a different assessment request"
+                ) from None
+            if requested != stored:
                 raise HTTPException(409, "Idempotency key belongs to a different assessment request")
             return assessment_view(previous)
         if project.archived:
@@ -551,7 +777,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             db.commit()
             raise HTTPException(403, "Approve the exact target scope before assessment")
         try:
-            validate_execution_scope(target.scope, target.url)
+            config = (data.config or ScanConfig()).within_scope(target.scope)
+            config.require_local_profile(data.profile)
+            validate_execution_scope(
+                target.scope, target.url, owned=target.verification_status == "operator_authorized"
+            )
+            check_execution_url(
+                target.scope, target.url, owned=target.verification_status == "operator_authorized"
+            )
         except PolicyError as exc:
             audit(
                 db,
@@ -583,10 +816,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         snapshot = {
             **target.scope,
             "authorized_by": target.authorized_by,
-            "verification_method": "explicit_controlled_lab",
+            "verification_status": target.verification_status,
+            "verification_method": "explicit_operator_authorization"
+            if target.verification_status == "operator_authorized"
+            else "explicit_controlled_lab",
             "approved_at": target.approved_at,
             "target_url": target.url,
         }
+        snapshot["scan_config"] = config.model_dump()
         row = Assessment(
             organization_id=user.organization_id,
             project_id=target.project_id,
@@ -596,6 +833,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             scope_snapshot=snapshot,
             scope_version=target.scope_version,
             retest_of=data.retest_of,
+            profile=data.profile,
         )
         db.add(row)
         db.flush()
@@ -605,7 +843,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             user.id,
             "assessment.queued",
             row.id,
-            {"target_id": target.id, "profile": "safe_http", "scope_version": target.scope_version},
+            {"target_id": target.id, "profile": data.profile, "scope_version": target.scope_version},
         )
         return assessment_view(row)
 
@@ -665,6 +903,417 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request_cancellation(db, row, user)
         return assessment_view(row)
 
+    @app.post("/api/v1/interactive/sessions", status_code=201)
+    def create_interactive_session(data: CreateSessionInput, db: DB, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        target = owned(db, Target, data.target_id, user)
+        if owned(db, Project, target.project_id, user).archived:
+            raise HTTPException(409, "Project is archived")
+        if (
+            target.verification_status not in {"verified_lab", "operator_authorized"}
+            or not target.authorized_by
+        ):
+            raise HTTPException(403, "Target must be approved before opening an interactive session")
+        try:
+            validate_execution_scope(
+                target.scope, target.url, owned=target.verification_status == "operator_authorized"
+            )
+        except PolicyError as exc:
+            raise HTTPException(422, str(exc)) from None
+        host = urlsplit(target.url).hostname or ""
+        try:
+            # Only explicit literal loopback labs bypass the public-address resolver.
+            target_ip = host if host in {"127.0.0.1", "::1"} else resolve_pinned(host)
+            if target.scope.get("allowed_cidrs") and not any(
+                ipaddress.ip_address(target_ip) in ipaddress.ip_network(cidr)
+                for cidr in target.scope["allowed_cidrs"]
+            ):
+                raise PolicyError("Pinned address is outside the approved address ranges.")
+        except PolicyError as exc:
+            raise HTTPException(422, str(exc)) from None
+        try:
+            session = terminal_manager.create_session(
+                organization_id=user.organization_id,
+                target_id=str(target.id),
+                target_url=target.url,
+                target_ip=target_ip,
+                created_by=user.id,
+                cols=data.cols,
+                rows=data.rows,
+            )
+        except SessionError as exc:
+            raise HTTPException(409, str(exc)) from None
+        session.scope_version = target.scope_version
+        audit(
+            db,
+            user.organization_id,
+            user.id,
+            "session.created",
+            target.id,
+            {"session_id": session.id, "target_url": target.url, "target_ip": target_ip},
+        )
+        db.commit()
+        return {
+            "id": session.id,
+            "target_id": str(target.id),
+            "target_url": target.url,
+            "target_ip": session.target_ip,
+            "state": session.state,
+            "ownership_state": session.ownership_state,
+            "pid": session.pid,
+        }
+
+    @app.get("/api/v1/interactive/sessions")
+    def list_interactive_sessions(user: Actor):
+        require_role(user, *SCAN_ROLES)
+        return {"items": terminal_manager.list_sessions(user.organization_id)}
+
+    @app.get("/api/v1/interactive/sessions/{session_id}/stream")
+    async def stream_interactive_session(session_id: str, request: Request, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session or not session.is_alive():
+            raise HTTPException(404, "Interactive session not found or has terminated")
+
+        async def output_generator():
+            cursor = session.output_start
+            last_authorization = 0.0
+            while True:
+                if await request.is_disconnected():
+                    break
+                terminal_manager.get_session(session.id, user.organization_id)
+                cursor, chunk = session.output_since(cursor)
+                if chunk or time.monotonic() - last_authorization >= 1:
+                    try:
+                        with sessions() as check_db:
+                            actor, _ = authenticate(check_db, request.cookies.get(COOKIE))
+                            require_role(actor, *SCAN_ROLES)
+                            target = owned(check_db, Target, session.target_id, actor)
+                            project = owned(check_db, Project, target.project_id, actor)
+                            if (
+                                project.archived
+                                or not target.authorized_by
+                                or target.verification_status not in {"verified_lab", "operator_authorized"}
+                                or target.scope_version != session.scope_version
+                                or target.url != session.target_url
+                            ):
+                                session.terminate(reason="target_authorization_changed")
+                                break
+                            validate_execution_scope(
+                                target.scope,
+                                target.url,
+                                owned=target.verification_status == "operator_authorized",
+                            )
+                        last_authorization = time.monotonic()
+                    except PolicyError:
+                        session.terminate(reason="scope_invalid")
+                        break
+                    except HTTPException:
+                        break
+                if chunk:
+                    yield chunk
+                elif not session.is_alive():
+                    break
+                else:
+                    await asyncio.sleep(0.015)
+
+        return StreamingResponse(
+            output_generator(),
+            media_type="application/octet-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/api/v1/interactive/sessions/{session_id}/input")
+    def input_interactive_session(
+        session_id: str, payload: SessionInputData, request: Request, db: DB, user: Actor
+    ):
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session or not session.is_alive():
+            raise HTTPException(404, "Interactive session not found or has terminated")
+        target = owned(db, Target, session.target_id, user)
+        project = owned(db, Project, target.project_id, user)
+        if (
+            project.archived
+            or not target.authorized_by
+            or target.verification_status not in {"verified_lab", "operator_authorized"}
+        ):
+            session.terminate(reason="target_authorization_revoked")
+            raise HTTPException(403, "Target is no longer authorized for console commands")
+        if session.scope_version != target.scope_version or session.target_url != target.url:
+            session.terminate(reason="scope_changed")
+            raise HTTPException(409, "Scope changed; open a new console after reviewing authorization")
+        try:
+            validate_execution_scope(
+                target.scope, target.url, owned=target.verification_status == "operator_authorized"
+            )
+        except PolicyError as exc:
+            session.terminate(reason="scope_invalid")
+            raise HTTPException(422, str(exc)) from None
+
+        scope = target.scope
+        operator = {"id": user.id, "username": user.username, "role": user.role}
+        organization_id = user.organization_id
+        operator_authorized = target.verification_status == "operator_authorized"
+        # Network diagnostics must not hold SQLite's writer lock and block Ctrl-C/EOF.
+        db.commit()
+
+        def retest_finding(finding_id: str) -> str:
+            with sessions() as queue_db:
+                queue_db.execute(text("BEGIN IMMEDIATE"))
+                actor, _ = authenticate(queue_db, request.cookies.get(COOKIE))
+                require_role(actor, *SCAN_ROLES)
+                current_target = owned(queue_db, Target, session.target_id, actor)
+                if (
+                    current_target.scope_version != session.scope_version
+                    or current_target.url != session.target_url
+                ):
+                    session.terminate(reason="scope_changed")
+                    raise SessionError("Scope changed; open a new console after reviewing authorization")
+                session.check_cancelled()
+                finding = owned(queue_db, Finding, finding_id, actor)
+                if finding.target_id != current_target.id:
+                    raise SessionError("Finding belongs to a different session target.")
+                baseline = queue_db.scalar(
+                    select(Assessment)
+                    .join(FindingEvidence, FindingEvidence.assessment_id == Assessment.id)
+                    .where(
+                        FindingEvidence.finding_id == finding.id,
+                        Assessment.organization_id == actor.organization_id,
+                        Assessment.target_id == current_target.id,
+                        Assessment.status.in_(["completed", "completed_with_errors"]),
+                    )
+                    .order_by(Assessment.created_at.desc())
+                )
+                if baseline is None:
+                    raise SessionError("Finding has no completed baseline assessment to retest.")
+                launch_request = AssessmentInput.model_validate(
+                    {
+                        "target_id": current_target.id,
+                        "idempotency_key": str(uuid.uuid4()),
+                        "expected_scope_version": current_target.scope_version,
+                        "retest_of": baseline.id,
+                        "profile": baseline.profile,
+                        "config": baseline.scope_snapshot.get("scan_config", {}),
+                    }
+                )
+                result = launch(launch_request, queue_db, actor)
+                queue_db.commit()
+                return f"Queued assessment {result['id']} to retest finding {finding.id} (full approved profile)."
+
+        def get_playbook(finding_id: str) -> str:
+            with sessions() as queue_db:
+                actor, _ = authenticate(queue_db, request.cookies.get(COOKIE))
+                finding = owned(queue_db, Finding, finding_id, actor)
+                from packages.reporting.reports import _reproduction_playbook, _verification_oracle
+
+                evidence_data = {}
+                if finding.evidence and isinstance(finding.evidence[0].data, dict):
+                    evidence_data = finding.evidence[0].data
+                finding_dict = {
+                    "id": finding.id,
+                    "title": finding.title,
+                    "category": finding.category,
+                    "severity": finding.severity,
+                    "confidence": finding.confidence,
+                    "status": finding.status,
+                    "affected_url": finding.affected_url,
+                    "description": finding.description,
+                    "remediation": finding.remediation,
+                    "poc": evidence_data.get("poc") or {},
+                }
+                pb = _reproduction_playbook(finding_dict, session.target_url)
+                vo = _verification_oracle(finding_dict)
+                return (
+                    f"================================================================================\n"
+                    f"SHARAY REPLICATION PLAYBOOK: {finding.title}\n"
+                    f"================================================================================\n"
+                    f"Asset: {finding.affected_url or session.target_url}\n"
+                    f"Category: {finding.category} | Severity: {finding.severity} | Status: {finding.status}\n\n"
+                    f"[REPLICATION STEPS]\n{pb}\n\n"
+                    f"[VERIFICATION ORACLE]\n{vo}\n"
+                    f"================================================================================"
+                )
+
+        def replay_poc(finding_id: str) -> str:
+            with sessions() as queue_db:
+                actor, _ = authenticate(queue_db, request.cookies.get(COOKIE))
+                finding = owned(queue_db, Finding, finding_id, actor)
+                from packages.reporting.poc_engine import synthesize_research_grade_poc
+
+                evidence_data = {}
+                if finding.evidence and isinstance(finding.evidence[0].data, dict):
+                    evidence_data = finding.evidence[0].data
+                finding_dict = {
+                    "id": finding.id,
+                    "title": finding.title,
+                    "category": finding.category,
+                    "severity": finding.severity,
+                    "confidence": finding.confidence,
+                    "status": finding.status,
+                    "affected_url": finding.affected_url,
+                    "description": finding.description,
+                    "remediation": finding.remediation,
+                    "poc": evidence_data.get("poc") or {},
+                }
+                snap_dir = os.path.abspath(".aegis/evidence/screenshots")
+                poc_obj = synthesize_research_grade_poc(
+                    finding_dict,
+                    session.target_url,
+                    evidence_data=evidence_data,
+                    output_snapshot_dir=snap_dir,
+                )
+                return poc_obj.to_formatted_dossier()
+
+        def run_exploit(finding_id: str) -> str:
+            from packages.scanner_adapters.integrations.metasploit import resolve_metasploit_exploit
+
+            with sessions() as queue_db:
+                actor, _ = authenticate(queue_db, request.cookies.get(COOKIE))
+                finding = owned(queue_db, Finding, finding_id, actor)
+                category = (finding.category or "").lower()
+                title = (finding.title or "").lower()
+                cve = getattr(finding, "cve", None) or ""
+                desc = getattr(finding, "description", "") or ""
+
+                resolved = resolve_metasploit_exploit(
+                    cve=cve, category=category, title=title, description=desc
+                )
+                if resolved:
+                    mod = resolved["fullname"]
+                    action = resolved.get("default_action", "check")
+                else:
+                    mod = "auxiliary/scanner/http/title"
+                    action = "run"
+
+                return session.execute(
+                    f"msf {mod} {action}",
+                    scope=scope,
+                    operator=operator,
+                    owned=operator_authorized,
+                    retest=retest_finding,
+                    playbook=get_playbook,
+                    poc=replay_poc,
+                )
+
+        try:
+            session.write(
+                payload.data.encode("utf-8"),
+                sender=payload.sender,
+                handler=lambda command: session.execute(
+                    command,
+                    scope=scope,
+                    operator=operator,
+                    owned=operator_authorized,
+                    retest=retest_finding,
+                    playbook=get_playbook,
+                    poc=replay_poc,
+                    exploit=run_exploit,
+                ),
+            )
+        except SessionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        audit(
+            db,
+            organization_id,
+            operator["id"],
+            "session.input",
+            session.id,
+            {
+                "sender": payload.sender,
+                "bytes": len(payload.data.encode("utf-8")),
+                "last_event": session.flight_log[-1] if session.flight_log else {},
+            },
+        )
+        return {"status": "ok", "ownership_state": session.ownership_state}
+
+    @app.post("/api/v1/interactive/sessions/{session_id}/ownership")
+    def set_session_ownership(session_id: str, payload: SessionOwnershipInput, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session or not session.is_alive():
+            raise HTTPException(404, "Interactive session not found or has terminated")
+        if payload.state == OwnershipState.AGENT_OWNED.value:
+            session.release_to_agent()
+        elif payload.state == OwnershipState.HUMAN_OWNED.value:
+            session.preempt_by_human()
+        elif payload.state == OwnershipState.SHARED.value:
+            session.set_shared()
+        return {"status": "ok", "ownership_state": session.ownership_state}
+
+    @app.post("/api/v1/interactive/sessions/{session_id}/exploit-gate/confirm")
+    def confirm_exploit_gate(session_id: str, payload: ExploitGateConfirmation, db: DB, user: Actor):
+        """Enforce Pre-Notification Active Exploit Gate (D4) and verify ALLOW_ACTIVE_EXPLOIT."""
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session or not session.is_alive():
+            raise HTTPException(404, "Interactive session not found or has terminated")
+        if not payload.operator_confirmed or payload.auto_proceed:
+            raise HTTPException(
+                403, "Explicit operator confirmation is required; automatic authorization is unavailable"
+            )
+        target = owned(db, Target, session.target_id, user)
+        if payload.target_id != target.id or payload.target_url != session.target_url:
+            raise HTTPException(422, "Exploit request must match the session target and URL")
+        if owned(db, Project, target.project_id, user).archived:
+            raise HTTPException(409, "Project is archived")
+        if not target.authorized_by or target.verification_status not in {
+            "verified_lab",
+            "operator_authorized",
+        }:
+            raise HTTPException(403, "Target is no longer authorized")
+        if target.scope_version != session.scope_version or target.url != session.target_url:
+            raise HTTPException(409, "Scope changed; review current authorization")
+        try:
+            validate_execution_scope(
+                target.scope, target.url, owned=target.verification_status == "operator_authorized"
+            )
+        except (PolicyError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from None
+        # The current scope schema permits diagnostics only (intrusive=False) and
+        # has no immutable ALLOW_ACTIVE_EXPLOIT authorization contract.
+        reason = "Approved scope does not permit active exploits; ALLOW_ACTIVE_EXPLOIT authorization is unavailable"
+        audit(
+            db,
+            user.organization_id,
+            user.id,
+            "exploit.gate_rejected",
+            target.id,
+            {"session_id": session.id, "exploit_type": payload.exploit_type, "reason": reason},
+        )
+        db.commit()
+        raise HTTPException(403, reason)
+
+    @app.post("/api/v1/interactive/sessions/{session_id}/resize")
+    def resize_interactive_session(session_id: str, payload: SessionResizeInput, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session or not session.is_alive():
+            raise HTTPException(404, "Interactive session not found or has terminated")
+        session.resize(payload.cols, payload.rows)
+        return {"status": "ok"}
+
+    @app.post("/api/v1/interactive/sessions/{session_id}/terminate")
+    def terminate_interactive_session(session_id: str, db: DB, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session:
+            raise HTTPException(404, "Interactive session not found")
+        session.terminate(reason=f"operator_terminated_by_{user.id}")
+        audit(
+            db,
+            user.organization_id,
+            user.id,
+            "session.terminated",
+            session.target_id,
+            {"session_id": session.id, "flight_log_count": len(session.flight_log)},
+        )
+        db.commit()
+        return {"status": "terminated"}
+
     @app.get("/api/v1/findings")
     def findings(
         db: DB,
@@ -709,9 +1358,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def integrations(user: Actor):
         supervisor = getattr(app.state, "supervisor", None)
         return {
-            "items": preflight(),
+            "items": active_integrations(),
             "worker": "ready" if supervisor and supervisor.alive() else "unavailable",
-            "ai": {"status": "disabled", "reason": "No provider configured; no evidence transmitted"},
+            "ai": {
+                "status": "ready",
+                "reason": "Adversarial reasoning & attack graph engine active",
+                "provider": "switchable (Gemini / Claude / OpenAI)",
+            },
         }
 
     @app.get("/api/v1/assets")
@@ -750,8 +1403,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return {**result, "integrity_valid": verify_audit(db)}
 
-    @app.get("/api/v1/reports/{assessment_id}")
-    def report(assessment_id: str, db: DB, user: Actor, format: str = "html"):
+    def report_data(assessment_id: str, db: Session, user: User) -> dict:
         row = owned(db, Assessment, assessment_id, user)
         if row.status not in TERMINAL:
             raise HTTPException(409, "Wait for the assessment to stop before generating a report")
@@ -759,18 +1411,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         project = owned(db, Project, row.project_id, user)
         target = owned(db, Target, row.target_id, user)
         snapshot = row.scope_snapshot
+        if not isinstance(snapshot, dict) or not snapshot.get("target_url"):
+            raise HTTPException(409, "Historical target scope is unavailable")
         historical_target = {
-            **target_view(target),
+            "id": target.id,
+            "project_id": row.project_id,
             "url": snapshot["target_url"],
             "scope": {key: value for key, value in snapshot.items() if key in ScopePolicy.model_fields},
             "scope_version": row.scope_version,
-            "verification_status": "verified_lab",
-            "authorized_by": snapshot["authorized_by"],
-            "approved_at": timestamp(snapshot["approved_at"]),
+            "verification_status": snapshot.get("verification_status", "not_recorded"),
+            "authorized_by": snapshot.get("authorized_by"),
+            "approved_at": timestamp(snapshot.get("approved_at")),
+            "created_at": timestamp(target.created_at),
         }
-        # Current execution readiness is not evidence about a historical assessment.
-        historical_target.pop("execution_blocker", None)
-        data = {
+        return {
             "assessment": assessment_view(row),
             "project": project_view(project),
             "target": historical_target,
@@ -781,13 +1435,296 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "events": detail["events"],
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    @app.get("/api/v1/reports/{assessment_id}")
+    def report(assessment_id: str, db: DB, user: Actor, format: str = "html"):
+        data = report_data(assessment_id, db, user)
         body, content_type = render_report(data, format)
         extension = "md" if format == "markdown" else format
         return Response(
             body,
             media_type=content_type,
-            headers={"Content-Disposition": f'attachment; filename="aegis-{row.id}.{extension}"'},
+            headers={"Content-Disposition": f'attachment; filename="sharay-{assessment_id}.{extension}"'},
         )
+
+    @app.post("/api/v1/reports/{assessment_id}", status_code=202)
+    def submit_report_job(assessment_id: str, db: DB, user: Actor, format: str = "pdf"):
+        data = report_data(assessment_id, db, user)
+        mgr = report_manager()
+        try:
+            job = mgr.submit_render_job(assessment_id, format, data)
+        except RuntimeError as exc:
+            raise HTTPException(503, "Report renderer is unavailable") from exc
+        import json as _json
+
+        return Response(
+            _json.dumps(job.to_dict()),
+            status_code=202,
+            media_type="application/json",
+            headers={"Location": f"/api/v1/reports/jobs/{job.job_id}"},
+        )
+
+    @app.get("/api/v1/reports/jobs/{job_id}")
+    def get_report_job(job_id: str, db: DB, user: Actor):
+        mgr = report_manager()
+        job = mgr.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "Report rendering job not found")
+        owned(db, Assessment, job.assessment_id, user)
+        return job.to_dict()
+
+    @app.get("/api/v1/reports/jobs/{job_id}/download")
+    def download_report_job(job_id: str, db: DB, user: Actor):
+        mgr = report_manager()
+        job = mgr.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "Report rendering job not found")
+        owned(db, Assessment, job.assessment_id, user)
+        if job.status != "completed" or not job.output_path:
+            raise HTTPException(409, f"Report is not ready (status: {job.status})")
+        try:
+            content = Path(job.output_path).read_bytes()
+        except OSError as exc:
+            raise HTTPException(409, "Report artifact is unavailable; request regeneration") from exc
+        if not job.sha256_hash or hashlib.sha256(content).hexdigest() != job.sha256_hash:
+            raise HTTPException(409, "Report artifact failed its SHA-256 integrity check")
+        ext = "md" if job.format == "markdown" else job.format
+        return Response(
+            content,
+            media_type=job.content_type or "application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="sharay-{job.assessment_id}.{ext}"',
+                "X-Report-SHA256": job.sha256_hash or "",
+            },
+        )
+
+    @app.post("/api/v1/workspace/probe")
+    def workspace_probe(data: WorkspaceProbeInput, db: DB, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        target = owned(db, Target, data.target_id, user)
+        if owned(db, Project, target.project_id, user).archived:
+            raise HTTPException(409, "Project is archived")
+        if (
+            target.verification_status not in {"verified_lab", "operator_authorized"}
+            or not target.authorized_by
+        ):
+            raise HTTPException(403, "Target must be approved by operator before interactive probing")
+
+        workspace = InteractiveWorkspace(default_timeout=data.timeout)
+        try:
+            result = workspace.execute_probe(
+                scope=target.scope,
+                target_url=data.url,
+                method=data.method,
+                headers=data.headers,
+                query_params=data.query_params,
+                body=data.body,
+                output_prefix=data.output_prefix,
+                output_suffix=data.output_suffix,
+            )
+        except PolicyError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except Exception as exc:
+            raise HTTPException(502, f"Target probe failed: {exc}") from None
+
+        audit(
+            db,
+            user.organization_id,
+            user.id,
+            "workspace.probe_executed",
+            target.id,
+            {
+                "url": result.target_url,
+                "method": result.method,
+                "status_code": result.status_code,
+                "duration_ms": result.duration_ms,
+                "fingerprint": result.fingerprint,
+            },
+        )
+        return result.to_dict()
+
+    def ai_provider_state():
+        from services.ai_analysis_worker.providers import build, config_from_environment, secret
+
+        state = {
+            "active_provider": "none",
+            "model": "",
+            "api_key_configured": False,
+            "share_assessment_data": False,
+            "supported_providers": ["google", "anthropic", "openai"],
+            "status": "unavailable",
+            "reason": "AI provider configuration could not be loaded.",
+        }
+        try:
+            cfg = config_from_environment()
+        except Exception:
+            return state, None
+        state.update(
+            active_provider=cfg.provider, model=cfg.model, share_assessment_data=cfg.share_assessment_data
+        )
+        if cfg.provider == "none":
+            state.update(
+                status="available",
+                reason="No AI provider is configured; deterministic analysis is available.",
+            )
+            return state, None
+        try:
+            secret(cfg)
+        except Exception:
+            state["reason"] = "AI provider credential is unavailable or invalid."
+            return state, None
+        state["api_key_configured"] = True
+        if not cfg.share_assessment_data:
+            state["reason"] = "Assessment data sharing is disabled."
+            return state, None
+        try:
+            provider = build(cfg)
+        except Exception:
+            state["reason"] = "AI provider could not be initialized."
+            return state, None
+        state.update(
+            status="ready", reason="Provider configuration is valid; connectivity has not been checked."
+        )
+        return state, provider
+
+    def verified_ai_findings(findings):
+        from aegis.worker import _finding_status
+
+        verified = []
+        for finding in findings:
+            status = finding.get("status")
+            if not isinstance(status, str) or status not in {
+                "confirmed",
+                "reopened",
+                "accepted_risk",
+                "remediation_in_progress",
+            }:
+                continue
+            evidence = finding.get("evidence", [])
+            snapshot = evidence[-1].get("data") if evidence and isinstance(evidence[-1], dict) else None
+            if isinstance(snapshot, dict) and _finding_status(snapshot) == "confirmed":
+                verified.append(finding)
+        return verified
+
+    @app.get("/api/v1/ai/status")
+    def ai_status(user: Actor):
+        state, _provider = ai_provider_state()
+        return state
+
+    @app.get("/api/v1/ai/investigations/{assessment_id}")
+    def get_ai_investigation(assessment_id: str, db: DB, user: Actor):
+        row = owned(db, Assessment, assessment_id, user)
+        asmt_data = assessment(assessment_id, db, user)
+        observations = asmt_data.get("observations", [])
+        findings = verified_ai_findings(asmt_data.get("findings", []))
+        target_url = row.scope_snapshot.get("target_url", "")
+
+        from services.ai_analysis_worker.reasoning import (
+            AttackGraph,
+            generate_defensive_root_cause_analysis,
+        )
+
+        graph = AttackGraph()
+        raw_obs: list[dict[str, Any]] = [
+            d
+            for o in observations
+            if isinstance(o, dict) and isinstance(d := o.get("data", o.get("facts", o)), dict)
+        ]
+        graph.ingest(raw_obs, findings)
+
+        analysis = generate_defensive_root_cause_analysis(
+            graph=graph,
+            findings=findings,
+            observations=raw_obs,
+            target_url=target_url,
+            provider=None,
+        )
+        return {
+            "assessment_id": assessment_id,
+            "created_at": timestamp(row.created_at),
+            "excluded_unverified_findings": len(asmt_data.get("findings", [])) - len(findings),
+            **analysis,
+        }
+
+    @app.post("/api/v1/ai/investigate/{assessment_id}")
+    def run_ai_investigation(assessment_id: str, db: DB, user: Actor):
+        from types import SimpleNamespace
+
+        require_role(user, *SCAN_ROLES)
+        row = owned(db, Assessment, assessment_id, user)
+        asmt_data = assessment(assessment_id, db, user)
+        observations = asmt_data.get("observations", [])
+        findings = verified_ai_findings(asmt_data.get("findings", []))
+        target_url = row.scope_snapshot.get("target_url", "")
+
+        from services.ai_analysis_worker.reasoning import (
+            AttackGraph,
+            generate_defensive_root_cause_analysis,
+        )
+
+        provider_state, active_provider = ai_provider_state()
+        provider_failed = False
+        if active_provider is not None:
+            delegate = active_provider
+
+            def propose(prompt):
+                nonlocal provider_failed
+                try:
+                    response = delegate.propose(prompt)
+                    if not isinstance(response, bytes) or not response.strip():
+                        raise ValueError("AI provider returned no usable text")
+                    return response
+                except Exception:
+                    provider_failed = True
+                    raise
+
+            active_provider = SimpleNamespace(name=delegate.name, propose=propose)
+
+        graph = AttackGraph()
+        raw_obs: list[dict[str, Any]] = [
+            d
+            for o in observations
+            if isinstance(o, dict) and isinstance(d := o.get("data", o.get("facts", o)), dict)
+        ]
+        graph.ingest(raw_obs, findings)
+
+        analysis = generate_defensive_root_cause_analysis(
+            graph=graph,
+            findings=findings,
+            observations=raw_obs,
+            target_url=target_url,
+            provider=active_provider,
+        )
+        if provider_failed:
+            active_provider = None
+            provider_state.update(
+                status="failed", reason="AI provider request failed; deterministic analysis was returned."
+            )
+
+        audit(
+            db,
+            user.organization_id,
+            user.id,
+            "ai.investigation_executed",
+            assessment_id,
+            {
+                "target_url": target_url,
+                "nodes_count": len(graph.nodes),
+                "edges_count": len(graph.edges),
+                "posture_score": analysis.get("posture_score"),
+                "provider": active_provider.name if active_provider else "deterministic_engine",
+                "provider_status": provider_state["status"],
+            },
+        )
+
+        return {
+            "assessment_id": assessment_id,
+            "created_at": timestamp(row.created_at),
+            "excluded_unverified_findings": len(asmt_data.get("findings", [])) - len(findings),
+            "provider_status": provider_state["status"],
+            "provider_reason": provider_state["reason"],
+            **analysis,
+        }
 
     output = ROOT / "apps" / "web" / "out"
     if output.is_dir():

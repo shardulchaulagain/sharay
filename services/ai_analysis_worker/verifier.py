@@ -14,7 +14,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from packages.scanner_adapters.integrations._parsing import load_json
 from packages.shared_schemas import Reference
@@ -26,6 +26,13 @@ from services.ai_analysis_worker import (
 )
 
 MAX_CHALLENGE_BYTES = 32768
+
+
+def _nonneg_int(value: object) -> bool:
+    # bool is an int subclass and NaN/inf are floats; both must be rejected, so check the exact type.
+    return type(value) is int and value >= 0
+
+
 VerdictKind = Literal["uphold", "downgrade_inconclusive", "disprove"]
 ReasoningFlawCode = Literal[
     "unverified_assumption",
@@ -59,6 +66,16 @@ class ChallengeVerdict(BaseModel):
     critique_summary: Text
     impact_calibration: ImpactCalibrationProposal
 
+    @model_validator(mode="after")
+    def flaws_match_verdict(self) -> "ChallengeVerdict":
+        # The invariant lives here, so a directly constructed verdict cannot bypass it either:
+        # upholding names no flaw, and anything that is not an uphold must name at least one.
+        if self.verdict == "uphold" and self.flaws_detected:
+            raise ValueError("An upholding verdict cannot list reasoning flaws.")
+        if self.verdict != "uphold" and not self.flaws_detected:
+            raise ValueError("A non-upholding verdict must name at least one reasoning flaw.")
+        return self
+
 
 @dataclass(frozen=True)
 class StoredObservation:
@@ -81,14 +98,11 @@ def parse_challenge_verdict(raw: bytes) -> ChallengeVerdict:
     if not isinstance(raw, bytes) or len(raw) > MAX_CHALLENGE_BYTES:
         raise InvestigationError("Challenger output is not bytes within the challenge budget.")
     try:
-        verdict = ChallengeVerdict.model_validate(load_json(raw, "Challenger output"))
+        # The uphold/flaws invariant is enforced inside ChallengeVerdict, so it holds for both this
+        # parsed path and any directly constructed verdict; here it surfaces as a fixed rejection.
+        return ChallengeVerdict.model_validate(load_json(raw, "Challenger output"))
     except (ValidationError, ValueError):
         raise InvestigationError("Challenger output is not a valid challenge verdict.") from None
-    if verdict.verdict == "uphold" and verdict.flaws_detected:
-        raise InvestigationError("An upholding verdict cannot list reasoning flaws.")
-    if verdict.verdict != "uphold" and not verdict.flaws_detected:
-        raise InvestigationError("A non-upholding verdict must name at least one reasoning flaw.")
-    return verdict
 
 
 def verify_testing_outcome(
@@ -120,7 +134,12 @@ def verify_testing_outcome(
         scoped_ids.add(ref)
         outcomes.append(obs.outcome)
 
-    if "contradicted" in outcomes:
+    has_contradiction = "contradicted" in outcomes
+    has_support = "confirmed_reproducible" in outcomes or "supporting_signal" in outcomes
+    # Mixed support and contradiction is an unresolved conflict, not a disproof: stay inconclusive
+    # (reopens testing) rather than terminally disproving, matching apply_adversarial_challenge.
+    # Contradiction with no supporting evidence may disprove.
+    if has_contradiction and not has_support:
         return advance(
             hypothesis,
             "disproved",
@@ -129,7 +148,7 @@ def verify_testing_outcome(
             evidence_refs=evidence_refs,
             known_observations=scoped_ids,
         )
-    if "confirmed_reproducible" in outcomes or "supporting_signal" in outcomes:
+    if has_support and not has_contradiction:
         return advance(
             hypothesis,
             "supported",
@@ -138,11 +157,16 @@ def verify_testing_outcome(
             evidence_refs=evidence_refs,
             known_observations=scoped_ids,
         )
+    reason = (
+        "Deterministic verification found both supporting and contradicting evidence; unresolved."
+        if has_contradiction
+        else "Deterministic verification found only inconclusive target observations."
+    )
     return advance(
         hypothesis,
         "inconclusive",
         "verifier",
-        "Deterministic verification found only inconclusive target observations.",
+        reason,
         evidence_refs=evidence_refs,
         known_observations=scoped_ids,
     )
@@ -165,6 +189,7 @@ def apply_adversarial_challenge(
 
     scoped_ids: set[str] = set()
     has_reproducible_proof = False
+    has_contradiction = False
     for ref in verdict.cited_observation_refs:
         obs = observation_store.get(ref)
         if obs is None or obs.assessment_id != assessment_id:
@@ -175,6 +200,8 @@ def apply_adversarial_challenge(
         scoped_ids.add(ref)
         if obs.outcome == "confirmed_reproducible":
             has_reproducible_proof = True
+        if obs.outcome == "contradicted":
+            has_contradiction = True
 
     if verdict.verdict == "disprove":
         flaws = ", ".join(verdict.flaws_detected)
@@ -186,8 +213,14 @@ def apply_adversarial_challenge(
             evidence_refs=verdict.cited_observation_refs,
             known_observations=scoped_ids,
         )
-    if verdict.verdict == "downgrade_inconclusive" or not has_reproducible_proof:
-        flaws = ", ".join(verdict.flaws_detected) or "missing_confirmed_reproducible_observation"
+    # Contradicting evidence among the cited observations is an unresolved conflict: never confirm
+    # over it. The conservative result is inconclusive, which reopens testing rather than closing.
+    if verdict.verdict == "downgrade_inconclusive" or not has_reproducible_proof or has_contradiction:
+        flaws = ", ".join(verdict.flaws_detected) or (
+            "unresolved_contradicting_evidence"
+            if has_contradiction
+            else "missing_confirmed_reproducible_observation"
+        )
         return advance(
             hypothesis,
             "inconclusive",
@@ -221,13 +254,28 @@ class TokenUsageLedger:
     prompt_tokens_used: int = 0
     completion_tokens_used: int = 0
 
+    def __post_init__(self) -> None:
+        # Budgets and the opening counters must be real non-negative integers: a float/NaN anywhere
+        # would silently disable the limit (NaN comparisons are always False) or seed a bad total.
+        fields = (
+            self.max_calls,
+            self.max_total_tokens,
+            self.calls_made,
+            self.prompt_tokens_used,
+            self.completion_tokens_used,
+        )
+        if not all(_nonneg_int(value) for value in fields):
+            raise InvestigationError("Token budgets and counters must be non-negative integers.")
+
     @property
     def total_tokens_used(self) -> int:
         return self.prompt_tokens_used + self.completion_tokens_used
 
     def record_call(self, *, prompt_tokens: int, completion_tokens: int) -> None:
-        if prompt_tokens < 0 or completion_tokens < 0:
-            raise InvestigationError("Token counts must be non-negative.")
+        # type check first: bool is an int subclass and NaN/inf are floats, all of which would slip
+        # past a bare `< 0` test (NaN comparisons are always False) and corrupt the running total.
+        if not _nonneg_int(prompt_tokens) or not _nonneg_int(completion_tokens):
+            raise InvestigationError("Token counts must be non-negative integers.")
         if self.calls_made + 1 > self.max_calls:
             raise TokenBudgetExceeded("Assessment AI call budget exceeded.")
         if self.total_tokens_used + prompt_tokens + completion_tokens > self.max_total_tokens:

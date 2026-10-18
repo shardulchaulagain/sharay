@@ -39,6 +39,7 @@ class StagingLifecycleError(ValueError):
 @dataclass(frozen=True)
 class StagingReference:
     """Opaque reference to an active, unadopted staging directory."""
+
     token: str
     staging_dir: Path
     tree_dir: Path
@@ -51,6 +52,7 @@ class StagingReference:
 @dataclass(frozen=True)
 class ValidatedStagingTree:
     """Cryptographically verified metadata returned by the parent validator."""
+
     token: str
     tree_sha256: str
     file_count: int
@@ -195,11 +197,13 @@ def validate_staging_area(
                 file_hash = fhasher.hexdigest()
 
                 rel_file_path = fpath.relative_to(ref.tree_dir).as_posix()
-                inventory.append({
-                    "path": rel_file_path,
-                    "bytes": fstat.st_size,
-                    "sha256": file_hash,
-                })
+                inventory.append(
+                    {
+                        "path": rel_file_path,
+                        "bytes": fstat.st_size,
+                        "sha256": file_hash,
+                    }
+                )
 
     except Exception as exc:
         purge_staging_area(ref)
@@ -259,11 +263,13 @@ def adopt_staging_area(
         with open(item_path, "rb") as fp:
             while chunk := fp.read(65536):
                 hasher.update(chunk)
-        recheck_inventory.append({
-            "path": str(item["path"]),
-            "bytes": item_path.stat().st_size,
-            "sha256": hasher.hexdigest(),
-        })
+        recheck_inventory.append(
+            {
+                "path": str(item["path"]),
+                "bytes": item_path.stat().st_size,
+                "sha256": hasher.hexdigest(),
+            }
+        )
 
     if _compute_tree_hash(recheck_inventory) != validated.tree_sha256:
         purge_staging_area(ref)

@@ -115,23 +115,25 @@ def audit_packages_against_advisories(
 
             if is_hit:
                 remediation = f"Upgrade {name} to version {fix_version or 'the latest patched release'}."
-                findings.append({
-                    "kind": "dependency_vulnerability",
-                    "category": "software_composition_analysis",
-                    "advisory_id": adv_id,
-                    "aliases": adv.get("aliases", []),
-                    "package_name": name,
-                    "package_version": ver,
-                    "ecosystem": eco.upper(),
-                    "severity": severity,
-                    "cvss_score": cvss,
-                    "title": f"{adv_id}: {summary}"[:120],
-                    "description": redact_tokens(_UNPRINTABLE.sub("", summary)[:400], "[REDACTED]"),
-                    "remediation": remediation,
-                    "manifest": manifest,
-                    "fixed_version": fix_version,
-                    "tool": "osv",
-                })
+                findings.append(
+                    {
+                        "kind": "dependency_vulnerability",
+                        "category": "software_composition_analysis",
+                        "advisory_id": adv_id,
+                        "aliases": adv.get("aliases", []),
+                        "package_name": name,
+                        "package_version": ver,
+                        "ecosystem": eco.upper(),
+                        "severity": severity,
+                        "cvss_score": cvss,
+                        "title": f"{adv_id}: {summary}"[:120],
+                        "description": redact_tokens(_UNPRINTABLE.sub("", summary)[:400], "[REDACTED]"),
+                        "remediation": remediation,
+                        "manifest": manifest,
+                        "fixed_version": fix_version,
+                        "tool": "osv",
+                    }
+                )
 
     return findings
 
@@ -165,12 +167,14 @@ def ingest_cyclonedx_sbom(json_data: bytes | str) -> list[dict[str, str]]:
             ecosystem = "PyPI"
 
         if isinstance(name, str) and isinstance(version, str):
-            packages.append({
-                "name": name.strip(),
-                "version": version.strip(),
-                "ecosystem": ecosystem,
-                "manifest": "cyclonedx_sbom.json",
-            })
+            packages.append(
+                {
+                    "name": name.strip(),
+                    "version": version.strip(),
+                    "ecosystem": ecosystem,
+                    "manifest": "cyclonedx_sbom.json",
+                }
+            )
 
     return packages
 

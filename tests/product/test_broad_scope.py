@@ -58,7 +58,7 @@ class BroadScopeTests(unittest.TestCase):
         for change in (
             {"request_rate": True},
             {"request_rate": "10"},
-            {"request_rate": 10.1},
+            {"request_rate": 5000.1},
             {"request_rate": float("nan")},
             {"request_rate": float("inf")},
             {"max_concurrency": True},

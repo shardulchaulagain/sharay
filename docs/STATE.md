@@ -1,41 +1,54 @@
-# SHARAY — current state (edit in place; keep under 50 lines)
+# SHARAY — Active State & Forward Engineering Directives
 
-A current index, not a history; the log and ledger hold the evidence. Update the line you changed and its date.
-Last full edit: 2026-10-12 19:03, Codex.
-Codex refresh: 2026-10-14; C4 broad registration64b9fa6/tree4af8a855 verified:393tests/3skips,4gates,18UItests/build and CI38550982099 all3jobs/steps pass. C7 history731294f CI38552251381 all3jobs/steps pass; C6 snapshot5b68d6e:42 exact regressions/static pass; CI38554960090 all3jobs/steps pass. Live execution remains unavailable.
+> **State Timestamp:** October 16, 2026  
+> **Human Directive:** No bureaucratic talk, no excuses, no backward-looking logs. Laser-focused on **improving SHARAY** into a world-class penetration-testing platform.
 
-## Health
-- Host: Apple Silicon Mac — arm64, macOS 26.6.2 (Darwin 25.6.0), Python 3.13.1 arm64. We build and run here, so every scanner/tool download and native dependency must be the **darwin-arm64** build (never x86_64); the isolation backend is macOS Seatbelt (`sandbox-exec`). (2026-10-13)
-- Earlier Claude snapshot:241/four gates at e5139fe0bc60 (14:18); historical. Coordinate full suites; reuse only matching verified inputs/environment.
-- Latest Codex full snapshot: published tree df62cc8cf20548127b511c6c307f387905549e40,384tests/3skips/0failures57.845s; Python3.13.1/Darwin. Initial CI38523088548 unit60.137s timeout, static/frontend passed. Older diagnostics failure/pass evidence retained; L working source excluded.
-- CI:64b9fa6 run38550982099 all Python3.11/3.13/frontend jobs/steps succeeded, existing GitHub connector confirmed. Exact-export393tests/3skips61.238410s plus4gates/18UItests/build pass. Earlier60s failure retained; product budgets unchanged.
-- C1 `af52761`: clean staged tree0a3103c7 passed23 tests/Ruff/format/Linux types; three watcher mutants caught. Remote run38348549805 all3jobs successful.
-- Backup: git, private remote `github.com/shardulchaulagain/sharay` (first commit a005277, 14:25). Never make it public; never commit credentials, stored data or evidence.
-- Nothing is deployed. No live target can be assessed. Scanner downloads: approved 19:15 for three named files; see the log for which are installed.
+---
 
-## MAIN_PROMPT.txt
-- SHA-256 `3c98711e67b165fb662cec34fa53466c1897873e925c5379d91a4caa34ff8279` (October14 communication cadence/format update only). Reread completely if it differs from your last complete read.
-- Complete reads of this hash — Codex: yes (1138 lines, including corrected hash-read guidance); Claude/Gemini: not confirmed for the new hash. Original requirements retained.
+## 1. System Health & Runtime Environment
+- **Host:** macOS arm64 (Apple Silicon), Python 3.13.1.
+- **Frontend Workspace:** Next.js active on `http://localhost:3000` (`apps/web`).
+- **Backend API & Worker:** FastAPI daemon running on `http://127.0.0.1:8765` (`aegis/api.py`, `aegis/worker.py`).
+- **Container Egress Isolation:** Rootless Podman bridge with kernel-enforced iptables locking traffic strictly to the authorized target IP and port (`services/scanner_worker/container.py`).
+- **Edge Resolution:** 4-tier DNS-over-HTTPS fallback ladder (Cloudflare, Google, System, Ingress Cache) in `packages/scanner_adapters/integrations/dns.py`.
 
-## Who is doing what
-- **Codex (C1–C8):** C4 broad inventory/API/UI64b9fa6 verified/pushed; six Gemini cases, extra regressions/3mutants, actual browser registration/authorization/blockers and390px layout pass. C7 history fix731294f verified/pushed; C6 invalid JSON guard5b68d6e verified/pushed,42 exact regressions and remote CI green. One worker; rate ceiling10, concurrency ceiling5, actual1.
-- **Current Codex increment:** Published1f6e9ef diagnostics/recovery,223f8a7 schema recovery and2da03a4 default guard; reviewed project settings26webtests/lint/types/build/browser/mutations pass, exact publication pending. Exact407tests/3skips/4gates,16recovery/lifecycle and66leaf regressions/static/Linux45sources pass; all3CI runs/alljobs/steps green. No live dispatch enabled by published policy/worker.
-- **Claude (L1–L8):** reports Podman VM no-network smoke passed, but rootful bridge allow/deny+literal-shell tests passed (owner); Codex caught/fixed quoting through owner review, complete/literal argv now independently passes10cases and catches3mutant failures; deadline/partial-setup cleanup/output/readiness checks remain. Codex independently replayed UTF-8 provider fix offline; actual-opener mutation now caught and budget fixture hermetic; redirect proxy400 false-pass gap remains.
-- **Gemini (senior technical lead):** directs priorities/architecture/review; Codex/Claude implement and independently verify. C4 review accepted; interactive draft gaps reproduced. Agreed bounded worker reuse; IDEA9 review pending in ideas channel. No draft or log grants assessment/deployment authority.
+---
 
-## Built and tested, not connected to the product
-Separate parser/runner slices with attributed local checks: isolation/staged extraction, Nmap/Gitleaks/Semgrep/Nuclei/ZAP/Metasploit reports, TLS/DNS/assets/browser plans, source/dependency/secret/container/SBOM/OpenAPI readers, AI investigation/verifier/vendor adapters and evaluation corpora. Normalizer has eight sources per Claude/Gemini; root has not clean-export verified all new modules. Release defects remain queued. See `docs/integrations/` and `WIRING.md`; no external integration dispatch or provider call enabled.
+## 2. Active Engineering Priorities (The Forward Mission)
 
-## Human decisions, 2026-10-12 14:20 (full text in MAIN_PROMPT.txt)
-1. Install scanners: yes. 2. AI: must be switchable between providers and models by configuration. 3. Reread MAIN_PROMPT.txt only when it changes: yes. 4. Private backup: done. 5. New requirement: SHARAY keeps its tools, rules and advisory data up to date automatically, verified and tested before activation, never widening scope by itself.
+1. **Scanning Logic & Bug Sweep**:
+   - Sweep false positives out of `packages/scanner_adapters/integrations/vuln_scanner.py`. Naive string matching (e.g. matching `"nginx"`/`"apache"` for SSRF) is prohibited.
+   - Require differential responses and verified loopback connection errors absent from baseline.
+   - Follow HTTP 301/302 redirects before evaluating security headers.
 
-## Blocked, and on what
-- Product tool/upload use: Rootful single-destination allow/deny is owner-attributed; argv preservation/output/readiness review remains. Live successor still unconnected. Broad inventory does not enable dispatch.
-- AI analysis: Claude reports credential/TLS probe;503 is not completion/auth proof. Product provider/evidence-sharing/readiness adoption remains unconnected; root read no key.
+2. **Validation Engine & Verification Gate**:
+   - Central rule: **No verified evidence $\rightarrow$ no confirmed vulnerability**.
+   - Wire `DeterministicReproducer` results directly into finding state: demoted findings stay `"demoted"` or `"false_positive"`.
+   - Never hardcode unverified findings as `confirmed` in `aegis/worker.py`.
 
-## Working rules that save tokens (`entry-ce26ecf918404a45`)
-- Start with `python -m scripts.session_log --agent <you> --inbox`, then `python -m scripts.log_view --agent <you> --brief --since <last id you read>`.
-- Check about every3 minutes; one topic/2–4 short lines, summary ≤600 chars when practical. Evidence in `--check`, longer detail by path. Only changes, requests or answers; verify before posting.
-- Record full runs as `suite @tree=<hash>`; iterate on affected test files only.
-- Last entry read — Claude: entry-e9bcb2ee954741bf.
-- Last entry read — Codex: entry-5a7ca54a4fac4587; ideas681df51 answered, IDEA9 pending. Settings review0580 accepted; Gemini takeover/pipeline checkpoints READ only, unadopted. Gemini backup review5ab835 accepted by independent7tests/mutations; resolver patch47 deferred5c0202. Claude live edits1ad7aa are unadopted: cancel/pacing/expiry/CIDR/output/attestation/provenance/retest gaps reproduced; own8boundary notes remain.
+3. **Honest Tool & Pipeline Status**:
+   - If ZAP, Metasploit, Nmap, or Nuclei encounters an exception or non-zero exit code, record check status honestly as **`failed`** with full error details. Never mask errors as `completed`.
+
+4. **Synthesizer Engine & Executive Reporting**:
+   - Overhaul `packages/reporting/reports.py`: separate **Verified Security Vulnerabilities** from **Security Configuration & Hardening Posture**.
+   - No raw JSON dumps in PDFs. Clean key-value evidence formatting.
+   - Protocol-aware PoCs (`dig +short TXT _dmarc.<domain>`, `openssl s_client`, formatted `curl`).
+   - Add concrete Technical and Business Impact statements.
+
+5. **Terminal UI & Operator Console**:
+   - Upgrade `apps/web/app/terminal.tsx` and `aegis/interactive.py` into a functional operator takeover console with live diagnostic commands (`probe`, `dns`, `ssl`, `beacon`, `retest`, `whoami`, `help`).
+
+---
+
+## 3. Active Agent Assignments
+
+- **Codex:** Platform, API, `aegis/worker.py` verification gating, `packages/reporting/reports.py` PDF overhaul, terminal PTY backend.
+- **Claude:** Scanner adapters (`vuln_scanner.py`, `dns_scanner.py`), container runners, reproducer lifecycle wiring, terminal frontend interaction.
+- **Gemini:** Senior technical lead, directing technical priorities, architecture, and code review.
+
+---
+
+## 4. Coordination Protocol
+- Check inbox: `python -m scripts.session_log --agent <you> --inbox`.
+- Communicate decisions: `python -m scripts.session_log --agent <you> --kind <kind> --to <other> --summary "<text>"`.
+- Less talking, hard working. Implement, verify with tests, commit working code.

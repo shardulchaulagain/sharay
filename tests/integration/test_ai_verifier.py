@@ -81,6 +81,8 @@ class VerifyTestingOutcomeTests(unittest.TestCase):
             "supported": ["supporting_signal"],
             "supported ": ["confirmed_reproducible"],
             "inconclusive": ["inconclusive"],
+            # Mixed support + contradiction is an unresolved conflict -> inconclusive, not disproved.
+            "inconclusive ": ["confirmed_reproducible", "contradicted"],
             "disproved": ["contradicted"],
         }
         for expected, outcomes in cases.items():
@@ -261,6 +263,47 @@ class TokenBudgetTests(unittest.TestCase):
             ledger.record_call(prompt_tokens=1, completion_tokens=1)
         with self.assertRaisesRegex(InvestigationError, "non-negative"):
             TokenUsageLedger(ASSESS).record_call(prompt_tokens=-1, completion_tokens=0)
+
+    def test_non_integer_token_counts_are_refused_without_corrupting_the_total(self):
+        ledger = TokenUsageLedger(ASSESS, max_calls=5, max_total_tokens=100)
+        for bad in (float("nan"), float("inf"), 1.5, True):
+            with self.assertRaises(InvestigationError):
+                ledger.record_call(prompt_tokens=bad, completion_tokens=0)
+        self.assertEqual((ledger.calls_made, ledger.total_tokens_used), (0, 0))  # state never moved
+
+    def test_a_non_integer_configured_budget_is_refused_at_construction(self):
+        for bad in (float("nan"), 2.5, True, -1):
+            with self.assertRaises(InvestigationError):
+                TokenUsageLedger(ASSESS, max_total_tokens=bad)
+
+    def test_bad_opening_counters_are_refused_at_construction(self):
+        # A negative or NaN starting counter would seed a total that bypasses the budget.
+        with self.assertRaises(InvestigationError):
+            TokenUsageLedger(ASSESS, calls_made=-5)
+        with self.assertRaises(InvestigationError):
+            TokenUsageLedger(ASSESS, prompt_tokens_used=float("nan"))
+
+
+class ConflictingEvidenceTests(unittest.TestCase):
+    def test_an_uphold_over_contradicting_evidence_never_confirms(self):
+        # A cited observation that contradicts must block confirmation even with a reproducible one.
+        result = apply_adversarial_challenge(
+            hypothesis("supported"),
+            verdict("uphold", refs=("observation:1", "observation:2")),
+            assessment_id=ASSESS,
+            observation_store=store(
+                observation("observation:1", "confirmed_reproducible"),
+                observation("observation:2", "contradicted"),
+            ),
+        )
+        self.assertEqual(result.state, "inconclusive")
+
+    def test_a_directly_constructed_incoherent_verdict_is_rejected(self):
+        # The uphold/flaws invariant lives in the model, so even a direct constructor call fails.
+        with self.assertRaises(ValueError):
+            verdict("uphold", flaws=("unverified_assumption",))
+        with self.assertRaises(ValueError):
+            verdict("disprove", flaws=())
 
 
 if __name__ == "__main__":

@@ -66,6 +66,42 @@ class ChannelTests(unittest.TestCase):
         append_entry("claude", "answer", "Accepted with evidence", reply_to=advice, log_path=self.log)
         self.assertEqual(self.waiting("claude"), [unaddressed])
 
+    def test_the_ideas_channel_is_a_separate_file_with_the_same_rules(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        from scripts import log_view, session_log
+
+        ideas = self.log.with_name("ideas.md")
+        with patch.dict(session_log.LOGS, {"session": self.log, "ideas": ideas}):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                session_log.main(
+                    [
+                        "--agent",
+                        "claude",
+                        "--log",
+                        "ideas",
+                        "--kind",
+                        "question",
+                        "--to",
+                        "codex",
+                        "--summary",
+                        "An idea",
+                    ]
+                )
+                session_log.main(["--agent", "claude", "--summary", "Ordinary progress"])
+                log_view.main(["--agent", "codex", "--log", "ideas"])
+            self.assertIn("An idea", out.getvalue())  # the reader printed it from the ideas channel
+            self.assertEqual(len(inbox("codex", ideas)), 1)
+            self.assertEqual(inbox("codex", self.log), [])
+            self.assertIn("An idea", ideas.read_text())
+            self.assertNotIn("An idea", self.log.read_text())
+            self.assertNotIn("Ordinary progress", ideas.read_text())
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                session_log.main(["--agent", "claude", "--log", "/tmp/elsewhere.md", "--summary", "x"])
+
     def test_unknown_addressee_is_rejected(self):
         with self.assertRaises(ValueError):
             append_entry("claude", "question", "Anyone?", to="nobody", log_path=self.log)

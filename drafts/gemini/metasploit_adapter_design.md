@@ -38,15 +38,17 @@ In alignment with `packages/shared_schemas/__init__.py`:
 - **Execution Profile**: `approved_auxiliary` (Risk: `low`).
 - **Allowlisted Auxiliary Modules**:
   ```python
-  _APPROVED_MODULES = frozenset({
-      "auxiliary/scanner/http/http_version",
-      "auxiliary/scanner/http/title",
-      "auxiliary/scanner/http/options",
-      "auxiliary/scanner/ssl/openssl_heartbleed",
-      "auxiliary/scanner/ssl/ssl_version",
-      "auxiliary/scanner/discovery/udp_probe",
-      "auxiliary/scanner/ssh/ssh_version",
-  })
+  _APPROVED_MODULES = frozenset(
+      {
+          "auxiliary/scanner/http/http_version",
+          "auxiliary/scanner/http/title",
+          "auxiliary/scanner/http/options",
+          "auxiliary/scanner/ssl/openssl_heartbleed",
+          "auxiliary/scanner/ssl/ssl_version",
+          "auxiliary/scanner/discovery/udp_probe",
+          "auxiliary/scanner/ssh/ssh_version",
+      }
+  )
   ```
 - **Execution Profile & Resource Bounds**:
   - Max seconds: 30s.

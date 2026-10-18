@@ -177,11 +177,7 @@ def run_staged_extraction(
     runtime_dir = Path(sys.base_prefix).resolve()
 
     # 2. Build Seatbelt execution command
-    use_seatbelt = (
-        not force_direct
-        and sys.platform == "darwin"
-        and os.access(SANDBOX_EXEC, os.X_OK)
-    )
+    use_seatbelt = not force_direct and sys.platform == "darwin" and os.access(SANDBOX_EXEC, os.X_OK)
 
     cpu_limit = math.ceil(max_seconds) + 1
     fsize_limit = max_file_bytes + 1
@@ -200,17 +196,23 @@ def run_staged_extraction(
             "-S",
             "-c",
             _LAUNCH_RLIMITS,
-            "0",    # RLIMIT_CORE
+            "0",  # RLIMIT_CORE
             "256",  # RLIMIT_NOFILE
             str(cpu_limit),
             str(fsize_limit),
             SANDBOX_EXEC,
-            "-D", f"PYTHON={python_bin}",
-            "-D", f"RUNTIME={runtime_dir}",
-            "-D", f"SERVICES={services_dir}",
-            "-D", f"ARCHIVE={archive_path}",
-            "-D", f"OUTPUT={output_path}",
-            "-p", _SEATBELT_EXTRACTION_PROFILE,
+            "-D",
+            f"PYTHON={python_bin}",
+            "-D",
+            f"RUNTIME={runtime_dir}",
+            "-D",
+            f"SERVICES={services_dir}",
+            "-D",
+            f"ARCHIVE={archive_path}",
+            "-D",
+            f"OUTPUT={output_path}",
+            "-p",
+            _SEATBELT_EXTRACTION_PROFILE,
             python_bin,
             "-I",
             "-c",

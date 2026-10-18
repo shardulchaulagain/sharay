@@ -1,0 +1,123 @@
+--- a/aegis/worker.py
++++ b/aegis/worker.py
+@@ -13,8 +13,8 @@
+ 
+ from aegis.audit import audit
+ from aegis.config import ROOT, Settings
++from aegis.database import create_database
+ from aegis.lifecycle import watch_parent_stdin
+-from aegis.database import create_database
+ from aegis.models import Assessment, Finding, FindingEvidence, FindingHistory, Observation
+ from packages.reporting import redact
+ from packages.scanner_adapters import scan
+@@ -265,7 +265,14 @@
+         }
+         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+         self.process = subprocess.Popen(
+-            [sys.executable, "-m", "aegis.worker", "--data-dir", str(self.settings.data_dir), "--parent-stdin"],
++            [
++                sys.executable,
++                "-m",
++                "aegis.worker",
++                "--data-dir",
++                str(self.settings.data_dir),
++                "--parent-stdin",
++            ],
+             cwd=ROOT,
+             env=environment,
+             stdin=subprocess.PIPE,
+@@ -330,12 +337,14 @@
+         signal.signal(signal.SIGINT, request_stop)
+         try:
+             with watch_parent_stdin(args.parent_stdin, lambda: request_stop(None, None)):
+-                mark_interrupted(sessions)
+-                while not stop[0]:
+-                    if not run_one(sessions, lambda: stop[0]):
+-                        time.sleep(0.25)
++                try:
++                    mark_interrupted(sessions)
++                    while not stop[0]:
++                        if not run_one(sessions, lambda: stop[0]):
++                            time.sleep(0.25)
++                finally:
++                    mark_interrupted(sessions)
+         finally:
+-            mark_interrupted(sessions)
+             engine.dispose()
+     return 0
+ 
+--- a/tests/product/test_desktop_lifecycle.py
++++ b/tests/product/test_desktop_lifecycle.py
+@@ -19,7 +19,6 @@
+ from aegis.__main__ import desktop, ready
+ from aegis.config import ROOT, Settings
+ 
+-
+ # The outer harness also owns a pipe: cancelling the test closes its stdin,
+ # returns from the headless window and runs the real desktop cleanup.
+ LAUNCHER = """
+@@ -89,6 +88,7 @@
+     def event(self, process, expected):
+         deadline = time.monotonic() + 15
+         while time.monotonic() < deadline:
++            assert process.stdout is not None
+             if select.select([process.stdout], [], [], 0.1)[0]:
+                 line = process.stdout.readline()
+                 self.assertTrue(line, "Launcher exited before readiness")
+@@ -112,7 +112,8 @@
+             pids.append(self.event(process, "spawn")["pid"])
+             self.event(process, "ready")
+             self.wait_for(
+-                lambda: not lock_available(settings.data_dir / "worker.lock"), "Worker never acquired its lock"
++                lambda: not lock_available(settings.data_dir / "worker.lock"),
++                "Worker never acquired its lock",
+             )
+             children = subprocess.run(
+                 ["pgrep", "-P", str(pids[0])], capture_output=True, text=True, check=True
+@@ -121,7 +122,8 @@
+             self.assertEqual(len(pids), 2, "Expected exactly the API and its controlled worker")
+             yield process, pids
+         finally:
+-            process.stdin.close()
++            if process.stdin is not None:
++                process.stdin.close()
+             try:
+                 process.wait(timeout=20)
+             except subprocess.TimeoutExpired:
+@@ -137,7 +139,8 @@
+             for pid in pids:
+                 if running(pid):
+                     os.kill(pid, signal.SIGKILL)
+-            process.stdout.close()
++            if process.stdout is not None:
++                process.stdout.close()
+ 
+     def settings(self, folder):
+         with socket.socket() as probe:
+@@ -172,13 +175,23 @@
+         with tempfile.TemporaryDirectory() as folder:
+             settings = self.settings(folder)
+             process = subprocess.Popen(
+-                [sys.executable, "-m", "aegis", "--data-dir", folder, "--port", str(settings.port),
+-                 "serve", "--parent-stdin"],
++                [
++                    sys.executable,
++                    "-m",
++                    "aegis",
++                    "--data-dir",
++                    folder,
++                    "--port",
++                    str(settings.port),
++                    "serve",
++                    "--parent-stdin",
++                ],
+                 cwd=ROOT,
+                 stdin=subprocess.PIPE,
+             )
+             try:
+-                process.stdin.close()
++                if process.stdin is not None:
++                    process.stdin.close()
+                 self.assertEqual(process.wait(timeout=15), 0)
+                 self.assertFalse(ready(settings))
+                 self.assertTrue(lock_available(settings.data_dir / "app.lock"))

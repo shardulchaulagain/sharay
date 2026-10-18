@@ -144,4 +144,3 @@ class StagedRunnerTests(unittest.TestCase):
             run_staged_extraction(real_zip, out, force_direct=False)
         self.assertIn("cannot be applied in this environment", str(ctx.exception))
         self.assertFalse(out.exists())
-

@@ -170,6 +170,50 @@ def main(argv=None):
     window = sub.add_parser("desktop", help="Start the native app; this is the default")
     window.add_argument("--browser", action="store_true")
     window.add_argument("--smoke-seconds", type=float, default=0)
+
+    scan_cmd = sub.add_parser("scan", help="Run automated assessment pipeline from command line")
+    scan_cmd.add_argument("url", help="Target URL (e.g. https://example.com/)")
+    scan_cmd.add_argument(
+        "--profile",
+        choices=["comprehensive", "safe_http", "approved_templates"],
+        default="comprehensive",
+        help="Assessment profile (default: comprehensive)",
+    )
+    scan_cmd.add_argument(
+        "--severities", default="medium,high,critical", help="Severities to scan for (nuclei)"
+    )
+    scan_cmd.add_argument(
+        "--mode",
+        choices=["passive", "standard", "adaptive", "aggressive"],
+        default="adaptive",
+        help="Scan mode (default: adaptive, correlates recon to tailor active tests)",
+    )
+    scan_cmd.add_argument("--tags", default=None, help="Custom Nuclei tags to target (e.g. cve,panel)")
+    scan_cmd.add_argument(
+        "--rate", type=int, default=150, help="Request rate limit per second (default: 150)"
+    )
+    scan_cmd.add_argument("--depth", type=int, default=2, help="Crawler max depth (default: 2)")
+    scan_cmd.add_argument(
+        "--project", default="CLI Assessments", help="Project name to associate findings with"
+    )
+    scan_cmd.add_argument("--json", action="store_true", help="Output raw JSON results")
+
+    probe_cmd = sub.add_parser("probe", help="Execute an interactive takeover probe against a target")
+    probe_cmd.add_argument("url", help="Target URL to probe")
+    probe_cmd.add_argument("--method", default="GET", help="HTTP method (GET, POST, etc.)")
+    probe_cmd.add_argument(
+        "-H", "--header", action="append", default=[], help="HTTP headers (e.g. -H 'Key: Value')"
+    )
+    probe_cmd.add_argument("-d", "--data", default=None, help="HTTP request body")
+    probe_cmd.add_argument("--timeout", type=float, default=10.0, help="Timeout in seconds")
+    probe_cmd.add_argument("--json", action="store_true", help="Output raw JSON results")
+
+    status_cmd = sub.add_parser("status", help="Show platform status, scanner integrations, and inventory")
+    status_cmd.add_argument("--json", action="store_true", help="Output raw JSON metrics")
+
+    find_cmd = sub.add_parser("findings", help="List recorded findings from the SHARAY database")
+    find_cmd.add_argument("--severity", default=None, help="Filter by severity (e.g. critical,high)")
+    find_cmd.add_argument("--json", action="store_true", help="Output raw JSON findings")
     args = parser.parse_args(argv)
     defaults = Settings.from_env()
     settings = Settings(args.data_dir or defaults.data_dir, args.port or defaults.port)
@@ -225,6 +269,44 @@ def main(argv=None):
                     db.commit()
             finally:
                 engine.dispose()
+        elif args.command == "status":
+            from aegis.cli import cmd_status
+
+            return cmd_status(settings, as_json=args.json)
+        elif args.command == "probe":
+            from aegis.cli import cmd_probe
+
+            headers = {}
+            for h in args.header:
+                k, _, v = h.partition(":")
+                headers[k.strip()] = v.strip()
+            return cmd_probe(
+                args.url,
+                method=args.method,
+                headers=headers,
+                body=args.data,
+                timeout=args.timeout,
+                as_json=args.json,
+            )
+        elif args.command == "scan":
+            from aegis.cli import cmd_scan
+
+            return cmd_scan(
+                settings,
+                args.url,
+                profile=args.profile,
+                severities=args.severities,
+                project_name=args.project,
+                mode=args.mode,
+                tags=args.tags,
+                rate=args.rate,
+                depth=args.depth,
+                as_json=args.json,
+            )
+        elif args.command == "findings":
+            from aegis.cli import cmd_findings
+
+            return cmd_findings(settings, severity=args.severity, as_json=args.json)
         else:
             desktop(settings, getattr(args, "browser", False), getattr(args, "smoke_seconds", 0))
     except (ValueError, RuntimeError) as exc:

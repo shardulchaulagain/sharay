@@ -19,13 +19,19 @@ def create_database(settings: Settings, migrate: bool = True) -> tuple[Engine, s
     if (folder / "aegis.db").is_symlink():
         raise ValueError("Database must not be a symbolic link")
     os.chmod(folder, 0o700)
-    engine = create_engine(settings.database_url, connect_args={"check_same_thread": False, "timeout": 10})
+    is_sqlite = settings.database_url.startswith("sqlite")
+    if is_sqlite:
+        engine = create_engine(
+            settings.database_url, connect_args={"check_same_thread": False, "timeout": 10}
+        )
 
-    @event.listens_for(engine, "connect")
-    def setup(connection, _record):
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA busy_timeout=10000")
+        @event.listens_for(engine, "connect")
+        def setup(connection, _record):
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA busy_timeout=10000")
+    else:
+        engine = create_engine(settings.database_url, pool_pre_ping=True, pool_size=10, max_overflow=20)
 
     if migrate:
         config = Config(str(ROOT / "alembic.ini"))
@@ -34,11 +40,14 @@ def create_database(settings: Settings, migrate: bool = True) -> tuple[Engine, s
         with engine.begin() as connection:
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
-        for path in folder.glob("aegis.db*"):
-            if path.is_file():
-                os.chmod(path, 0o600)
+        if is_sqlite:
+            for path in folder.glob("aegis.db*"):
+                if path.is_file():
+                    os.chmod(path, 0o600)
     return engine, sessionmaker(engine, expire_on_commit=False)
 
 
-def database_exists(folder: Path) -> bool:
+def database_exists(folder: Path, database_url: str | None = None) -> bool:
+    if database_url and not database_url.startswith("sqlite"):
+        return True
     return (folder / "aegis.db").is_file()

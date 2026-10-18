@@ -47,6 +47,8 @@ export function Icon({ name, size = 18 }: { name: string; size?: number }) {
     check: <path d="m4 12 5 5L20 6"/>,
     close: <path d="m5 5 14 14M5 19 19 5"/>,
     sparkle: <><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/></>,
+    terminal: <><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></>,
+    copy: <><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] ?? paths.overview}</svg>;
 }

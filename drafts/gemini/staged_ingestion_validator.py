@@ -69,6 +69,7 @@ def purge_staging(staging_dir: Path | str) -> bool:
             p.unlink(missing_ok=True)
             return not p.exists()
         from services.scanner_worker import remove_tree
+
         return remove_tree(p)
     except OSError:
         return False
@@ -155,7 +156,9 @@ def validate_staged_tree(
             ) from exc
         if isinstance(exc, StagedValidationError):
             raise
-        raise StagedValidationError("Staged extraction validation failed due to an unexpected error.") from exc
+        raise StagedValidationError(
+            "Staged extraction validation failed due to an unexpected error."
+        ) from exc
 
     return ValidatedTree(
         root=target_root,

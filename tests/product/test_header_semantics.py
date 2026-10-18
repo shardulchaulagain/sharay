@@ -28,7 +28,7 @@ class HeaderSemanticsTests(unittest.TestCase):
             result = scan_live(
                 check_url(broad_scope("fixture.invalid"), "https://fixture.invalid/"), "8.8.8.8"
             )
-        self.assertEqual(calls, [])
+        self.assertEqual(calls, [])  # never dispatched a runner
         self.assertEqual(result["outcome"], "failed")
         self.assertEqual(result["requests_performed"], 0)
         self.assertEqual(result["observations"], [])

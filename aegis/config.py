@@ -16,6 +16,9 @@ class Settings:
 
     @property
     def database_url(self) -> str:
+        env_url = os.environ.get("SHARAY_DATABASE_URL", os.environ.get("DATABASE_URL"))
+        if env_url:
+            return env_url
         return f"sqlite:///{self.data_dir / 'aegis.db'}"
 
     @property

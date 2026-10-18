@@ -58,19 +58,30 @@ def build_container_run_argv(
 ) -> list[str]:
     """Build unprivileged OCI container runner invocation."""
     cmd = [
-        "podman", "run",
-        "--rm",                                     # Auto-remove container upon exit
-        "--read-only",                              # Immutable root filesystem
-        "--security-opt", "no-new-privileges",      # Prevent privilege escalation
-        "--cap-drop", "ALL",                        # Drop all Linux capabilities
-        "--user", "65534:65534",                    # Non-root unprivileged execution
-        "--memory", f"{memory_limit_mb}m",          # Memory limit
-        "--memory-swap", f"{memory_limit_mb}m",     # Disable swap expansion
-        "--pids-limit", str(pids_limit),            # Fork-bomb protection
-        "--timeout", str(timeout_seconds),          # Hard execution deadline
-        "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",# Ephemeral in-memory tmp
-        "--volume", f"{scratch_dir}:/scratch:rw",   # Bounded scratch mount
-        "--network", "bridge" if network_enabled else "none",
+        "podman",
+        "run",
+        "--rm",  # Auto-remove container upon exit
+        "--read-only",  # Immutable root filesystem
+        "--security-opt",
+        "no-new-privileges",  # Prevent privilege escalation
+        "--cap-drop",
+        "ALL",  # Drop all Linux capabilities
+        "--user",
+        "65534:65534",  # Non-root unprivileged execution
+        "--memory",
+        f"{memory_limit_mb}m",  # Memory limit
+        "--memory-swap",
+        f"{memory_limit_mb}m",  # Disable swap expansion
+        "--pids-limit",
+        str(pids_limit),  # Fork-bomb protection
+        "--timeout",
+        str(timeout_seconds),  # Hard execution deadline
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",  # Ephemeral in-memory tmp
+        "--volume",
+        f"{scratch_dir}:/scratch:rw",  # Bounded scratch mount
+        "--network",
+        "bridge" if network_enabled else "none",
         image_digest,
     ]
     cmd.extend(target_argv)

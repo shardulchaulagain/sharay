@@ -1,0 +1,46 @@
+diff --git a/packages/security_policies/__init__.py b/packages/security_policies/__init__.py
+--- a/packages/security_policies/__init__.py
++++ b/packages/security_policies/__init__.py
+@@ -304,7 +304,13 @@ def check_execution_url(scope: ScopePolicy | dict, url: str, *, owned: bool = fa
+-def resolve_pinned(host: str, resolver=socket.getaddrinfo) -> str:
++def resolve_pinned(
++    host: str,
++    allowed_cidrs: Sequence[str] | None = None,
++    *,
++    timeout: float = 5.0,
++    resolver=socket.getaddrinfo,
++) -> str:
+     """Resolve a host to one public IP and pin it; the egress allowlist locks to this address.
+     SSRF guard: refuse if the host is, or resolves to, any loopback/private/link-local/reserved/
+     multicast/unspecified address (refusing the whole answer set stops a split DNS reply from
+     slipping an internal IP past the allowlist)."""
+     try:
+         candidates = [ipaddress.ip_address(host)]
+     except ValueError:
++        orig_timeout = socket.getdefaulttimeout()
+         try:
++            socket.setdefaulttimeout(timeout)
+             infos = resolver(host, None)
+         except OSError as exc:
+             raise PolicyError("Target host did not resolve.") from exc
++        finally:
++            socket.setdefaulttimeout(orig_timeout)
+         candidates = [ipaddress.ip_address(info[4][0]) for info in infos]
+     if not candidates:
+         raise PolicyError("Target host did not resolve.")
+     for ip in candidates:
+         if (
+             ip.is_loopback
+             or ip.is_private
+             or ip.is_link_local
+             or ip.is_multicast
+             or ip.is_reserved
+             or ip.is_unspecified
+         ):
+             raise PolicyError("Target resolves to a non-public address; refusing (SSRF guard).")
++    if allowed_cidrs:
++        networks = [ipaddress.ip_network(cidr) for cidr in allowed_cidrs]
++        if not any(any(ip in net for net in networks) for ip in candidates):
++            raise PolicyError("Target IP is outside the allowed CIDR ranges.")
+     # Prefer IPv4: the egress enforcement backend is IPv4-only. Deterministic tiebreak by address.
+     return str(min(candidates, key=lambda a: (a.version, a.packed)))
