@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ipaddress
 import math
+import os
 import re
 from typing import Any
 
@@ -721,8 +722,49 @@ def resolve_metasploit_exploit(
     return None
 
 
+def _search_live_module_tree(query: str) -> list[dict[str, Any]] | None:
+    """Search the live msfrpcd module tree when SHARAY_MSFRPC_URL is configured and reachable.
+
+    Returns None (so the caller uses the static catalog) when RPC is not available — fail-safe,
+    never fabricated. The full ~2,400 exploit / ~1,200 auxiliary tree comes from msfrpcd here.
+    """
+    rpc_url = os.environ.get("SHARAY_MSFRPC_URL")
+    if not rpc_url:
+        return None
+    try:
+        from packages.scanner_adapters.integrations.msf_rpc import connect, probe_msfrpc
+
+        if not probe_msfrpc(rpc_url, timeout=1.0):
+            return None
+        client = connect(
+            rpc_url,
+            os.environ.get("SHARAY_MSFRPC_USER", "msf"),
+            os.environ.get("SHARAY_MSFRPC_PASS", ""),
+        )
+        return [
+            {
+                "fullname": m.fullname,
+                "type": m.type,
+                "title": m.name,
+                "rank": m.rank,
+                "cve": next((r for r in m.references if r.upper().startswith("CVE-")), None),
+                "tags": [],
+                "source": "msfrpc",
+            }
+            for m in client.search_modules(query)
+        ]
+    except Exception:
+        return None
+
+
 def search_metasploit_modules(query: str) -> list[dict[str, Any]]:
-    """Search offensive Metasploit module catalog by keyword, CVE, or module path."""
+    """Search the Metasploit module tree by keyword, CVE, or module path.
+
+    Prefers the live msfrpcd module tree when configured; falls back to the static offensive catalog.
+    """
+    live = _search_live_module_tree(query)
+    if live is not None:
+        return live
     q = query.lower().strip()
     if not q:
         return [dict(e) for e in METASPLOIT_OFFENSIVE_CATALOG[:15]]
