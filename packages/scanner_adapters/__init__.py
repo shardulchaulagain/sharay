@@ -825,13 +825,18 @@ def scan_live(destination: Destination, allow_ip: str, *, run: Callable[..., Any
     if allow_ip in ("127.0.0.1", "::1", "localhost"):
         try:
             import subprocess
+
             proc = subprocess.run(["curl", *argv], capture_output=True, timeout=MAX_SECONDS * 2)
-            res = type("IsolatedResult", (), {
-                "outcome": "completed" if proc.returncode == 0 else "failed",
-                "exit_code": proc.returncode,
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
-            })()
+            res = type(
+                "IsolatedResult",
+                (),
+                {
+                    "outcome": "completed" if proc.returncode == 0 else "failed",
+                    "exit_code": proc.returncode,
+                    "stdout": proc.stdout,
+                    "stderr": proc.stderr,
+                },
+            )()
         except Exception as exc:
             result["outcome"] = "failed"
             result["checks"].append(
@@ -1505,6 +1510,7 @@ def scan_comprehensive(
     mode: str = "adaptive",
     depth: int = 2,
     tools: list[str] | None = None,
+    auth: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute the unified multi-stage assessment pipeline against an authorized target:
     1. Passive Recon & TLS metadata inspection.
@@ -2126,64 +2132,83 @@ def scan_comprehensive(
     if mode != "passive" and ("auth_matrix" in enabled_tools or mode in ("adaptive", "aggressive")):
         try:
             from packages.scanner_adapters.integrations.authorization import (
+                AuthConfig,
                 AuthorizationMatrixProber,
                 IdentitySession,
                 ResourceTarget,
             )
 
-            identities = {
-                "user_alpha": IdentitySession(
-                    "user_alpha",
-                    "standard",
-                    headers={"Authorization": "Bearer sharay_token_alpha"},
-                    user_id="101",
-                ),
-                "user_beta": IdentitySession(
-                    "user_beta",
-                    "standard",
-                    headers={"Authorization": "Bearer sharay_token_beta"},
-                    user_id="102",
-                ),
-            }
-            auth_prober = AuthorizationMatrixProber(destination, allow_ip, identities)
-            resource_targets = [
-                ResourceTarget(
-                    path=ep,
-                    method="GET",
-                    owner_identity="user_alpha",
-                    owner_resource_id="101",
-                    peer_resource_id="102",
-                )
-                for ep in (discovered_endpoints[:5] or ["/api/user/profile", "/api/data"])
-            ]
-            auth_res = auth_prober.sweep(resource_targets)
-            for finding in auth_res.get("findings", []):
-                fp = hashlib.sha256(
-                    f"idor:{destination.host}:{finding.get('resource_id', finding.get('endpoint'))}".encode()
-                ).hexdigest()
-                url = destination.url.rstrip("/") + finding.get("endpoint", "")
-                result["findings"].append(
+            configured_identities: dict[str, IdentitySession] = {}
+            if isinstance(auth, dict) and "identities" in auth:
+                for id_name, id_data in auth["identities"].items():
+                    auth_cfg = AuthConfig(
+                        cookies=id_data.get("cookies", {}),
+                        bearer_token=id_data.get("bearer_token"),
+                        rotating_tokens=id_data.get("rotating_tokens", []),
+                        custom_headers=id_data.get("custom_headers", {}),
+                        login_url=id_data.get("login_url"),
+                        login_method=id_data.get("login_method", "POST"),
+                        login_payload=id_data.get("login_payload", {}),
+                        success_indicator=id_data.get("success_indicator"),
+                    )
+                    configured_identities[id_name] = IdentitySession(
+                        name=id_name,
+                        role=id_data.get("role", "standard"),
+                        headers=id_data.get("headers", {}),
+                        user_id=id_data.get("user_id", id_name),
+                        auth_config=auth_cfg,
+                    )
+
+            if len(configured_identities) >= 2:
+                auth_prober = AuthorizationMatrixProber(destination, allow_ip, configured_identities)
+                id_keys = list(configured_identities.keys())
+                primary_id, peer_id = id_keys[0], id_keys[1]
+                resource_targets = [
+                    ResourceTarget(
+                        path=ep,
+                        method="GET",
+                        owner_identity=primary_id,
+                        owner_resource_id=configured_identities[primary_id].user_id or "101",
+                        peer_resource_id=configured_identities[peer_id].user_id or "102",
+                    )
+                    for ep in (discovered_endpoints[:5] or ["/api/user/profile", "/api/data"])
+                ]
+                auth_res = auth_prober.sweep(resource_targets)
+                for finding in auth_res.get("findings", []):
+                    fp = hashlib.sha256(
+                        f"idor:{destination.host}:{finding.get('resource_id', finding.get('endpoint'))}".encode()
+                    ).hexdigest()
+                    url = destination.url.rstrip("/") + finding.get("endpoint", "")
+                    result["findings"].append(
+                        {
+                            "category": "broken_object_level_authorization",
+                            "severity": "high",
+                            "title": f"Insecure Direct Object Reference (IDOR) on {url}",
+                            "description": f"Cross-tenant authorization evaluation confirmed horizontal privilege escalation: {finding.get('detail')}",
+                            "target_url": url,
+                            "fingerprint": fp,
+                            "cwe_id": "CWE-639",
+                            "confidence": "high",
+                            "status": "suspected",
+                            "remediation": "Enforce server-side tenancy and object ownership validation on every resource identifier before returning data.",
+                            "affected_url": url,
+                        }
+                    )
+                result["checks"].append(
                     {
-                        "category": "broken_object_level_authorization",
-                        "severity": "high",
-                        "title": f"Insecure Direct Object Reference (IDOR) on {url}",
-                        "description": f"Cross-tenant authorization evaluation confirmed horizontal privilege escalation: {finding.get('detail')}",
-                        "target_url": url,
-                        "fingerprint": fp,
-                        "cwe_id": "CWE-639",
-                        "confidence": "high",
-                        "status": "suspected",
-                        "remediation": "Enforce server-side tenancy and object ownership validation on every resource identifier before returning data.",
-                        "affected_url": url,
+                        "category": "authorization_matrix",
+                        "status": "completed",
+                        "detail": f"Dual-identity authorization matrix evaluated {len(resource_targets)} resource(s) across authenticated identities '{primary_id}' and '{peer_id}'.",
                     }
                 )
-            result["checks"].append(
-                {
-                    "category": "authorization_matrix",
-                    "status": "completed",
-                    "detail": f"Dual-identity authorization matrix evaluated {len(resource_targets)} resource(s) with canary session token verification.",
-                }
-            )
+            else:
+                result["checks"].append(
+                    {
+                        "category": "authorization_matrix",
+                        "status": "skipped",
+                        "detail": "Dual-identity authorization matrix skipped: requires two provisioned operator identities (auth.identities); synthetic placeholder tokens disallowed.",
+                    }
+                )
         except Exception as exc:
             result["checks"].append(
                 {
@@ -2193,43 +2218,106 @@ def scan_comprehensive(
                 }
             )
 
-    # Stage 7d: Deterministic AST Payload Forge & WAF Mutation Audit
+    # Stage 7d: Compositional payload grammar + fire-and-confirm (offensive engine, Sectors O3/2B)
     if mode != "passive" and ("payload_forge" in enabled_tools or mode in ("adaptive", "aggressive")):
         try:
-            from packages.scanner_adapters.integrations.payload_forge import (
-                CFGPayloadGenerator,
-                DeterministicPayloadForge,
-                WAFTransformProfile,
-            )
+            from packages.payload_engine import CFGGrammarEngine, VulnClass
 
-            cfg = CFGPayloadGenerator()
-            sqli_templates = cfg.generate_sqli(count=8)
-            cmdi_templates = cfg.generate_command_injection(count=8)
-            waf_profile = WAFTransformProfile(vendor="generic")
-            forge = DeterministicPayloadForge()
-            mutated_payloads = forge.generate_fuzzing_sequence(vuln_type="sqli", count=8)
+            grammar = CFGGrammarEngine()
+            gen_classes = [
+                VulnClass.SQLI,
+                VulnClass.CMDI,
+                VulnClass.XSS,
+                VulnClass.SSTI,
+                VulnClass.NOSQL,
+                VulnClass.SSRF,
+            ]
+            generated_total = sum(len(grammar.generate(vc, count=6)) for vc in gen_classes)
+
+            forge_findings: list[dict[str, Any]] = []
+            fired = 0
+            # Fire-and-confirm runs only against an explicitly-approved loopback laboratory that is
+            # actually serving (0.5s connectivity probe). Direct reproducer HTTP is in-scope there;
+            # live targets are exercised through the egress-locked stages instead.
+            serving = False
+            if allow_ip in ("127.0.0.1", "::1", "localhost"):
+                try:
+                    with socket.create_connection((allow_ip, destination.port), timeout=0.5):
+                        serving = True
+                except OSError:
+                    serving = False
+            if serving and (time.monotonic() - started) < max_seconds - 20:
+                from packages.offensive_capability import MitreAttackMapper, PayloadForgeEvaluator
+
+                evaluator = PayloadForgeEvaluator()
+                params = (discovered_parameters or ["id", "q"])[:2]
+                for param in params:
+                    for vclass in (VulnClass.SQLI, VulnClass.CMDI):
+                        if (time.monotonic() - started) >= max_seconds - 10:
+                            break
+                        vectors = evaluator.evaluate_payload_sequence(
+                            base_url=destination.url,
+                            fuzz_param=param,
+                            vuln_type=vclass.value,
+                            count=3,
+                        )
+                        fired += 3
+                        for v in vectors:
+                            fp = hashlib.sha256(
+                                f"forge:{destination.host}:{param}:{vclass.value}:{v['payload']}".encode()
+                            ).hexdigest()
+                            attack = MitreAttackMapper.map_finding(vclass.value)
+                            forge_findings.append(
+                                {
+                                    "category": "command_injection"
+                                    if vclass == VulnClass.CMDI
+                                    else "sql_injection",
+                                    "severity": "high",
+                                    "title": f"Confirmed {vclass.value.upper()} via grammar payload on parameter '{param}'",
+                                    "description": (
+                                        f"A compositional-grammar {vclass.value} payload produced a reproducible "
+                                        f"differential (score {v['differential_score']:.0f}) on parameter '{param}', "
+                                        f"confirmed by 3x replay with a negative-control canary."
+                                    ),
+                                    "affected_url": destination.url,
+                                    "target_url": destination.url,
+                                    "fingerprint": fp,
+                                    "confidence": "high",
+                                    "status": "confirmed",
+                                    "lifecycle_state": "REPRODUCED",
+                                    "remediation": "Use parameterized queries / safe OS APIs and validate input server-side.",
+                                    "attributes": {
+                                        "payload": v["payload"],
+                                        "differential_score": v["differential_score"],
+                                        "mitre": attack,
+                                    },
+                                }
+                            )
+                result["findings"].extend(forge_findings)
+
             result["observations"].append(
                 {
-                    "kind": "ast_payload_forge_summary",
+                    "kind": "payload_grammar_summary",
                     "category": "payload_forge",
-                    "generated_templates_count": len(sqli_templates) + len(cmdi_templates),
-                    "ast_mutations_count": len(mutated_payloads),
-                    "waf_profile": waf_profile.vendor,
+                    "generated_payloads": generated_total,
+                    "classes": [vc.value for vc in gen_classes],
+                    "fired": fired,
+                    "confirmed": len(forge_findings),
                 }
             )
-            result["checks"].append(
-                {
-                    "category": "ast_payload_forge",
-                    "status": "completed",
-                    "detail": f"AST Payload Forge synthesized {len(sqli_templates) + len(cmdi_templates)} CFG grammar payloads with {len(mutated_payloads)} AST syntax-preserving mutations.",
-                }
+            detail = f"Compositional grammar generated {generated_total} payloads across {len(gen_classes)} classes"
+            detail += (
+                f"; fired {fired} and confirmed {len(forge_findings)} via 3x reproducer + negative-control canary on the loopback lab."
+                if fired
+                else " (generation only; live firing is deferred to the egress-locked stages)."
             )
+            result["checks"].append({"category": "payload_forge", "status": "completed", "detail": detail})
         except Exception as exc:
             result["checks"].append(
                 {
-                    "category": "ast_payload_forge",
+                    "category": "payload_forge",
                     "status": "completed",
-                    "detail": f"AST Payload Forge note: {type(exc).__name__}.",
+                    "detail": f"Payload grammar note: {type(exc).__name__}.",
                 }
             )
 
@@ -2241,16 +2329,27 @@ def scan_comprehensive(
         reproduced_count = 0
         for finding in result["findings"]:
             poc = finding.get("poc")
-            if isinstance(poc, dict) and finding.get("status", "suspected") in ("suspected", "confirmed", None):
+            if isinstance(poc, dict) and finding.get("status", "suspected") in (
+                "suspected",
+                "confirmed",
+                None,
+            ):
                 param = poc.get("parameter") or "id"
                 payload = poc.get("payload") or "1"
                 method = poc.get("method") or "GET"
                 canary = poc.get("canary")
                 headers = dict(poc.get("headers") or {})
                 extra_params = dict(poc.get("extra_params") or {})
-                aff_url = finding.get("affected_url") or poc.get("url") or finding.get("target_url") or destination.url
+                aff_url = (
+                    finding.get("affected_url")
+                    or poc.get("url")
+                    or finding.get("target_url")
+                    or destination.url
+                )
                 if "4280" in aff_url or "vulnerabilities" in aff_url or destination.port == 4280:
-                    sec = os.environ.get("SHARAY_DVWA_SECURITY", os.environ.get("SHARAY_LAB_SECURITY_LEVEL", "high"))
+                    sec = os.environ.get(
+                        "SHARAY_DVWA_SECURITY", os.environ.get("SHARAY_LAB_SECURITY_LEVEL", "high")
+                    )
                     headers.setdefault("Cookie", f"security={sec}")
                     extra_params.setdefault("Submit", "Submit")
 
