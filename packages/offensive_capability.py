@@ -347,6 +347,147 @@ class AuthenticatedReproducer:
         )
 
 
+# --- Sector O8: Target-side 0-day discovery (anomaly + differential fuzzing) ---
+
+
+_ERROR_SIGNATURES = [
+    "traceback (most recent call last)",
+    "exception",
+    "fatal error",
+    "stack trace",
+    "undefined index",
+    "unhandled",
+    "sqlstate",
+    "nullpointerexception",
+    "panic:",
+    " at line ",
+    "internal server error",
+    "warning:",
+]
+
+
+class TargetAnomalyFuzzer:
+    """Flags NOVEL target behaviour as 0-day research candidates (never auto-confirmed).
+
+    Learns a baseline response profile, then fires edge-case and semantically-varied inputs and
+    flags unhandled 5xx, newly-appearing error/stack-trace signatures, large timing deltas, and
+    parser-confusion (inconsistent handling of equivalent encodings). Candidates are research leads
+    for an operator, emitted as `needs_triage` -- a reproduced exploit is a different pipeline.
+    """
+
+    def __init__(self, reproducer: DeterministicReproducer | None = None) -> None:
+        self.reproducer = reproducer or DeterministicReproducer()
+
+    def _probe(self, base_url: str, param: str, value: str) -> tuple[int, str, float]:
+        sep = "&" if "?" in base_url else "?"
+        url = f"{base_url}{sep}{urllib.parse.urlencode({param: value})}"
+        status, body, elapsed = self.reproducer._execute_http(url, method="GET")
+        return status, body.decode("utf-8", "replace").lower(), elapsed
+
+    @staticmethod
+    def mutation_corpus() -> list[tuple[str, str]]:
+        """(label, value) edge cases known to trip unhandled code paths."""
+        return [
+            ("huge_input", "A" * 20000),
+            ("null_byte", "x\x00y"),
+            ("format_string", "%n%n%s%s%x%x"),
+            ("int_overflow", str(2**63)),
+            ("negative", "-1"),
+            ("array_syntax", "a[]=1&a[]=2"),
+            ("deep_json", "[" * 200 + "]" * 200),
+            ("unicode_overlong", "‮\u0000﻿"),
+            ("path_meta", "../../../../etc/passwd%00"),
+            ("crlf", "a%0d%0aX-Injected:1"),
+            ("template_meta", "${7*7}#{7*7}{{7*7}}"),
+            ("xml_meta", "<!--#exec-->]]>&entity;"),
+            ("boolean_type", "true"),
+            ("empty", ""),
+        ]
+
+    def learn_baseline(self, base_url: str, param: str) -> dict[str, Any]:
+        statuses: set[int] = set()
+        lengths: list[int] = []
+        latencies: list[float] = []
+        err_present = False
+        for v in ("1", "100", "abc", "sharay_benign_token"):
+            status, body, elapsed = self._probe(base_url, param, v)
+            statuses.add(status)
+            lengths.append(len(body))
+            latencies.append(elapsed)
+            if any(sig in body for sig in _ERROR_SIGNATURES):
+                err_present = True
+        lengths.sort()
+        latencies.sort()
+        return {
+            "statuses": statuses,
+            "median_len": lengths[len(lengths) // 2] if lengths else 0,
+            "median_lat": latencies[len(latencies) // 2] if latencies else 0.0,
+            "error_baseline": err_present,
+        }
+
+    def _candidate(self, base_url: str, param: str, label: str, reason: str, value: str, severity: str) -> dict[str, Any]:
+        fp = hashlib.sha256(f"anomaly:{base_url}:{param}:{label}:{reason}".encode()).hexdigest()
+        return {
+            "category": "anomaly_research_candidate",
+            "severity": severity,
+            "title": f"Anomalous behaviour on '{param}' ({label}) -- 0-day research candidate",
+            "description": (
+                f"Input class '{label}' produced anomalous behaviour ({reason}) on parameter '{param}'. "
+                f"This is an UNVERIFIED research lead for operator triage, not a confirmed vulnerability; "
+                f"it was not reproduced or exploited."
+            ),
+            "remediation": "Triage the input/response; add handling and a regression test if it is a real defect.",
+            "affected_url": base_url,
+            "target_url": base_url,
+            "fingerprint": fp,
+            "confidence": "low",
+            "status": "needs_triage",
+            "attributes": {"input_class": label, "reason": reason, "sample": value[:80]},
+        }
+
+    def fuzz_parameter(self, base_url: str, param: str) -> list[dict[str, Any]]:
+        base = self.learn_baseline(base_url, param)
+        candidates: list[dict[str, Any]] = []
+        for label, value in self.mutation_corpus():
+            try:
+                status, body, elapsed = self._probe(base_url, param, value)
+            except Exception:
+                continue
+            if status >= 500 and not any(s >= 500 for s in base["statuses"]):
+                candidates.append(self._candidate(base_url, param, label, f"unhandled HTTP {status}", value, "medium"))
+            elif any(sig in body for sig in _ERROR_SIGNATURES) and not base["error_baseline"]:
+                candidates.append(self._candidate(base_url, param, label, "error/stack-trace signature surfaced", value, "medium"))
+            elif elapsed - base["median_lat"] >= 5000.0:
+                candidates.append(self._candidate(base_url, param, label, f"timing anomaly (+{elapsed - base['median_lat']:.0f}ms)", value, "low"))
+        return candidates
+
+    def differential_parser_confusion(self, base_url: str, param: str) -> list[dict[str, Any]]:
+        """Fire semantically-equivalent encodings of one value; divergent handling is a desync signal."""
+        equivalents = ["/x/../y", "/x/%2e%2e/y", "/x/..%2fy", "/x/.%2e/y"]
+        groups: set[tuple[int, int]] = set()
+        for v in equivalents:
+            try:
+                status, body, _ = self._probe(base_url, param, v)
+            except Exception:
+                continue
+            groups.add((status, len(body) // 32))  # bucketed length
+        if len(groups) > 1:
+            return [self._candidate(base_url, param, "parser_confusion", f"{len(groups)} divergent responses to equivalent encodings", "/x/../y", "medium")]
+        return []
+
+    def scan_for_anomalies(self, base_url: str, param: str) -> list[dict[str, Any]]:
+        out = self.fuzz_parameter(base_url, param)
+        out.extend(self.differential_parser_confusion(base_url, param))
+        # Dedup by fingerprint.
+        seen: set[str] = set()
+        uniq: list[dict[str, Any]] = []
+        for f in out:
+            if f["fingerprint"] not in seen:
+                seen.add(f["fingerprint"])
+                uniq.append(f)
+        return uniq
+
+
 # --- Sector 2B.3: Attack Graph Min-Cut Chain Executor ---
 
 
@@ -674,6 +815,7 @@ __all__ = [
     "AdaptivePayloadEvaluator",
     "AuthenticatedReproducer",
     "OOBBlindVerifier",
+    "TargetAnomalyFuzzer",
     "AttackGraphChainExecutor",
     "AuthorizedExploitModule",
     "BenignSessionReceipt",

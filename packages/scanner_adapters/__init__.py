@@ -2506,6 +2506,46 @@ def scan_comprehensive(
                     }
                 )
 
+    # Stage 7i: Target-side anomaly / parser-confusion fuzzing -> 0-day research candidates (O8).
+    # Research leads only: emitted needs_triage, NEVER auto-confirmed; a reproduced exploit is a
+    # different pipeline. Loopback lab only and gated to the heavier scan modes.
+    if mode in ("adaptive", "aggressive") and allow_ip in ("127.0.0.1", "::1", "localhost"):
+        serving_fuzz = False
+        try:
+            with socket.create_connection((allow_ip, destination.port), timeout=0.5):
+                serving_fuzz = True
+        except OSError:
+            serving_fuzz = False
+        if serving_fuzz and (time.monotonic() - started) < max_seconds - 15:
+            try:
+                from packages.offensive_capability import TargetAnomalyFuzzer
+
+                fuzzer = TargetAnomalyFuzzer()
+                anomaly_findings: list[dict[str, Any]] = []
+                for param in (discovered_parameters or ["id", "q", "path"])[:3]:
+                    if (time.monotonic() - started) >= max_seconds - 10:
+                        break
+                    anomaly_findings.extend(fuzzer.scan_for_anomalies(destination.url, param))
+                result["findings"].extend(anomaly_findings)
+                result["checks"].append(
+                    {
+                        "category": "zero_day_research",
+                        "status": "completed",
+                        "detail": (
+                            f"Anomaly/differential fuzzing surfaced {len(anomaly_findings)} research "
+                            f"candidate(s) for triage (unverified, not confirmed)."
+                        ),
+                    }
+                )
+            except Exception as exc:
+                result["checks"].append(
+                    {
+                        "category": "zero_day_research",
+                        "status": "completed",
+                        "detail": f"Anomaly fuzzing note: {type(exc).__name__}.",
+                    }
+                )
+
     # Stage 8: Active Nuclei Vulnerability & CVE Scanning (Context-Adapted & Multi-Endpoint)
     if mode != "passive" and "nuclei" in enabled_tools:
         if allow_ip in ("127.0.0.1", "::1", "localhost"):
