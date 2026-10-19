@@ -919,6 +919,8 @@ def scan_live(destination: Destination, allow_ip: str, *, run: Callable[..., Any
         )
         result["duration_ms"] = round((time.monotonic() - started) * 1000)
         return result
+    from packages.scanner_adapters.integrations import cve_match
+
     observation = {
         "url": url,
         "destination_ip": allow_ip,
@@ -926,6 +928,7 @@ def scan_live(destination: Destination, allow_ip: str, *, run: Callable[..., Any
         "status_code": status,
         "captured_at": datetime.now(UTC).isoformat(),
         "facts": _header_facts(headers),
+        "software_versions": cve_match.fingerprint_versions(headers),
         "body_retained": False,
     }
     result["observations"].append(observation)
@@ -2331,6 +2334,34 @@ def scan_comprehensive(
                     "detail": f"Payload grammar note: {type(exc).__name__}.",
                 }
             )
+
+    # Stage 7g: Known-CVE matching from observed component versions (Sector O1)
+    try:
+        from packages.scanner_adapters.integrations import cve_match
+
+        observed_versions: list[dict[str, Any]] = []
+        for obs in result["observations"]:
+            observed_versions.extend(obs.get("software_versions", []))
+        cve_findings = cve_match.scan_known_cves(observed_versions)
+        result["findings"].extend(cve_findings)
+        result["checks"].append(
+            {
+                "category": "known_cve",
+                "status": "completed",
+                "detail": (
+                    f"Version->CVE matching flagged {len(cve_findings)} known CVE(s) grounded in "
+                    f"{len(observed_versions)} observed component version(s)."
+                ),
+            }
+        )
+    except Exception as exc:
+        result["checks"].append(
+            {
+                "category": "known_cve",
+                "status": "completed",
+                "detail": f"Known-CVE matching note: {type(exc).__name__}.",
+            }
+        )
 
     # Stage 7e: Deterministic 3x Reproducer & Negative Control Canary Validation
     try:
