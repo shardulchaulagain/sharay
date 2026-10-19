@@ -2,14 +2,16 @@
 
 Generates tamper-proof correlation tokens, embeds them into SSRF, blind XXE,
 and blind command injection probes, and correlates asynchronous DNS/HTTP callbacks
-to deliver 100% false-positive-free vulnerability confirmations.
+to provide cryptographic out-of-band vulnerability confirmations.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import http.server
 import re
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -47,7 +49,9 @@ class OOBTokenGenerator:
     """Generates and validates signed, tamper-proof OOB callback tokens."""
 
     def __init__(self, secret_key: bytes | None = None, domain: str = DEFAULT_OOB_DOMAIN) -> None:
-        self.secret_key = secret_key or b"sharay_oob_cryptographic_verification_key_v1"
+        # Per-instance random secret by default (never a committed constant), so correlation
+        # tokens cannot be forged by anyone reading the source; a caller may pin one for tests.
+        self.secret_key = secret_key or secrets.token_bytes(32)
         self.domain = domain.rstrip(".")
 
     def generate_token(self, probe_id: str, probe_type: str) -> str:
@@ -224,10 +228,110 @@ class OOBCollector:
         }
 
 
+class OOBInteractionServer:
+    """Embedded loopback/LAN callback server for asynchronous HTTP and DNS interaction validation."""
+
+    def __init__(
+        self,
+        collector: OOBCollector,
+        host: str = "127.0.0.1",
+        port: int = 0,
+    ) -> None:
+        self.collector = collector
+        self.host = host
+        self.requested_port = port
+        self.server: http.server.HTTPServer | None = None
+        self._thread: threading.Thread | None = None
+        self.port: int = 0
+
+    def _make_handler(self):
+        collector = self.collector
+
+        class _OOBHTTPHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def _handle_interaction(self, method: str):
+                host_hdr = self.headers.get("Host", "")
+                token = host_hdr.split(":")[0]
+                client_ip = self.client_address[0] if self.client_address else "127.0.0.1"
+                headers_dict = {k: v for k, v in self.headers.items()}
+
+                # Extract token from Host header or URL path
+                path = self.path
+                matched_token = token
+                with collector._lock:
+                    for registered in collector._probes:
+                        if registered in host_hdr or registered in path:
+                            matched_token = registered
+                            break
+
+                collector.record_interaction(
+                    token=matched_token,
+                    protocol="http",
+                    source_ip=client_ip,
+                    http_path=path,
+                    http_headers=headers_dict,
+                )
+
+                if "xxe" in path:
+                    dtd_body = b"<!ENTITY test 'oob_success'>"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/xml-dtd")
+                    self.send_header("Content-Length", str(len(dtd_body)))
+                    self.end_headers()
+                    self.wfile.write(dtd_body)
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"OK")
+
+            def do_GET(self):
+                self._handle_interaction("GET")
+
+            def do_POST(self):
+                self._handle_interaction("POST")
+
+            def do_HEAD(self):
+                self._handle_interaction("HEAD")
+
+        return _OOBHTTPHandler
+
+    def start(self) -> None:
+        handler_cls = self._make_handler()
+        self.server = http.server.HTTPServer((self.host, self.requested_port), handler_cls)
+        self.port = self.server.server_port
+        self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def get_callback_url(self, token: str) -> str:
+        """Construct reachable callback URL for the active listener."""
+        return f"http://{self.host}:{self.port}/{token}"
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+
 __all__ = [
     "DEFAULT_OOB_DOMAIN",
     "OOBCollector",
     "OOBInteraction",
+    "OOBInteractionServer",
     "OOBTokenGenerator",
     "RegisteredProbe",
 ]

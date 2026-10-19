@@ -2455,6 +2455,57 @@ def scan_comprehensive(
             }
         )
 
+    # Stage 7h: Live out-of-band blind-SSRF confirmation (Sector O6). Runs after the reproducer so
+    # its OOB-confirmed findings are not re-processed. Loopback lab only: the per-run callback
+    # listener binds loopback, so only a target that can reach loopback can call back.
+    if mode != "passive" and allow_ip in ("127.0.0.1", "::1", "localhost"):
+        serving_oob = False
+        try:
+            with socket.create_connection((allow_ip, destination.port), timeout=0.5):
+                serving_oob = True
+        except OSError:
+            serving_oob = False
+        if serving_oob and (time.monotonic() - started) < max_seconds - 15:
+            try:
+                from packages.offensive_capability import OOBBlindVerifier
+
+                oob_findings: list[dict[str, Any]] = []
+                with OOBBlindVerifier() as oob:
+                    ssrf_params = discovered_parameters or [
+                        "url",
+                        "uri",
+                        "callback",
+                        "dest",
+                        "redirect",
+                        "next",
+                        "feed",
+                    ]
+                    for param in ssrf_params[:4]:
+                        if (time.monotonic() - started) >= max_seconds - 10:
+                            break
+                        f = oob.probe_param(destination.url, param, probe_type="ssrf", wait_seconds=1.0)
+                        if f:
+                            oob_findings.append(f)
+                result["findings"].extend(oob_findings)
+                result["checks"].append(
+                    {
+                        "category": "oob_blind",
+                        "status": "completed",
+                        "detail": (
+                            f"Out-of-band blind-SSRF probing confirmed {len(oob_findings)} finding(s) "
+                            f"via a real callback to the per-run OOB listener."
+                        ),
+                    }
+                )
+            except Exception as exc:
+                result["checks"].append(
+                    {
+                        "category": "oob_blind",
+                        "status": "completed",
+                        "detail": f"OOB blind probing note: {type(exc).__name__}.",
+                    }
+                )
+
     # Stage 8: Active Nuclei Vulnerability & CVE Scanning (Context-Adapted & Multi-Endpoint)
     if mode != "passive" and "nuclei" in enabled_tools:
         if allow_ip in ("127.0.0.1", "::1", "localhost"):
