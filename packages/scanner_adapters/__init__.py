@@ -2236,9 +2236,12 @@ def scan_comprehensive(
 
             forge_findings: list[dict[str, Any]] = []
             fired = 0
+            total_adaptations = 0
+            waf_profile: dict[str, bool] = {}
             # Fire-and-confirm runs only against an explicitly-approved loopback laboratory that is
             # actually serving (0.5s connectivity probe). Direct reproducer HTTP is in-scope there;
-            # live targets are exercised through the egress-locked stages instead.
+            # live targets are exercised through the egress-locked stages instead. Firing is
+            # response-driven (O4): a blocked payload is re-synthesized to route around the filter.
             serving = False
             if allow_ip in ("127.0.0.1", "::1", "localhost"):
                 try:
@@ -2247,22 +2250,24 @@ def scan_comprehensive(
                 except OSError:
                     serving = False
             if serving and (time.monotonic() - started) < max_seconds - 20:
-                from packages.offensive_capability import MitreAttackMapper, PayloadForgeEvaluator
+                from packages.offensive_capability import AdaptivePayloadEvaluator, MitreAttackMapper
 
-                evaluator = PayloadForgeEvaluator()
+                evaluator = AdaptivePayloadEvaluator()
                 params = (discovered_parameters or ["id", "q"])[:2]
                 for param in params:
                     for vclass in (VulnClass.SQLI, VulnClass.CMDI):
                         if (time.monotonic() - started) >= max_seconds - 10:
                             break
-                        vectors = evaluator.evaluate_payload_sequence(
+                        adaptive = evaluator.evaluate_adaptive(
                             base_url=destination.url,
                             fuzz_param=param,
                             vuln_type=vclass.value,
                             count=3,
                         )
                         fired += 3
-                        for v in vectors:
+                        total_adaptations += adaptive["adaptations"]
+                        waf_profile.update({k: v for k, v in adaptive["waf_profile"].items() if v})
+                        for v in adaptive["confirmed"]:
                             fp = hashlib.sha256(
                                 f"forge:{destination.host}:{param}:{vclass.value}:{v['payload']}".encode()
                             ).hexdigest()
@@ -2277,7 +2282,8 @@ def scan_comprehensive(
                                     "description": (
                                         f"A compositional-grammar {vclass.value} payload produced a reproducible "
                                         f"differential (score {v['differential_score']:.0f}) on parameter '{param}', "
-                                        f"confirmed by 3x replay with a negative-control canary."
+                                        f"confirmed by 3x replay with a negative-control canary"
+                                        + (" after adaptively routing around a WAF block." if v["waf_bypassed"] else ".")
                                     ),
                                     "affected_url": destination.url,
                                     "target_url": destination.url,
@@ -2289,6 +2295,8 @@ def scan_comprehensive(
                                     "attributes": {
                                         "payload": v["payload"],
                                         "differential_score": v["differential_score"],
+                                        "oracle": v["oracle"],
+                                        "waf_bypassed": v["waf_bypassed"],
                                         "mitre": attack,
                                     },
                                 }
@@ -2303,11 +2311,14 @@ def scan_comprehensive(
                     "classes": [vc.value for vc in gen_classes],
                     "fired": fired,
                     "confirmed": len(forge_findings),
+                    "adaptations": total_adaptations,
+                    "waf_filters_observed": sorted(waf_profile.keys()),
                 }
             )
             detail = f"Compositional grammar generated {generated_total} payloads across {len(gen_classes)} classes"
             detail += (
-                f"; fired {fired} and confirmed {len(forge_findings)} via 3x reproducer + negative-control canary on the loopback lab."
+                f"; adaptively fired {fired} (with {total_adaptations} WAF-bypass adaptation(s)) and confirmed "
+                f"{len(forge_findings)} via 3x reproducer + negative-control canary on the loopback lab."
                 if fired
                 else " (generation only; live firing is deferred to the egress-locked stages)."
             )

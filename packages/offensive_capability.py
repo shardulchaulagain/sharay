@@ -22,7 +22,15 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-from packages.payload_engine import CFGGrammarEngine, VulnClass
+import urllib.parse
+
+from packages.payload_engine import (
+    CFGGrammarEngine,
+    ClosedLoopAdaptiveOrchestrator,
+    DynamicOracleSelector,
+    VulnClass,
+    WAFProbeLearner,
+)
 from packages.scanner_adapters.reproducer import (
     DeterministicReproducer,
     ExploitChainResult,
@@ -143,6 +151,85 @@ class PayloadForgeEvaluator:
                     }
                 )
         return verified_vectors
+
+
+# --- Sector O4: Response-Driven Adaptive Firing ---
+
+
+_SQL_ERROR_SIGNATURES = ["sql syntax", "syntax error", "warning: mysql", "mariadb", "unclosed quotation"]
+
+
+class AdaptivePayloadEvaluator:
+    """Closed-loop firing: learn the target's filter, bypass blocked payloads, auto-select the
+    oracle from live signals, then confirm survivors through the reproducer (3x + negative control).
+
+    This turns static firing into response-driven methodology: a payload blocked by a WAF is
+    re-synthesized to route around the observed filter before it is abandoned.
+    """
+
+    def __init__(self, reproducer: DeterministicReproducer | None = None) -> None:
+        self.reproducer = reproducer or DeterministicReproducer()
+        self.grammar = CFGGrammarEngine()
+        self.loop = ClosedLoopAdaptiveOrchestrator()
+        self.waf = WAFProbeLearner()
+        self.oracle_selector = DynamicOracleSelector()
+
+    def _probe(self, base_url: str, param: str, payload: str) -> tuple[int, bytes, float]:
+        sep = "&" if "?" in base_url else "?"
+        url = f"{base_url}{sep}{urllib.parse.urlencode({param: payload})}"
+        return self.reproducer._execute_http(url, method="GET")
+
+    def evaluate_adaptive(
+        self,
+        base_url: str,
+        fuzz_param: str,
+        vuln_type: str = "sqli",
+        count: int = 4,
+        max_bypass: int = 2,
+    ) -> dict[str, Any]:
+        """Fire grammar payloads with live feedback; return confirmed vectors + adaptation trace."""
+        try:
+            vclass = VulnClass(vuln_type)
+        except ValueError:
+            vclass = VulnClass.SQLI
+
+        waf_profile = self.waf.learn_waf_profile(lambda p: self._probe(base_url, fuzz_param, p)[0])
+        base_status, base_body, base_time = self._probe(base_url, fuzz_param, "sharay_benign_safe_token_42")
+        base_text = base_body.decode("utf-8", "replace")
+
+        confirmed: list[dict[str, Any]] = []
+        adaptations = 0
+        for payload in self.grammar.generate(vclass, count=count):
+            probe = payload
+            status, body, elapsed = self._probe(base_url, fuzz_param, probe)
+            # Route around an observed block before abandoning the payload.
+            for _ in range(max_bypass):
+                decision = self.loop.process_response(probe, status, body.decode("utf-8", "replace"), elapsed)
+                if decision.action != "switch_bypass_strategy":
+                    break
+                probe = self.loop.synthesize_next_probe(probe, decision)
+                adaptations += 1
+                status, body, elapsed = self._probe(base_url, fuzz_param, probe)
+
+            oracle = self.oracle_selector.select_oracle(
+                base_time, elapsed, base_text, body.decode("utf-8", "replace"), _SQL_ERROR_SIGNATURES
+            )
+            res = self.reproducer.verify_finding(
+                base_url=base_url,
+                fuzz_param=fuzz_param,
+                active_payload=probe,
+                is_time_based=(oracle == "time_delay_oracle"),
+            )
+            if res.confirmed and res.differential_score >= 35.0:
+                confirmed.append(
+                    {
+                        "payload": probe,
+                        "differential_score": res.differential_score,
+                        "oracle": oracle,
+                        "waf_bypassed": probe != payload,
+                    }
+                )
+        return {"confirmed": confirmed, "waf_profile": waf_profile, "adaptations": adaptations}
 
 
 # --- Sector 2B.3: Attack Graph Min-Cut Chain Executor ---
@@ -469,6 +556,7 @@ class MitreAttackMapper:
 
 
 __all__ = [
+    "AdaptivePayloadEvaluator",
     "AttackGraphChainExecutor",
     "AuthorizedExploitModule",
     "BenignSessionReceipt",
