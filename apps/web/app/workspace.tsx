@@ -7,9 +7,10 @@ import { Badge, Empty, ErrorNotice, Icon, Loading, Panel, SectionHead, Shield, u
 import Projects from "./projects";
 import Assessments, { AssessmentTable } from "./assessments";
 import Findings from "./findings";
+import SourceAnalysis from "./source";
 
-type Page = "overview" | "projects" | "assets" | "assessments" | "findings" | "reports" | "integrations" | "audit" | "settings" | "ai";
-const pages: { id: Page; title: string }[] = [{ id: "overview", title: "Overview" }, { id: "projects", title: "Projects" }, { id: "assets", title: "Assets" }, { id: "assessments", title: "Assessments" }, { id: "findings", title: "Findings" }, { id: "reports", title: "Reports" }, { id: "ai", title: "AI investigations" }];
+type Page = "overview" | "projects" | "assets" | "assessments" | "findings" | "source" | "reports" | "integrations" | "audit" | "settings" | "ai";
+const pages: { id: Page; title: string }[] = [{ id: "overview", title: "Overview" }, { id: "projects", title: "Projects" }, { id: "assets", title: "Assets" }, { id: "assessments", title: "Assessments" }, { id: "findings", title: "Findings" }, { id: "source", title: "Source analysis" }, { id: "reports", title: "Reports" }, { id: "ai", title: "AI investigations" }];
 const adminPages: { id: Page; title: string }[] = [{ id: "integrations", title: "Integrations" }, { id: "audit", title: "Audit log" }, { id: "settings", title: "Settings" }];
 
 export default function Sharay() {
@@ -62,6 +63,7 @@ export default function Sharay() {
         {page === "assets" && <Assets revision={revision}/>}
         {page === "assessments" && <Assessments user={user} revision={revision} refresh={refresh} selected={assessment} openAssessment={openAssessment} clear={() => setAssessment(undefined)}/>}
         {page === "findings" && <Findings user={user} revision={revision} refresh={refresh} openAssessment={openAssessment}/>}
+        {page === "source" && <SourceAnalysis/>}
         {page === "reports" && <Reports revision={revision} openAssessment={openAssessment}/>}
         {page === "ai" && <AIInvestigations revision={revision}/>}
         {page === "integrations" && <Integrations revision={revision}/>}

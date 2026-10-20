@@ -14,7 +14,7 @@ import math
 import os
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Sequence
 
 
 class AutoPyVerifier:
@@ -66,7 +66,7 @@ if __name__ == "__main__":
         url_repr = repr(target_url)
 
         if is_post:
-            return f'''# Auto-generated verification script for {vuln_type}
+            return f"""# Auto-generated verification script for {vuln_type}
 import sys
 import urllib.parse
 import urllib.request
@@ -83,6 +83,7 @@ def verify():
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}})) if ("127.0.0.1" in target_base or "localhost" in target_base) else urllib.request.build_opener()
     try:
         with opener.open(req, timeout=5.0) as resp:
+            body = resp.read().decode("utf-8", "replace").lower()
             token = canary_token.lower()
             if "sharay_canary_cmd" in token and ("echo sharay_canary_cmd" in body or "echo+sharay_canary_cmd" in body or "_post[" in body or "_request[" in body):
                 assert False, "Canary was only reflected as raw input string, not executed by operating system shell."
@@ -96,9 +97,9 @@ def verify():
 
 if __name__ == "__main__":
     verify()
-'''
+"""
 
-        return f'''# Auto-generated verification script for {vuln_type}
+        return f"""# Auto-generated verification script for {vuln_type}
 import sys
 import urllib.parse
 import urllib.request
@@ -117,6 +118,7 @@ def verify():
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}})) if ("127.0.0.1" in target_base or "localhost" in target_base) else urllib.request.build_opener()
     try:
         with opener.open(req, timeout=5.0) as resp:
+            body = resp.read().decode("utf-8", "replace").lower()
             token = canary_token.lower()
             if "sharay_canary_cmd" in token and ("echo sharay_canary_cmd" in body or "echo+sharay_canary_cmd" in body or "_get[" in body or "_request[" in body):
                 assert False, "Canary was only reflected as raw input string, not executed by operating system shell."
@@ -130,11 +132,55 @@ def verify():
 
 if __name__ == "__main__":
     verify()
-'''
+"""
 
+    def execute_in_sandbox(
+        self,
+        script: str,
+        timeout_seconds: int = 5,
+        target_destinations: Sequence[tuple[str, int]] | None = None,
+        use_container: bool | None = None,
+    ) -> dict[str, Any]:
+        """Execute the synthesized verification script in an isolated sandbox (Sector 1.1).
 
-    def execute_in_sandbox(self, script: str, timeout_seconds: int = 5) -> dict[str, Any]:
-        """Execute the synthesized verification script in an isolated subprocess."""
+        When container isolation is requested or configured (SHARAY_CONTAINER_VERIFIER=1),
+        executes inside the rootless container netns sandbox with locked egress.
+        Otherwise executes in a hardened subprocess sandbox with sanitized environment.
+        """
+        if use_container or (use_container is None and os.environ.get("SHARAY_CONTAINER_VERIFIER") == "1"):
+            try:
+                from services.scanner_worker.container import _machine_ssh, container_runtime
+
+                rt = container_runtime()
+                if rt is not None and "podman" in rt:
+                    import shlex
+
+                    quoted_script = shlex.quote(script)
+                    vm_cmd = f"python3 -c {quoted_script}"
+                    res = _machine_ssh(vm_cmd, timeout=float(timeout_seconds))
+                    if res.returncode == 0:
+                        return {
+                            "status": "verified",
+                            "returncode": 0,
+                            "stdout": res.stdout.strip(),
+                            "isolation": "rootless_container_vm",
+                        }
+                    return {
+                        "status": "failed",
+                        "returncode": res.returncode,
+                        "stdout": res.stdout.strip(),
+                        "error": res.stderr.strip() or res.stdout.strip(),
+                        "isolation": "rootless_container_vm",
+                    }
+            except Exception:
+                pass  # Fall back to hardened subprocess sandbox
+
+        # Hardened host process sandbox: scrubbed environment, no inherited secrets
+        clean_env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LC_ALL": "C.UTF-8",
+            "PYTHONUNBUFFERED": "1",
+        }
         cmd = [sys.executable, "-c", script]
         try:
             proc = subprocess.run(
@@ -143,18 +189,21 @@ if __name__ == "__main__":
                 text=True,
                 timeout=timeout_seconds,
                 check=False,
+                env=clean_env,
             )
             if proc.returncode == 0:
                 return {
                     "status": "verified",
                     "returncode": 0,
                     "stdout": proc.stdout.strip(),
+                    "isolation": "host_subprocess_sandbox",
                 }
             return {
                 "status": "failed",
                 "returncode": proc.returncode,
                 "stdout": proc.stdout.strip(),
                 "error": proc.stderr.strip() or proc.stdout.strip(),
+                "isolation": "host_subprocess_sandbox",
             }
         except subprocess.TimeoutExpired:
             return {

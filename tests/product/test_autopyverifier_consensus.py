@@ -1,5 +1,6 @@
 """Acceptance tests for AutoPyVerifier, Consensus Best-of-N, and Entropy Gate (G2–G7)."""
 
+import threading
 import unittest
 
 from services.ai_analysis_worker.autopyverifier import (
@@ -82,6 +83,93 @@ if __name__ == "__main__":
         self.assertGreaterEqual(len(dataset_entries), 2)
         self.assertEqual(dataset_entries[0]["session_id"], "test_sess_001")
         self.assertIn("sqlmap", dataset_entries[0]["command"])
+
+    def test_autopyverifier_non_mock_execution_against_live_fixtures(self):
+        """Verifies non-mock AutoPyVerifier scripts execute against real live endpoints with no NameError."""
+        import http.server
+
+        canary = "sharay_canary_verified_9942"
+        vulnerable_mode = True
+
+        class MockVulnHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                if vulnerable_mode:
+                    self.wfile.write(
+                        f"<html><body>Welcome user! ID: 1, Canary: {canary}</body></html>".encode("utf-8")
+                    )
+                else:
+                    self.wfile.write(b"<html><body>Patched input sanitization</body></html>")
+
+            def do_POST(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                if vulnerable_mode:
+                    self.wfile.write(
+                        f"<html><body>Posted data received with {canary}</body></html>".encode("utf-8")
+                    )
+                else:
+                    self.wfile.write(b"<html><body>Patched POST handler</body></html>")
+
+            def log_message(self, format, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), MockVulnHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            # 1. Test GET non-mock script against vulnerable response
+            vulnerable_mode = True
+            get_script = self.verifier.synthesize_script(
+                target_url=f"http://127.0.0.1:{port}/vuln",
+                vuln_type="sqli",
+                canary=canary,
+                method="GET",
+                parameter="id",
+                mock_mode=False,
+            )
+            # Ensure body is defined in script
+            self.assertIn("body = resp.read()", get_script)
+            res_get = self.verifier.execute_in_sandbox(get_script, timeout_seconds=5)
+            self.assertEqual(res_get["returncode"], 0)
+            self.assertEqual(res_get["status"], "verified")
+            self.assertIn("VERIFICATION_SUCCESS", res_get["stdout"])
+
+            # 2. Test GET non-mock script against patched response (demote/fail)
+            vulnerable_mode = False
+            res_get_patched = self.verifier.execute_in_sandbox(get_script, timeout_seconds=5)
+            self.assertNotEqual(res_get_patched["returncode"], 0)
+            self.assertEqual(res_get_patched["status"], "failed")
+
+            # 3. Test POST non-mock script against vulnerable response
+            vulnerable_mode = True
+            post_script = self.verifier.synthesize_script(
+                target_url=f"http://127.0.0.1:{port}/post_vuln",
+                vuln_type="sqli",
+                canary=canary,
+                method="POST",
+                parameter="data",
+                mock_mode=False,
+            )
+            self.assertIn("body = resp.read()", post_script)
+            res_post = self.verifier.execute_in_sandbox(post_script, timeout_seconds=5)
+            self.assertEqual(res_post["returncode"], 0)
+            self.assertEqual(res_post["status"], "verified")
+            self.assertIn("VERIFICATION_SUCCESS", res_post["stdout"])
+
+            # 4. Test POST non-mock script against patched response (demote/fail)
+            vulnerable_mode = False
+            res_post_patched = self.verifier.execute_in_sandbox(post_script, timeout_seconds=5)
+            self.assertNotEqual(res_post_patched["returncode"], 0)
+            self.assertEqual(res_post_patched["status"], "failed")
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

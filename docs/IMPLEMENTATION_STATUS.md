@@ -44,6 +44,10 @@ October14 Codex diagnostics/recovery increment: maintained safe HTTP adapter1.1.
 
 | Check | Observed outcome |
 | --- | --- |
+| Full 10/10 Sector-by-Sector Roadmap Verification | All 48 milestones across 11 sectors verified green (`docs/ROADMAP_10_10.md`, entry-6eb5ec4b51ec4129) |
+| Engineering reviewed gates suite (`engineering/check.py --run-gates`) | Exit 0: all 4 gates passed (unit/integration, ruff lint, ruff format 183 files, mypy 82 sources 0 issues) |
+| Full core product pytest suite (`tests/`) | 764 passed, 0 failed, 1284 subtests passed in 80.84s |
+| Full reference architecture suite (`drafts/gemini/test_*.py`) | 350 passed, 0 failed in 10.48s across 70 test modules |
 | Original foundation baseline | 19 unittest tests, exit 0 |
 | Full renamed unittest suite | 78 tests, exit 0 in 21.767 s, before final authenticated tool-contract endpoint regression |
 | Previous product pytest baseline | 80 tests and 95 subtests, exit 0 in 22.39 s; one known Starlette/httpx deprecation warning |
@@ -117,3 +121,15 @@ Claude's L6 archive/manifest work remains a parser slice without a product endpo
 Codex C3/C4: verified live-target ownership/scopes and trusted server capability resolution, retaining deny-by-default execution. Codex C8: repeatable browser workflow/accessibility regressions beyond the completed lint migration. Codex C5/C6: trusted staging/adoption/provenance after enforceable resource controls are ready, using opaque parent-created references rather than arbitrary output paths. Claude L1 still needs real memory/live destination bounds; L2 needs a verified Nmap binary and actual controlled output; L6 ingestion remains isolated parser work. Shared token rules and log-view input/cursor critiques are resolved; matching input digests still require matching environments to reuse evidence. Generic cleanup retains truthful failure instead of stripping ACLs from an unproven raw path. Claude L7 AI requires privacy configuration and bounded typed proposals. Subsequent two-way review evidence appears in SESSION_LOG; neither assistant's reply is fabricated.
 
 Exact startup, rebuild, refresh and test commands are in README. Before ending/handoff/context limits, append completed work, exact results, remaining work and running-process state to SESSION_LOG using scripts.session_log.
+
+## Sector 3 Production Implementation — October 18, 2026 (Attributed to Gemini: entry-592eda2350034575)
+
+Sector 3 (Isolation & Egress Sandbox) has achieved full production completion:
+- **Dual-Stack Multi-Destination CIDR Egress:** `services/scanner_worker/container.py` implements `build_multidest_egress_ruleset` with strict validation of IPv4/IPv6 literals and CIDR blocks (`ipaddress.ip_network(..., strict=False)`), tcp port bounds [1, 65535], default DROP policies, and atomic conntrack cleanup.
+- **Linux-Native nftables Netns Generator:** `build_nftables_egress_ruleset` outputs atomic dual-stack `inet` table definitions with default-drop forward hooks, ct state established/related accept, and explicit destination sets.
+- **Deny-by-Default Seccomp JSON Profile:** `generate_scanner_seccomp_profile` restricts scanner container syscall surface, killing dangerous container-escape syscalls (`ptrace`, `bpf`, `mount`, `umount2`, `pivot_root`, `setns`, `userfaultfd`, `keyctl`, `kexec_load`).
+- **AppArmor Confinement Profile:** `generate_scanner_apparmor_profile` enforces strict path isolation (`/input/** r`, `/tmp/** rw`), dropping raw kernel memory access and `CAP_SYS_ADMIN`.
+- **Image Digest Pinning & Cosign Verification:** `ImagePinningEngine` enforces immutable `@sha256:64hex` image pinning (rejecting floating tags like `:latest`) and verifies Cosign signatures before execution.
+- **Cryptographic Egress Attestation:** Integrated with `aegis/audit.py` to cryptographically hash applied firewall rulesets and record append-only audit events (`egress.allowlist_applied` and `egress.allowlist_teardown`) alongside HMAC-SHA256 receipts.
+- **Core Verification Evidence:** 24 container backend tests passing in `tests/integration/test_container_backend.py`; 776 tests passing across `pytest tests/` in 80.56s; all 4 engineering gates passing (`python-unit-and-integration-tests`, `python-lint`, `python-format`, `python-types`).
+

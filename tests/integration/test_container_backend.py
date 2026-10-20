@@ -175,6 +175,241 @@ class ContainerBackendTests(unittest.TestCase):
         with self.assertRaises(IsolationError):
             cb.build_egress_ruleset("c", "10.88.0.0/16", "203.0.113.5", 0)
 
+    def test_build_egress_ruleset_ipv6_single_destination(self):
+        rules = cb.build_egress_ruleset("SHARAY_EGRESS", "fd00::/64", "2001:db8::1", 443)
+        up = [" ".join(c) for c in rules["up"]]
+        self.assertTrue(any("ip6tables -N SHARAY_EGRESS" in r for r in up))
+        self.assertTrue(any("2001:db8::1 -p tcp --dport 443 -j ACCEPT" in r for r in up))
+        self.assertTrue(any(r.endswith("-j DROP") for r in up))
+        down = [" ".join(c) for c in rules["down"]]
+        self.assertTrue(any("ip6tables -X SHARAY_EGRESS" in r for r in down))
+
+    def test_build_multidest_egress_ruleset_ipv4_and_ipv6_cidrs(self):
+        dests = [
+            ("192.168.1.0/24", 80),
+            ("10.0.0.5", 8080),
+            ("2001:db8::/32", 443),
+            ("2001:db8::1", 8443),
+        ]
+        rules = cb.build_multidest_egress_ruleset("MULTI_EGRESS", dests)
+        up = [" ".join(c) for c in rules["up"]]
+        # IPv4 checks
+        self.assertTrue(any("iptables -N MULTI_EGRESS" in r for r in up))
+        self.assertTrue(any("192.168.1.0/24 -p tcp --dport 80 -j ACCEPT" in r for r in up))
+        self.assertTrue(any("10.0.0.5 -p tcp --dport 8080 -j ACCEPT" in r for r in up))
+        # IPv6 checks
+        self.assertTrue(any("ip6tables -N MULTI_EGRESS_V6" in r for r in up))
+        self.assertTrue(any("2001:db8::/32 -p tcp --dport 443 -j ACCEPT" in r for r in up))
+        self.assertTrue(any("2001:db8::1 -p tcp --dport 8443 -j ACCEPT" in r for r in up))
+        # Teardown checks
+        down = [" ".join(c) for c in rules["down"]]
+        self.assertTrue(any("iptables -X MULTI_EGRESS" in r for r in down))
+        self.assertTrue(any("ip6tables -X MULTI_EGRESS_V6" in r for r in down))
+
+    def test_build_multidest_egress_ruleset_validation_fail_closed(self):
+        # Empty destinations
+        with self.assertRaisesRegex(IsolationError, "At least one egress destination"):
+            cb.build_multidest_egress_ruleset("CHAIN", [])
+        # Invalid port
+        with self.assertRaisesRegex(IsolationError, "Egress port must be an integer from 1 to 65535"):
+            cb.build_multidest_egress_ruleset("CHAIN", [("10.0.0.1", 70000)])
+        # Domain name instead of literal IP
+        with self.assertRaisesRegex(IsolationError, "Invalid IP address or CIDR"):
+            cb.build_multidest_egress_ruleset("CHAIN", [("example.com", 80)])
+        # Invalid chain identifier
+        with self.assertRaisesRegex(IsolationError, "chain name must be a short identifier"):
+            cb.build_multidest_egress_ruleset("INVALID;CHAIN", [("10.0.0.1", 80)])
+
+    def test_build_nftables_egress_ruleset_generation(self):
+        dests = [("192.168.2.0/24", 80), ("2001:db8:abcd::1", 443)]
+        res = cb.build_nftables_egress_ruleset("test_nft", dests)
+        self.assertEqual(res["engine"], cb.LinuxEgressEngine.NFTABLES)
+        self.assertEqual(res["table_name"], "test_nft")
+        self.assertEqual(res["v4_count"], 1)
+        self.assertEqual(res["v6_count"], 1)
+        cfg = res["nft_config"]
+        self.assertIn("table inet test_nft", cfg)
+        self.assertIn("ct state established,related accept", cfg)
+        self.assertIn("ip daddr { 192.168.2.0/24 }", cfg)
+        self.assertIn("ip6 daddr { 2001:db8:abcd::1 }", cfg)
+        self.assertIn("drop", cfg)
+        # Teardown command check
+        self.assertEqual(res["down_commands"], [["nft", "delete", "table", "inet", "test_nft"]])
+
+    def test_generate_scanner_seccomp_profile_blocks_dangerous_syscalls(self):
+        profile = cb.generate_scanner_seccomp_profile()
+        self.assertEqual(profile["defaultAction"], "SCMP_ACT_ERRNO")
+        kill_rules = next(r for r in profile["syscalls"] if r["action"] == "SCMP_ACT_KILL")
+        for bad_syscall in ("ptrace", "bpf", "mount", "pivot_root", "setns", "userfaultfd", "keyctl"):
+            self.assertIn(bad_syscall, kill_rules["names"])
+        allow_rules = next(r for r in profile["syscalls"] if r["action"] == "SCMP_ACT_ALLOW")
+        for good_syscall in ("read", "write", "socket", "connect", "epoll_wait"):
+            self.assertIn(good_syscall, allow_rules["names"])
+
+    def test_generate_scanner_apparmor_profile_confinement(self):
+        prof = cb.generate_scanner_apparmor_profile("sharay_test_prof")
+        self.assertIn("profile sharay_test_prof flags=(attach_disconnected,enforce)", prof)
+        self.assertIn("/input/** r,", prof)
+        self.assertIn("/tmp/** rw,", prof)
+        self.assertIn("deny ptrace,", prof)
+        self.assertIn("deny capability sys_admin,", prof)
+
+    def test_image_pinning_engine_digest_and_cosign(self):
+        pinned = (
+            "docker.io/library/alpine@sha256:e2e430d8726191151f7470f37abe47f63b4893fa0e4e935102c112a828e10d40"
+        )
+        digest = cb.ImagePinningEngine.validate_image_digest_pinning(pinned, require_digest=True)
+        self.assertEqual(digest, "e2e430d8726191151f7470f37abe47f63b4893fa0e4e935102c112a828e10d40")
+
+        # Floating tags rejected
+        with self.assertRaisesRegex(IsolationError, "violates immutability policy"):
+            cb.ImagePinningEngine.validate_image_digest_pinning("alpine:latest", require_digest=True)
+
+        # Cosign signature verification
+        self.assertTrue(cb.ImagePinningEngine.verify_cosign_signature(pinned, "cosign-pub-key-123"))
+        with self.assertRaisesRegex(IsolationError, "Trusted public key is required"):
+            cb.ImagePinningEngine.verify_cosign_signature(pinned, "")
+
+    def test_egress_attestation_logger_receipt_and_signature(self):
+        # 1. Test asymmetric Ed25519 attestation (default)
+        asym_logger = cb.EgressAttestationLogger()
+        self.assertTrue(asym_logger.is_asymmetric)
+        self.assertIsNotNone(asym_logger.public_key)
+        rules = [["iptables", "-A", "TEST", "-d", "10.0.0.1", "-j", "ACCEPT"]]
+        asym_receipt = asym_logger.record_ruleset_applied("assessment-asym-1", "target.com", rules)
+        self.assertEqual(len(asym_receipt.signature_sha256), 128)
+        self.assertTrue(asym_logger.verify_receipt(asym_receipt))
+        # Tampered receipt verification fails
+        asym_receipt.applied_ruleset_hash = "tampered_hash_value"
+        self.assertFalse(asym_logger.verify_receipt(asym_receipt))
+
+        # 2. Test symmetric legacy attestation
+        logger = cb.EgressAttestationLogger(notary_secret="TEST_SECRET_KEY")
+        self.assertFalse(logger.is_asymmetric)
+        receipt = logger.record_ruleset_applied("assessment-123", "target.com", rules)
+        self.assertEqual(receipt.assessment_id, "assessment-123")
+        self.assertEqual(receipt.state, "APPLIED")
+        self.assertTrue(len(receipt.signature_sha256) == 64)
+        self.assertIsNone(receipt.teardown_timestamp_utc)
+        self.assertTrue(logger.verify_receipt(receipt))
+
+        td_receipt = logger.record_ruleset_teardown(receipt.attestation_id, clean=True)
+        self.assertEqual(td_receipt.state, "TORN_DOWN")
+        self.assertIsNotNone(td_receipt.teardown_timestamp_utc)
+        self.assertTrue(logger.verify_receipt(td_receipt))
+
+        with self.assertRaises(KeyError):
+            logger.record_ruleset_teardown("non-existent-id")
+
+    def test_run_with_egress_multi_destination_dual_stack(self):
+        from types import SimpleNamespace
+
+        scripts = []
+
+        def recorder(script, timeout=60.0):
+            scripts.append(script)
+            return SimpleNamespace(returncode=0, stdout="scan output")
+
+        dests = [("192.168.1.10", 80), ("2001:db8::10", 443)]
+        with patch.object(cb, "container_runtime", return_value="/opt/homebrew/bin/podman"):
+            with patch.object(cb, "_machine_ssh", recorder):
+                res = cb.run_with_egress("busybox", ["echo", "test"], destinations=dests)
+
+        self.assertEqual(res.outcome, "completed")
+        self.assertIn("egress_allowlist_multi_destination", res.enforced)
+        self.assertIn("ipv6_egress", res.enforced)
+        setup_script = next(s for s in scripts if "iptables" in s and "ip6tables" in s)
+        self.assertIn("192.168.1.10", setup_script)
+        self.assertIn("2001:db8::10", setup_script)
+
+    def test_run_with_egress_security_profiles_and_image_pinning(self):
+        from types import SimpleNamespace
+
+        scripts = []
+
+        def recorder(script, timeout=60.0):
+            scripts.append(script)
+            return SimpleNamespace(returncode=0, stdout="")
+
+        pinned_image = "busybox@sha256:e2e430d8726191151f7470f37abe47f63b4893fa0e4e935102c112a828e10d40"
+        with patch.object(cb, "container_runtime", return_value="/opt/homebrew/bin/podman"):
+            with patch.object(cb, "_machine_ssh", recorder):
+                res = cb.run_with_egress(
+                    pinned_image,
+                    ["echo", "hi"],
+                    allow_ip="203.0.113.5",
+                    allow_port=443,
+                    seccomp_profile="/etc/seccomp/default.json",
+                    apparmor_profile="sharay_sandbox",
+                    require_pinned_digest=True,
+                )
+
+        self.assertEqual(res.outcome, "completed")
+        self.assertIn("image_digest_pinning", res.enforced)
+        self.assertIn("seccomp_profile", res.enforced)
+        self.assertIn("apparmor_profile", res.enforced)
+        run_cmd = next(s for s in scripts if "podman run" in s)
+        self.assertIn("--security-opt=seccomp=/etc/seccomp/default.json", run_cmd)
+        self.assertIn("--security-opt=apparmor=sharay_sandbox", run_cmd)
+
+    def test_run_with_egress_audit_events_logging(self):
+        from types import SimpleNamespace
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+
+        from aegis.models import AuditEvent, Base, Organization
+
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session = Session(engine)
+        org = Organization(id="org-test", name="Test Org")
+        session.add(org)
+        session.commit()
+
+        calls = []
+
+        def recorder(script, timeout=60.0):
+            calls.append(script)
+            return SimpleNamespace(returncode=0, stdout="done")
+
+        with patch.object(cb, "container_runtime", return_value="/opt/homebrew/bin/podman"):
+            with patch.object(cb, "_machine_ssh", recorder):
+                res = cb.run_with_egress(
+                    "busybox",
+                    ["echo", "ok"],
+                    allow_ip="203.0.113.10",
+                    allow_port=443,
+                    audit_db=session,
+                    assessment_id="asmt-456",
+                    org_id="org-test",
+                )
+
+        self.assertEqual(res.outcome, "completed")
+        events = session.query(AuditEvent).all()
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].action, "egress.allowlist_applied")
+        self.assertEqual(events[1].action, "egress.allowlist_teardown")
+        self.assertIn("ruleset_hash", events[0].detail)
+        self.assertTrue(events[1].detail["clean"])
+
+    def test_attest_reports_multi_destination_and_sector3_capabilities(self):
+        with patch.object(cb, "container_runtime", return_value="/opt/homebrew/bin/podman"):
+            a = cb.attest()
+            self.assertEqual(a["backend"], "rootless-container")
+            self.assertEqual(a["runtime"], "podman")
+            self.assertTrue(a["available"])
+            for cap in (
+                "egress_allowlist_single_destination",
+                "egress_allowlist_multi_destination",
+                "ipv6_egress",
+                "seccomp_profile",
+                "apparmor_profile",
+                "image_digest_pinning",
+                "egress_attestation_audit",
+            ):
+                self.assertIn(cap, a["enforced"])
+
 
 if __name__ == "__main__":
     unittest.main()

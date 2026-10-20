@@ -238,7 +238,7 @@ class ReportingTests(unittest.TestCase):
 
     def test_invalid_format_is_explicit(self):
         with self.assertRaisesRegex(ValueError, "Unsupported"):
-            render_report(assessment_data(), "sarif")
+            render_report(assessment_data(), "unsupported_format")
         with self.assertRaisesRegex(ValueError, "dictionary"):
             render_report([], "json")
 

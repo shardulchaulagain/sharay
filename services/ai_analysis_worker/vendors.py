@@ -122,6 +122,45 @@ _VENDORS: dict[str, _Vendor] = {
         },
         extract=_google_extract,
     ),
+    "ollama": _Vendor(
+        default_base="http://127.0.0.1:11434",
+        url=lambda c: _base(c, "http://127.0.0.1:11434") + "/api/generate",
+        headers=lambda c, key: {"content-type": "application/json"},
+        body=lambda c, system, user: {
+            "model": c.model or "mistral-7b-instruct",
+            "prompt": user,
+            "system": system,
+            "stream": False,
+        },
+        extract=lambda doc: _text(doc.get("response", "")),
+    ),
+    "vllm": _Vendor(
+        default_base="http://127.0.0.1:8000",
+        url=lambda c: _base(c, "http://127.0.0.1:8000") + "/v1/chat/completions",
+        headers=lambda c, key: {
+            "content-type": "application/json",
+            "authorization": f"Bearer {key or 'dummy'}",
+        },
+        body=lambda c, system, user: {
+            "model": c.model or "mistral-7b-instruct",
+            "max_tokens": c.max_output_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        },
+        extract=_openai_extract,
+    ),
+    "llama_cpp": _Vendor(
+        default_base="http://127.0.0.1:8080",
+        url=lambda c: _base(c, "http://127.0.0.1:8080") + "/completion",
+        headers=lambda c, key: {"content-type": "application/json"},
+        body=lambda c, system, user: {
+            "prompt": f"{system}\n\nUser: {user}\nAssistant:" if system else user,
+            "n_predict": c.max_output_tokens,
+        },
+        extract=lambda doc: _text(doc.get("content", "")),
+    ),
 }
 
 
@@ -153,7 +192,9 @@ def _tls_context() -> ssl.SSLContext:
         return ssl.create_default_context()
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=_tls_context()))
+_OPENER = urllib.request.build_opener(
+    _NoRedirect, urllib.request.HTTPHandler(), urllib.request.HTTPSHandler(context=_tls_context())
+)
 
 
 def _http_post(url: str, headers: dict[str, str], payload: bytes, timeout: int) -> bytes:
@@ -177,7 +218,7 @@ class _HttpProvider:
         self._vendor = vendor
 
     def propose(self, prompt: dict[str, Any]) -> bytes:
-        key = secret(self._config)
+        key = secret(self._config) if self._config.api_key_env else ""
         system, user = _render(prompt)
         payload = json.dumps(self._vendor.body(self._config, system, user)).encode("utf-8")
         headers = self._vendor.headers(self._config, key)
@@ -221,6 +262,13 @@ def _detect_vendor_from_env(source: dict[str, str]) -> dict[str, Any] | None:
             "provider": "openai",
             "model": "gpt-4o",
             "api_key_env": "OPENAI_API_KEY",
+            "share_assessment_data": source.get("SHARAY_AI_SHARE_DATA", "true").lower() != "false",
+        }
+    if source.get("OLLAMA_HOST") or source.get("OLLAMA_MODEL"):
+        return {
+            "provider": "ollama",
+            "model": source.get("OLLAMA_MODEL", source.get("SHARAY_AI_MODEL", "mistral-7b-instruct")),
+            "base_url": source.get("OLLAMA_HOST", "http://127.0.0.1:11434"),
             "share_assessment_data": source.get("SHARAY_AI_SHARE_DATA", "true").lower() != "false",
         }
     return None

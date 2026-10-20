@@ -27,3 +27,6 @@ drafts/gemini/review-of-codex-file-changes.md
 
 # Downloaded third-party tools and the update ledger: never committed.
 tools/
+
+# Throwaway dev capture scripts
+scratch/

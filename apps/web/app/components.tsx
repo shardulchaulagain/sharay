@@ -39,6 +39,7 @@ export function Icon({ name, size = 18 }: { name: string; size?: number }) {
     integrations: <><path d="m9 3 3 3-3 3M3 6h9M15 15l-3 3 3 3m-3-3h9M7 12h10"/></>,
     audit: <><path d="M5 3h14v18H5V3ZM9 7h6m-6 5h6m-6 5h6"/></>,
     settings: <><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="10" cy="18" r="2"/></>,
+    source: <><path d="m8 8-4 4 4 4m8-8 4 4-4 4"/><path d="M13 5 11 19"/></>,
     arrow: <path d="M4 12h16m-6-6 6 6-6 6"/>,
     plus: <path d="M12 4v16M4 12h16"/>,
     lock: <><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/></>,

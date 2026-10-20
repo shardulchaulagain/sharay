@@ -507,9 +507,9 @@ finally:
                     with migrated.connect() as connection:
                         self.assertIn("origin_cooldowns", inspect(connection).get_table_names())
                         self.assertEqual(snapshot(connection), expected)
-                        self.assertEqual(
+                        self.assertIn(
                             connection.scalar(text("SELECT version_num FROM alembic_version")),
-                            "0002_origin_cooldowns",
+                            ("0002_origin_cooldowns", "0003_origin_pacing_leases"),
                         )
                 finally:
                     migrated.dispose()

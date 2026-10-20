@@ -839,9 +839,11 @@ function AssessmentDetail({ id, user, revision, refresh, back, openAssessment }:
   const [retestTarget, setRetestTarget] = useState<Target>();
   const [consoleFinding, setConsoleFinding] = useState<Finding>();
   const [consoleTarget, setConsoleTarget] = useState<Target>();
+  const [consoleCommand, setConsoleCommand] = useState<string>();
 
-  async function openFindingConsole(finding: Finding) {
+  async function openFindingConsole(finding: Finding, initialCommand?: string) {
     setConsoleFinding(finding);
+    setConsoleCommand(initialCommand);
     try {
       const tgt = await api<Target>(`/targets/${encodeURIComponent(resource.data!.target_id)}`);
       setConsoleTarget(tgt);
@@ -979,7 +981,8 @@ function AssessmentDetail({ id, user, revision, refresh, back, openAssessment }:
       <OperatorTerminal
         target={consoleTarget}
         finding={consoleFinding}
-        onClose={() => { setConsoleFinding(undefined); setConsoleTarget(undefined); }}
+        initialCommand={consoleCommand}
+        onClose={() => { setConsoleFinding(undefined); setConsoleTarget(undefined); setConsoleCommand(undefined); }}
         onFindingUpdated={refresh}
       />
     )}

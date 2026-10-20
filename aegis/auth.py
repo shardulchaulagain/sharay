@@ -1,9 +1,15 @@
 """Owner-controlled accounts, opaque sessions and role enforcement."""
 
+import base64
+import dataclasses
+import enum
 import hashlib
 import hmac
 import secrets
+import struct
 import time
+from typing import Any
+from urllib.parse import quote
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
@@ -142,3 +148,243 @@ def consume_recovery(db: Session, token: str, password: str) -> None:
     record.used = True
     db.execute(delete(SessionRecord).where(SessionRecord.user_id == user.id))
     audit(db, user.organization_id, "local_cli", "auth.password_reset", user.id)
+
+
+class TOTPEngine:
+    """RFC 6238 Time-Based One-Time Password Engine."""
+
+    TIME_STEP: int = 30
+    DIGITS: int = 6
+
+    @classmethod
+    def generate_secret(cls) -> str:
+        """Generate a cryptographically secure 160-bit Base32 secret."""
+        raw_bytes = secrets.token_bytes(20)
+        return base64.b32encode(raw_bytes).decode("ascii").replace("=", "")
+
+    @classmethod
+    def generate_provisioning_uri(cls, secret: str, username: str, issuer: str = "SHARAY") -> str:
+        """Generate standard otpauth:// URI for QR code enrollment."""
+        label = quote(f"{issuer}:{username}")
+        clean_secret = secret.replace(" ", "").upper()
+        return f"otpauth://totp/{label}?secret={clean_secret}&issuer={quote(issuer)}&algorithm=SHA1&digits={cls.DIGITS}&period={cls.TIME_STEP}"
+
+    @classmethod
+    def generate_otp(cls, secret: str, timestamp: float | None = None) -> str:
+        """Calculates current 6-digit TOTP code for the given secret."""
+        t = timestamp if timestamp is not None else time.time()
+        counter = int(t // cls.TIME_STEP)
+
+        clean_secret = secret.replace(" ", "").upper()
+        padding = (8 - len(clean_secret) % 8) % 8
+        key_bytes = base64.b32decode(clean_secret + "=" * padding)
+
+        msg = struct.pack(">Q", counter)
+        h = hmac.new(key_bytes, msg, hashlib.sha1).digest()
+
+        offset = h[-1] & 0x0F
+        binary = (
+            ((h[offset] & 0x7F) << 24)
+            | ((h[offset + 1] & 0xFF) << 16)
+            | ((h[offset + 2] & 0xFF) << 8)
+            | (h[offset + 3] & 0xFF)
+        )
+
+        otp = binary % (10**cls.DIGITS)
+        return str(otp).zfill(cls.DIGITS)
+
+    @classmethod
+    def verify_otp(
+        cls,
+        secret: str,
+        code: str,
+        timestamp: float | None = None,
+        allowed_drift_windows: int = 1,
+        used_counters: set[int] | None = None,
+    ) -> tuple[bool, int | None]:
+        """Verifies code against secret with +/- allowed_drift_windows skew tolerance.
+
+        Returns (is_valid, counter_used). Prevents replay if used_counters set is passed.
+        """
+        clean_code = str(code).strip()
+        if len(clean_code) != cls.DIGITS or not clean_code.isdigit():
+            return False, None
+
+        t = timestamp if timestamp is not None else time.time()
+        curr_counter = int(t // cls.TIME_STEP)
+
+        for offset in range(-allowed_drift_windows, allowed_drift_windows + 1):
+            check_counter = curr_counter + offset
+            if used_counters is not None and check_counter in used_counters:
+                continue
+
+            expected_otp = cls.generate_otp(secret, timestamp=check_counter * cls.TIME_STEP)
+            if hmac.compare_digest(clean_code, expected_otp):
+                if used_counters is not None:
+                    used_counters.add(check_counter)
+                return True, check_counter
+
+        return False, None
+
+    @classmethod
+    def generate_backup_codes(cls, count: int = 8) -> tuple[list[str], list[str]]:
+        """Generates single-use backup recovery codes and their salted hashes."""
+        plain_codes = []
+        hashed_codes = []
+        for _ in range(count):
+            raw = secrets.token_hex(4).upper()
+            formatted = f"{raw[:4]}-{raw[4:]}"
+            plain_codes.append(formatted)
+            hashed_codes.append(hashlib.sha256(formatted.encode("ascii")).hexdigest())
+        return plain_codes, hashed_codes
+
+    @classmethod
+    def redeem_backup_code(cls, code: str, hashed_codes: list[str]) -> bool:
+        """Atomically checks and consumes a backup code from the list."""
+        formatted = str(code).strip().upper()
+        h = hashlib.sha256(formatted.encode("ascii")).hexdigest()
+        for idx, stored_hash in enumerate(hashed_codes):
+            if hmac.compare_digest(h, stored_hash):
+                hashed_codes.pop(idx)
+                return True
+        return False
+
+
+class ResourceAction(str, enum.Enum):
+    READ = "READ"
+    WRITE = "WRITE"
+    EXECUTE_SCAN = "EXECUTE_SCAN"
+    EXPLOIT_VERIFY = "EXPLOIT_VERIFY"
+    DELETE = "DELETE"
+    MANAGE_MEMBERS = "MANAGE_MEMBERS"
+
+
+class ProjectRole(str, enum.Enum):
+    PROJECT_OWNER = "PROJECT_OWNER"
+    SECURITY_LEAD = "SECURITY_LEAD"
+    SECURITY_ANALYST = "SECURITY_ANALYST"
+    AUDITOR_READONLY = "AUDITOR_READONLY"
+
+
+_ROLE_PERMISSIONS: dict[ProjectRole, set[ResourceAction]] = {
+    ProjectRole.PROJECT_OWNER: {
+        ResourceAction.READ,
+        ResourceAction.WRITE,
+        ResourceAction.EXECUTE_SCAN,
+        ResourceAction.EXPLOIT_VERIFY,
+        ResourceAction.DELETE,
+        ResourceAction.MANAGE_MEMBERS,
+    },
+    ProjectRole.SECURITY_LEAD: {
+        ResourceAction.READ,
+        ResourceAction.WRITE,
+        ResourceAction.EXECUTE_SCAN,
+        ResourceAction.EXPLOIT_VERIFY,
+    },
+    ProjectRole.SECURITY_ANALYST: {
+        ResourceAction.READ,
+        ResourceAction.EXECUTE_SCAN,
+        ResourceAction.EXPLOIT_VERIFY,
+    },
+    ProjectRole.AUDITOR_READONLY: {
+        ResourceAction.READ,
+    },
+}
+
+
+class PermissionDeniedError(Exception):
+    """Raised when an actor lacks sufficient resource-scoped permissions."""
+
+
+@dataclasses.dataclass
+class ProjectMembership:
+    user_id: str
+    project_id: str
+    role: ProjectRole
+    assigned_at: float = dataclasses.field(default_factory=time.time)
+
+
+class ProjectRBACEnforcer:
+    """Enforces fine-grained resource and project-level authorization."""
+
+    def __init__(self) -> None:
+        self._memberships: dict[tuple[str, str], ProjectMembership] = {}
+        self._project_orgs: dict[str, str] = {}
+        self._resource_projects: dict[str, str] = {}
+        self.auth_audit_log: list[dict[str, Any]] = []
+
+    def register_project(self, project_id: str, org_id: str, owner_user_id: str) -> None:
+        self._project_orgs[project_id] = org_id
+        self.assign_role(owner_user_id, project_id, ProjectRole.PROJECT_OWNER)
+
+    def assign_role(self, user_id: str, project_id: str, role: ProjectRole) -> None:
+        self._memberships[(user_id, project_id)] = ProjectMembership(
+            user_id=user_id,
+            project_id=project_id,
+            role=role,
+        )
+
+    def register_resource(self, resource_id: str, project_id: str) -> None:
+        self._resource_projects[resource_id] = project_id
+
+    def check_permission(
+        self,
+        user_id: str,
+        project_id: str,
+        action: ResourceAction,
+        resource_id: str | None = None,
+    ) -> bool:
+        """Evaluates whether user has permission to perform action within project context."""
+        if resource_id is not None:
+            res_proj = self._resource_projects.get(resource_id)
+            if res_proj != project_id:
+                self._record_auth_decision(
+                    user_id, project_id, action, resource_id, False, "Resource not in project"
+                )
+                return False
+
+        membership = self._memberships.get((user_id, project_id))
+        if not membership:
+            self._record_auth_decision(
+                user_id, project_id, action, resource_id, False, "No project membership"
+            )
+            return False
+
+        allowed_actions = _ROLE_PERMISSIONS.get(membership.role, set())
+        has_perm = action in allowed_actions
+        reason = "Authorized" if has_perm else f"Role {membership.role.value} lacks action {action.value}"
+        self._record_auth_decision(user_id, project_id, action, resource_id, has_perm, reason)
+        return has_perm
+
+    def enforce(
+        self,
+        user_id: str,
+        project_id: str,
+        action: ResourceAction,
+        resource_id: str | None = None,
+    ) -> None:
+        if not self.check_permission(user_id, project_id, action, resource_id):
+            raise PermissionDeniedError(
+                f"User {user_id} denied {action.value} on project {project_id} (resource: {resource_id})"
+            )
+
+    def _record_auth_decision(
+        self,
+        user_id: str,
+        project_id: str,
+        action: ResourceAction,
+        resource_id: str | None,
+        granted: bool,
+        reason: str,
+    ) -> None:
+        self.auth_audit_log.append(
+            {
+                "timestamp": time.time(),
+                "user_id": user_id,
+                "project_id": project_id,
+                "action": action.value,
+                "resource_id": resource_id,
+                "granted": granted,
+                "reason": reason,
+            }
+        )

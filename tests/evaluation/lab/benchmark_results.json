@@ -1,0 +1,71 @@
+{
+  "summary": {
+    "total_evaluation_cases": 14,
+    "overall_precision": 1.0,
+    "overall_recall": 1.0,
+    "overall_false_positive_rate": 0.0,
+    "status": "PASS"
+  },
+  "classes": {
+    "sql_injection": {
+      "vuln_class": "sql_injection",
+      "total_cases": 4,
+      "true_positives": 2,
+      "false_positives": 0,
+      "true_negatives": 2,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "false_positive_rate": 0.0,
+      "f1_score": 1.0
+    },
+    "cross_site_scripting": {
+      "vuln_class": "cross_site_scripting",
+      "total_cases": 4,
+      "true_positives": 2,
+      "false_positives": 0,
+      "true_negatives": 2,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "false_positive_rate": 0.0,
+      "f1_score": 1.0
+    },
+    "command_injection": {
+      "vuln_class": "command_injection",
+      "total_cases": 2,
+      "true_positives": 1,
+      "false_positives": 0,
+      "true_negatives": 1,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "false_positive_rate": 0.0,
+      "f1_score": 1.0
+    },
+    "path_traversal": {
+      "vuln_class": "path_traversal",
+      "total_cases": 2,
+      "true_positives": 1,
+      "false_positives": 0,
+      "true_negatives": 1,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "false_positive_rate": 0.0,
+      "f1_score": 1.0
+    },
+    "ssrf": {
+      "vuln_class": "ssrf",
+      "total_cases": 2,
+      "true_positives": 1,
+      "false_positives": 0,
+      "true_negatives": 1,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "false_positive_rate": 0.0,
+      "f1_score": 1.0
+    }
+  }
+}

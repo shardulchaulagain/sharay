@@ -226,14 +226,20 @@ class ComprehensivePipelineTests(unittest.TestCase):
             tools=["metasploit", "zap"],
             max_seconds=60,
         )
-        self.assertIn(res["outcome"], ("completed", "completed_with_errors"))
+        # A stage that only hit its budget is honest (amber), never a green "completed".
+        self.assertEqual(res["outcome"], "completed_with_errors")
         checks = {c["category"]: c for c in res["checks"]}
         self.assertIn("metasploit", checks)
-        self.assertEqual(checks["metasploit"]["status"], "completed")
+        self.assertEqual(checks["metasploit"]["status"], "completed_with_errors")
         self.assertIn("execution budget", checks["metasploit"]["detail"])
         self.assertIn("zap", checks)
-        self.assertEqual(checks["zap"]["status"], "completed")
+        self.assertEqual(checks["zap"]["status"], "completed_with_errors")
         self.assertIn("execution budget", checks["zap"]["detail"])
+        # The budget adapts upward so each enabled asset gets its floor (zap 150 + metasploit 120
+        # + base 60 = 330), even though 60s was requested; capped at 1800s.
+        budget = next(o for o in res["observations"] if o.get("kind") == "adaptive_budget")
+        self.assertGreaterEqual(budget["allocated_seconds"], 330)
+        self.assertLessEqual(budget["allocated_seconds"], 1800)
 
 
 if __name__ == "__main__":

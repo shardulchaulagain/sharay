@@ -475,6 +475,27 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(data["proposal_schema"]["additionalProperties"])
         plain.close()
 
+    def test_source_analysis_runs_confined_to_the_authorized_root(self):
+        root = self.settings.source_root
+        (root / "proj").mkdir(parents=True)
+        (root / "proj" / "config.py").write_text('KEY = "AKIA' + "IOSFODNN7REALKEY" + '"\n')
+        (root / "proj" / "requirements.txt").write_text("requests==2.32.0\n")
+        # Unauthenticated is refused.
+        plain = TestClient(self.app, base_url=self.settings.origin)
+        self.assertIn(plain.post("/api/v1/source-analysis", json={"path": "proj"}).status_code, (401, 403))
+        plain.close()
+        # An authorized path inside the root runs natively and returns normalized findings.
+        ok = self.client.post("/api/v1/source-analysis", json={"path": "proj"})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        body = ok.json()
+        self.assertTrue(body["findings"])
+        self.assertEqual(body["findings"][0]["category"], "secret_exposure")
+        self.assertTrue(any(p["name"] == "requests" for p in body["packages"]))
+        # A path outside the authorized root is refused, not read.
+        for bad in ("/etc", "../../etc", "proj/../../.."):
+            denied = self.client.post("/api/v1/source-analysis", json={"path": bad})
+            self.assertEqual(denied.status_code, 400, bad)
+
     def test_valid_login_cannot_reset_failure_throttle(self):
         for _ in range(7):
             self.assertEqual(

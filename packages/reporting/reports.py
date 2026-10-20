@@ -11,6 +11,11 @@ from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from packages.reporting.poc_engine import synthesize_research_grade_poc
+from packages.reporting.trends import (
+    AssessmentTrendEngine,
+    ExecutiveDashboardGenerator,
+    FindingRecord,
+)
 from packages.secret_patterns import redact_tokens
 
 REDACTED = "[REDACTED]"
@@ -589,6 +594,38 @@ def _sections(data: dict) -> list[tuple[str, list[tuple[str, Any]]]]:
                 (
                     "Priorities",
                     "Prioritize verified vulnerabilities and review configuration in the target's context. Retest unverified records before treating them as confirmed vulnerabilities.",
+                ),
+            ],
+        ),
+        (
+            "Executive dashboard",
+            [
+                (
+                    "Posture score",
+                    f"{AssessmentTrendEngine.calculate_posture_score([FindingRecord.from_dict(f) for f in findings])}/100",
+                ),
+                (
+                    "Severity distribution",
+                    ", ".join(
+                        f"{k}: {v}"
+                        for k, v in ExecutiveDashboardGenerator.generate_dashboard(
+                            [FindingRecord.from_dict(f) for f in findings],
+                            max(len(observations), 1),
+                            max(len(observations), 1),
+                        )["severity_distribution"].items()
+                    ),
+                ),
+                (
+                    "Attack surface coverage",
+                    f"{ExecutiveDashboardGenerator.generate_dashboard([FindingRecord.from_dict(f) for f in findings], max(len(observations), 1), max(len(observations), 1))['attack_surface']['coverage_percent']}%",
+                ),
+                (
+                    "Risk rating",
+                    ExecutiveDashboardGenerator.generate_dashboard(
+                        [FindingRecord.from_dict(f) for f in findings],
+                        max(len(observations), 1),
+                        max(len(observations), 1),
+                    )["risk_rating"],
                 ),
             ],
         ),
@@ -1184,11 +1221,26 @@ def _pdf(sections: list) -> bytes:
 def render_report(data: dict, format: str) -> tuple[bytes, str]:
     """Render actual records to bytes and the matching media type."""
     format = format.lower()
-    if format not in {"html", "json", "markdown", "md", "pdf"}:
+    if format not in {"html", "json", "markdown", "md", "pdf", "sarif", "csv", "bundle", "zip"}:
         raise ValueError("Unsupported report format")
     clean = _prepare(data)
     if format == "json":
         return (_json(clean) + "\n").encode("utf-8"), "application/json"
+    if format == "sarif":
+        from packages.reporting.sarif import SarifExporter
+
+        return SarifExporter.export(clean).encode("utf-8"), "application/sarif+json"
+    if format == "csv":
+        from packages.reporting.sarif import CsvExporter
+
+        return CsvExporter.export(clean).encode("utf-8"), "text/csv; charset=utf-8"
+    if format in {"bundle", "zip"}:
+        from packages.reporting.bundle import EvidenceBundleBuilder
+
+        assessment_id = str(
+            clean.get("report_metadata", {}).get("assessment_id") or clean.get("id") or "assessment-unknown"
+        )
+        return EvidenceBundleBuilder.build_bundle(assessment_id, clean), "application/zip"
     sections = _sections(clean)
     if format == "html":
         return _html(sections), "text/html; charset=utf-8"

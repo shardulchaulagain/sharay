@@ -1,0 +1,216 @@
+{
+  "corpus_version": "1.0.0",
+  "total_cases": 14,
+  "cases": [
+    {
+      "case_id": "sqli_vuln_union_extract",
+      "vuln_class": "sql_injection",
+      "is_vulnerable": true,
+      "title": "Union-based SQL Injection in Product Search",
+      "description": "Direct string interpolation into SQLite SELECT statement",
+      "request_method": "GET",
+      "request_path": "/api/products",
+      "request_params": {
+        "q": "' UNION SELECT username, password_hash FROM users --"
+      },
+      "response_status": 200,
+      "response_body": "admin:$2b$12$e8Y8Qe0QfO0a4e7F6h9K1ue8Y8Qe0QfO0a root:$2b$12$K89J2d7U0a4e7F6h9K1u9K89J2d7U0a4",
+      "remediation_technique": ""
+    },
+    {
+      "case_id": "sqli_vuln_syntax_error",
+      "vuln_class": "sql_injection",
+      "is_vulnerable": true,
+      "title": "Error-based SQL Injection in Item ID",
+      "description": "Unescaped single quote produces database syntax error",
+      "request_method": "GET",
+      "request_path": "/items",
+      "request_params": {
+        "id": "100'"
+      },
+      "response_status": 500,
+      "response_body": "OperationalError: unrecognized token: \"'\" near line 1",
+      "remediation_technique": ""
+    },
+    {
+      "case_id": "sqli_patched_parameterized_query",
+      "vuln_class": "sql_injection",
+      "is_vulnerable": false,
+      "title": "Patched Product Search using Parameterized Query",
+      "description": "Target uses SQLite parameterized query 'SELECT * FROM products WHERE name LIKE ?'",
+      "request_method": "GET",
+      "request_path": "/api/products",
+      "request_params": {
+        "q": "' UNION SELECT username, password_hash FROM users --"
+      },
+      "response_status": 200,
+      "response_body": "[]",
+      "remediation_technique": "Prepared Statements / Parameterized Query"
+    },
+    {
+      "case_id": "sqli_patched_integer_cast",
+      "vuln_class": "sql_injection",
+      "is_vulnerable": false,
+      "title": "Patched Item ID with Integer Validation",
+      "description": "Target casts input to int(id) rejecting syntax payloads",
+      "request_method": "GET",
+      "request_path": "/items",
+      "request_params": {
+        "id": "100'"
+      },
+      "response_status": 400,
+      "response_body": "{\"error\": \"Invalid item ID format. Integer required.\"}",
+      "remediation_technique": "Strict Type Casting & Input Validation"
+    },
+    {
+      "case_id": "xss_vuln_reflected_search",
+      "vuln_class": "cross_site_scripting",
+      "is_vulnerable": true,
+      "title": "Reflected XSS in Search Query",
+      "description": "Query parameter reflected unencoded into HTML body",
+      "request_method": "GET",
+      "request_path": "/search",
+      "request_params": {
+        "term": "<script>alert(1)</script>"
+      },
+      "response_status": 200,
+      "response_body": "<h1>Search results for: <script>alert(1)</script></h1>",
+      "remediation_technique": ""
+    },
+    {
+      "case_id": "xss_vuln_attribute_injection",
+      "vuln_class": "cross_site_scripting",
+      "is_vulnerable": true,
+      "title": "Attribute Injection XSS in Profile Avatar",
+      "description": "Event handler unescaped in img tag",
+      "request_method": "GET",
+      "request_path": "/profile/view",
+      "request_params": {
+        "avatar": "\" onerror=\"alert(document.cookie)"
+      },
+      "response_status": 200,
+      "response_body": "<img src=\"\" onerror=\"alert(document.cookie)\" />",
+      "remediation_technique": ""
+    },
+    {
+      "case_id": "xss_patched_html_entity_encoding",
+      "vuln_class": "cross_site_scripting",
+      "is_vulnerable": false,
+      "title": "Patched Search with Context-Aware HTML Encoding",
+      "description": "Special characters encoded into HTML entities",
+      "request_method": "GET",
+      "request_path": "/search",
+      "request_params": {
+        "term": "<script>alert(1)</script>"
+      },
+      "response_status": 200,
+      "response_body": "<h1>Search results for: &lt;script&gt;alert(1)&lt;/script&gt;</h1>",
+      "remediation_technique": "HTML Entity Encoding (html.escape)"
+    },
+    {
+      "case_id": "xss_patched_csp_strict",
+      "vuln_class": "cross_site_scripting",
+      "is_vulnerable": false,
+      "title": "Patched Avatar with CSP and Quoting Protection",
+      "description": "Attribute quoted and strict CSP frame-ancestors / default-src self applied",
+      "request_method": "GET",
+      "request_path": "/profile/view",
+      "request_params": {
+        "avatar": "\" onerror=\"alert(document.cookie)"
+      },
+      "response_status": 200,
+      "response_body": "<img src=\"&quot; onerror=&quot;alert(document.cookie)&quot;\" />",
+      "remediation_technique": "Contextual Attribute Escaping & CSP"
+    },
+    {
+      "case_id": "cmdi_vuln_ping_chaining",
+      "vuln_class": "command_injection",
+      "is_vulnerable": true,
+      "title": "Command Injection in Network Diagnostic Ping",
+      "description": "Shell execution with unquoted parameter using popen",
+      "request_method": "GET",
+      "request_path": "/tools/ping",
+      "request_params": {
+        "host": "127.0.0.1; id"
+      },
+      "response_status": 200,
+      "response_body": "PING 127.0.0.1 (127.0.0.1): 56 data bytes\nuid=1000(app) gid=1000(app) groups=1000(app)",
+      "remediation_technique": ""
+    },
+    {
+      "case_id": "cmdi_patched_subprocess_no_shell",
+      "vuln_class": "command_injection",
+      "is_vulnerable": false,
+      "title": "Patched Ping Tool with Subprocess Exec Array",
+      "description": "Subprocess arguments passed as list without shell=True; rejects non-IP format",
+      "request_method": "GET",
+      "request_path": "/tools/ping",
+      "request_params": {
+        "host": "127.0.0.1; id"
+      },
+      "response_status": 400,
+      "response_body": "{\"error\": \"Invalid IPv4 address format\"}",
+      "remediation_technique": "Subprocess argv array without shell + regex IP validation"
+    },
+    {
+      "case_id": "lfi_vuln_dotdot_passwd",
+      "vuln_class": "path_traversal",
+      "is_vulnerable": true,
+      "title": "Path Traversal to Sensitive System Configuration",
+      "description": "Direct file reading with uncanonicalized relative path",
+      "request_method": "GET",
+      "request_path": "/download",
+      "request_params": {
+        "file": "../../../../etc/passwd"
+      },
+      "response_status": 200,
+      "response_body": "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin",
+      "remediation_technique": ""
+    },
+    {
+      "case_id": "lfi_patched_realpath_boundary_check",
+      "vuln_class": "path_traversal",
+      "is_vulnerable": false,
+      "title": "Patched File Download with Base Directory Traversal Check",
+      "description": "Path verified using os.path.realpath(target).startswith(base_dir)",
+      "request_method": "GET",
+      "request_path": "/download",
+      "request_params": {
+        "file": "../../../../etc/passwd"
+      },
+      "response_status": 403,
+      "response_body": "{\"error\": \"Access Denied: Path escapes document root\"}",
+      "remediation_technique": "Path Canonicalization and Boundary Traversal Guard"
+    },
+    {
+      "case_id": "ssrf_vuln_cloud_metadata",
+      "vuln_class": "ssrf",
+      "is_vulnerable": true,
+      "title": "SSRF Exposing AWS Cloud Instance Metadata",
+      "description": "Webhook URL fetched directly without private IP restriction",
+      "request_method": "GET",
+      "request_path": "/webhook/test",
+      "request_params": {
+        "url": "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+      },
+      "response_status": 200,
+      "response_body": "ec2-default-role\nAccessKeyId=AKIAIOSFODNN7EXAMPLE",
+      "remediation_technique": ""
+    },
+    {
+      "case_id": "ssrf_patched_egress_allowlist",
+      "vuln_class": "ssrf",
+      "is_vulnerable": false,
+      "title": "Patched Webhook with Internal Subnet Egress Filtering",
+      "description": "Resolver checks IP against RFC 1918 and link-local ranges before dispatching",
+      "request_method": "GET",
+      "request_path": "/webhook/test",
+      "request_params": {
+        "url": "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+      },
+      "response_status": 400,
+      "response_body": "{\"error\": \"Webhook target URL resolves to restricted internal address\"}",
+      "remediation_technique": "Pre-flight DNS check + Private Subnet Egress Filtering"
+    }
+  ]
+}

@@ -1,6 +1,8 @@
 """Authenticated, organization-scoped local assessment API."""
 
 import asyncio
+import base64
+import dataclasses
 import hashlib
 import ipaddress
 import os
@@ -25,24 +27,39 @@ from aegis.audit import audit, verify_audit
 from aegis.auth import add_user, authenticate, check_csrf, require_role, sign_in
 from aegis.config import ROOT, Settings
 from aegis.database import create_database
-from aegis.interactive import OwnershipState, SessionError, terminal_manager
+from aegis.interactive import (
+    MultiOperatorSessionCoordinator,
+    OwnershipState,
+    SessionError,
+    terminal_manager,
+)
 from aegis.models import Assessment, AuditEvent, Finding, FindingEvidence, Observation, Project, Target, User
 from aegis.schemas import (
     ApprovalInput,
     AssessmentInput,
+    BulkTriageInput,
     CreateSessionInput,
     ExploitGateConfirmation,
     FindingUpdate,
     Login,
     MemberInput,
+    OnboardingAdvanceInput,
     ProjectInput,
     ProjectUpdate,
+    SavedViewInput,
     ScanConfig,
+    SessionCollaborateJoinInput,
+    SessionCollaborateTakeoverInput,
+    SessionCollaborateTransferInput,
+    SessionCopilotInput,
     SessionInputData,
     SessionOwnershipInput,
     SessionResizeInput,
+    SourceAnalysisInput,
     TargetInput,
     TargetScopeUpdate,
+    UpdateApplyInput,
+    UpdateCheckInput,
     WorkspaceProbeInput,
 )
 from aegis.serialization import (
@@ -54,6 +71,13 @@ from aegis.serialization import (
     target_view,
     timestamp,
     user_view,
+)
+from aegis.visualization import (
+    TriageStatus,
+    Vector3D,
+    VirtualizedTableEngine,
+    WebGLForceGraph3D,
+    bulk_triage_engine,
 )
 from packages.reporting import render_report
 from packages.reporting.async_renderer import get_report_manager
@@ -251,33 +275,43 @@ def active_integrations() -> list[dict]:
             "id": "semgrep",
             "name": "Semgrep SAST Scanner",
             "version": "1.x",
-            "available": has_container,
-            "runnable": has_container,
-            "status": "implemented" if has_container else "missing",
+            "available": False,
+            "runnable": False,
+            "status": "unavailable",
             "supported_categories": ["sast", "code_analysis"],
             "scope": "SARIF/JSON parser and containerized engine",
             "guidance": (
-                "Rule-matching SAST engine and JSON report parser active."
-                if has_container
-                else "Requires container runtime."
+                "Engine verified and parser built, but no assessment dispatches it yet: source-code "
+                "analysis has no input surface in the product. Needs a code-analysis assessment flow."
             ),
-            "limitations": "Local code analysis without network access.",
+            "limitations": "Operates on a code tree, not an HTTP target; not reachable from the current URL-based assessment.",
         },
         {
             "id": "gitleaks",
             "name": "Gitleaks Secret Scanner",
             "version": "8.x",
-            "available": has_container,
-            "runnable": has_container,
-            "status": "implemented" if has_container else "missing",
+            "available": False,
+            "runnable": False,
+            "status": "unavailable",
             "supported_categories": ["secrets", "credential_detection"],
             "scope": "Secret detection engine and SARIF report parser",
             "guidance": (
-                "Secret detection and SARIF report parser active."
-                if has_container
-                else "Requires container runtime."
+                "Binary verified and pinned (update ledger) and the parser is built, but no assessment "
+                "dispatches it yet: source-code analysis has no input surface in the product."
             ),
-            "limitations": "Pre-commit and commit-history inspection only.",
+            "limitations": "Operates on a code tree, not an HTTP target; not reachable from the current URL-based assessment.",
+        },
+        {
+            "id": "source_analysis",
+            "name": "Native Source Analysis (secrets + dependencies)",
+            "version": "1.0.0",
+            "available": True,
+            "runnable": True,
+            "status": "implemented",
+            "supported_categories": ["secrets", "dependency_inventory", "code_analysis"],
+            "scope": "In-process secret-pattern detection and declared-dependency inventory over an operator-authorized directory",
+            "guidance": "POST /api/v1/source-analysis with a path confined to the configured source root. No binary, container or network; findings normalized like any other.",
+            "limitations": "Reads a local code tree only, confined to SHARAY_SOURCE_ROOT. Pattern-based, not a replacement for Gitleaks/Semgrep, which remain uncatalogued for dispatch.",
         },
         {
             "id": "recon_dns_tls",
@@ -367,6 +401,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.engine = engine
     app.state.settings = settings
     app.state.report_manager = None
+    app.state.ticketing_engine = None
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1"])
 
     @app.middleware("http")
@@ -499,6 +534,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         row = add_user(db, data.username, data.password, user.organization_id, data.role)
         audit(db, user.organization_id, user.id, "member.created", row.id, {"role": row.role})
         return user_view(row)
+
+    @app.post("/api/v1/auth/totp/setup")
+    def totp_setup(user: Actor):
+        from aegis.auth import TOTPEngine
+
+        secret = TOTPEngine.generate_secret()
+        uri = TOTPEngine.generate_provisioning_uri(secret, username=user.username)
+        plain_codes, hashed_codes = TOTPEngine.generate_backup_codes(count=8)
+        return {
+            "secret": secret,
+            "provisioning_uri": uri,
+            "backup_codes": plain_codes,
+            "backup_hashes": hashed_codes,
+        }
+
+    @app.post("/api/v1/auth/totp/verify")
+    def totp_verify(data: dict[str, str], user: Actor):
+        from aegis.auth import TOTPEngine
+
+        secret = data.get("secret", "")
+        code = data.get("code", "")
+        if not secret or not code:
+            raise HTTPException(400, "Secret and code are required")
+        valid, counter = TOTPEngine.verify_otp(secret, code)
+        if not valid:
+            raise HTTPException(401, "Invalid TOTP verification code")
+        return {"valid": True, "counter": counter}
 
     @app.get("/api/v1/openapi.json")
     def schema(user: Actor):
@@ -1314,6 +1376,134 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.commit()
         return {"status": "terminated"}
 
+    @app.get("/api/v1/interactive/sessions/{session_id}/asciinema")
+    def export_interactive_session_asciinema(session_id: str, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session:
+            raise HTTPException(404, "Interactive session not found")
+        cast_data = session.export_asciinema(title=f"SHARAY Operator Session {session.id}")
+        return Response(content=cast_data, media_type="application/x-asciicast")
+
+    @app.get("/api/v1/interactive/sessions/{session_id}/collaborate/operators")
+    def get_session_operators(session_id: str, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session or not session.is_alive():
+            raise HTTPException(404, "Interactive session not found or has terminated")
+        if not session.coordinator:
+            return {"primary_controller_id": session.created_by, "operators": []}
+        return {
+            "primary_controller_id": session.coordinator.primary_controller_id,
+            "operators": [
+                {
+                    "operator_id": op.operator_id,
+                    "username": op.username,
+                    "role": op.role,
+                    "color_hex": op.color_hex,
+                    "last_seen": op.last_seen,
+                    "is_active": op.is_active,
+                }
+                for op in session.coordinator.operators.values()
+            ],
+            "handoff_count": len(session.coordinator.handoff_ledger),
+        }
+
+    @app.post("/api/v1/interactive/sessions/{session_id}/collaborate/join")
+    def join_session_collaboration(session_id: str, payload: SessionCollaborateJoinInput, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session or not session.is_alive():
+            raise HTTPException(404, "Interactive session not found or has terminated")
+        if not session.coordinator:
+            session.coordinator = MultiOperatorSessionCoordinator(session.id, session.target_url)
+        presence = session.coordinator.join_session(
+            operator_id=user.id,
+            username=user.username,
+            as_primary=payload.as_primary,
+            color_hex=payload.color_hex,
+        )
+        return {
+            "status": "joined",
+            "operator_id": presence.operator_id,
+            "role": presence.role,
+            "primary_controller_id": session.coordinator.primary_controller_id,
+        }
+
+    @app.post("/api/v1/interactive/sessions/{session_id}/collaborate/leave")
+    def leave_session_collaboration(session_id: str, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session or not session.is_alive():
+            raise HTTPException(404, "Interactive session not found or has terminated")
+        if session.coordinator:
+            session.coordinator.leave_session(user.id)
+        return {"status": "left"}
+
+    @app.post("/api/v1/interactive/sessions/{session_id}/collaborate/transfer")
+    def transfer_session_control(session_id: str, payload: SessionCollaborateTransferInput, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session or not session.is_alive():
+            raise HTTPException(404, "Interactive session not found or has terminated")
+        if not session.coordinator:
+            raise HTTPException(400, "Session collaboration coordinator not initialized")
+        success = session.coordinator.transfer_control(
+            current_controller_id=user.id,
+            target_operator_id=payload.target_operator_id,
+            reason=payload.reason,
+        )
+        if not success:
+            raise HTTPException(
+                403, "Transfer rejected: caller is not the primary controller or target is inactive"
+            )
+        return {
+            "status": "transferred",
+            "primary_controller_id": session.coordinator.primary_controller_id,
+        }
+
+    @app.post("/api/v1/interactive/sessions/{session_id}/collaborate/takeover")
+    def takeover_session_control(session_id: str, payload: SessionCollaborateTakeoverInput, user: Actor):
+        require_role(user, *CONTROL_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session or not session.is_alive():
+            raise HTTPException(404, "Interactive session not found or has terminated")
+        if not session.coordinator:
+            session.coordinator = MultiOperatorSessionCoordinator(session.id, session.target_url)
+        session.coordinator.join_session(user.id, user.username, as_primary=False)
+        success = session.coordinator.preempt_takeover(
+            requesting_operator_id=user.id,
+            justification=payload.justification,
+            is_lead=True,
+        )
+        if not success:
+            raise HTTPException(403, "Preemptive takeover failed")
+        return {
+            "status": "preempted",
+            "primary_controller_id": session.coordinator.primary_controller_id,
+        }
+
+    @app.post("/api/v1/interactive/sessions/{session_id}/copilot")
+    def copilot_autocomplete_and_suggestions(session_id: str, payload: SessionCopilotInput, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        session = terminal_manager.get_session(session_id, user.organization_id)
+        if not session or not session.is_alive():
+            raise HTTPException(404, "Interactive session not found or has terminated")
+        completions = []
+        if payload.partial_cmd is not None:
+            completions = session.copilot.get_completions(
+                payload.partial_cmd, target_origin=session.target_url
+            )
+        suggestion = None
+        if payload.last_output:
+            suggestion = session.copilot.get_copilot_suggestion(
+                payload.last_output, detected_vuln_classes=payload.detected_vuln_classes
+            )
+        return {
+            "completions": completions,
+            "suggestion": suggestion,
+        }
+
     @app.get("/api/v1/findings")
     def findings(
         db: DB,
@@ -1354,6 +1544,123 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         audit(db, user.organization_id, user.id, "finding.triaged", row.id, {"status": row.status})
         return finding_view(db, row)
 
+    @app.get("/api/v1/assessments/{assessment_id}/topology-3d")
+    def get_assessment_topology_3d(assessment_id: str, db: DB, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        assessment = owned(db, Assessment, assessment_id, user)
+        target = owned(db, Target, assessment.target_id, user)
+        findings_query = select(Finding).where(Finding.target_id == target.id)
+        findings_list = list(db.scalars(findings_query))
+
+        graph = WebGLForceGraph3D()
+        t_node = graph.add_node(
+            target.id,
+            target.url,
+            "target",
+            Vector3D(0.0, 0.0, 0.0),
+        )
+        gw_node = graph.add_node(
+            f"gw-{target.id}",
+            "Entry Gateway",
+            "entrypoint",
+            Vector3D(0.0, 50.0, 0.0),
+        )
+        graph.add_edge(gw_node.id, t_node.id)
+
+        for idx, f in enumerate(findings_list):
+            is_critical = f.severity in {"CRITICAL", "HIGH"}
+            f_node = graph.add_node(
+                f.id,
+                f.title,
+                "vulnerability",
+                Vector3D((idx + 1) * 20.0, (idx % 3) * 15.0, (idx % 2) * 10.0),
+                is_chokepoint=is_critical,
+            )
+            graph.add_edge(gw_node.id, f_node.id, is_min_cut=is_critical)
+            graph.add_edge(f_node.id, t_node.id)
+
+        graph.step_simulation(dt=0.2)
+        return graph.export_webgl_payload()
+
+    @app.get("/api/v1/findings/virtualized")
+    def get_findings_virtualized(
+        db: DB,
+        user: Actor,
+        scroll_top: int = Query(0, ge=0),
+        container_height: int = Query(400, ge=50, le=2000),
+        row_height: int = Query(40, ge=10, le=200),
+        search: str = Query(""),
+        severity: str | None = Query(None),
+        sort_by: str = Query("id"),
+        descending: bool = Query(False),
+    ):
+        require_role(user, *SCAN_ROLES)
+        query = select(Finding).where(Finding.organization_id == user.organization_id)
+        raw_findings = [finding_view(db, f) for f in db.scalars(query)]
+        sorted_filtered = VirtualizedTableEngine.filter_and_sort(
+            raw_findings,
+            search_query=search,
+            severity_filter=severity,
+            sort_by=sort_by,
+            descending=descending,
+        )
+        window = VirtualizedTableEngine.calculate_window(
+            sorted_filtered,
+            scroll_top_px=scroll_top,
+            container_height_px=container_height,
+            row_height_px=row_height,
+        )
+        return dataclasses.asdict(window)
+
+    @app.post("/api/v1/findings/bulk-triage")
+    def bulk_triage_findings(payload: BulkTriageInput, db: DB, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        query = select(Finding).where(
+            Finding.id.in_(payload.finding_ids),
+            Finding.organization_id == user.organization_id,
+        )
+        matched_findings = list(db.scalars(query))
+        if not matched_findings:
+            raise HTTPException(404, "No matching findings found")
+
+        t_status = getattr(TriageStatus, payload.status, TriageStatus.CONFIRMED)
+        triaged_count = bulk_triage_engine.bulk_triage(
+            [f.id for f in matched_findings],
+            t_status,
+            actor=user.username,
+            justification=payload.justification,
+        )
+
+        from aegis.models import FindingHistory
+
+        for f in matched_findings:
+            f.status = payload.status.lower()
+            db.add(
+                FindingHistory(finding_id=f.id, status=f.status, actor=user.id, reason=payload.justification)
+            )
+            audit(db, user.organization_id, user.id, "finding.bulk_triaged", f.id, {"status": f.status})
+
+        db.commit()
+        return {
+            "status": "ok",
+            "updated_count": triaged_count,
+            "new_status": payload.status,
+        }
+
+    @app.post("/api/v1/views/saved")
+    def save_custom_view(payload: SavedViewInput, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        bulk_triage_engine.save_view(payload.name, payload.filters, actor=user.username)
+        return {"status": "saved", "name": payload.name}
+
+    @app.get("/api/v1/views/saved/{name}")
+    def get_custom_view(name: str, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        view = bulk_triage_engine.get_view(name)
+        if not view:
+            raise HTTPException(404, f"Saved view '{name}' not found")
+        return view
+
     @app.get("/api/v1/integrations")
     def integrations(user: Actor):
         supervisor = getattr(app.state, "supervisor", None)
@@ -1389,6 +1696,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "claude_review_request": "entry-748e50da33f94638",
         }
 
+    @app.post("/api/v1/source-analysis")
+    def source_analysis(payload: SourceAnalysisInput, db: DB, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        from services.source_analysis_worker.assess import (
+            SourceAnalysisError,
+            analyze_source_tree,
+            resolve_within,
+        )
+
+        try:
+            root = resolve_within(payload.path, settings.source_root)
+        except SourceAnalysisError as exc:
+            raise HTTPException(400, str(exc)) from None
+        result = analyze_source_tree(root)
+        audit(
+            db,
+            user.organization_id,
+            user.id,
+            "source_analysis.run",
+            str(root),
+            {"findings": len(result["findings"]), "packages": len(result["packages"])},
+        )
+        db.commit()
+        return {**result, "root": str(root)}
+
     @app.get("/api/v1/audit")
     def events(db: DB, user: Actor, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
         require_role(user, *CONTROL_ROLES)
@@ -1402,6 +1734,86 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             offset,
         )
         return {**result, "integrity_valid": verify_audit(db)}
+
+    @app.post("/api/v1/audit/notarize")
+    def notarize_audit_chain(db: DB, user: Actor):
+        from aegis.audit import AuditNotaryService
+
+        require_role(user, *CONTROL_ROLES)
+        notary = AuditNotaryService()
+        receipt = notary.notarize_chain(db, user.organization_id)
+        if receipt is None:
+            raise HTTPException(404, "No audit events found to notarize")
+        return receipt
+
+    @app.get("/api/v1/audit/export")
+    def export_audit_ledger(db: DB, user: Actor):
+        from aegis.audit import SignedAuditLedgerExporter
+
+        require_role(user, *CONTROL_ROLES)
+        events_list = db.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.organization_id == user.organization_id)
+            .order_by(AuditEvent.id.asc())
+        ).all()
+
+        exporter = SignedAuditLedgerExporter()
+        for e in events_list:
+            exporter.append_event(
+                entry_id=str(e.id),
+                actor=e.actor,
+                action=e.action,
+                target=e.resource_id,
+                details=e.detail if isinstance(e.detail, dict) else {},
+                now=e.created_at,
+            )
+        return exporter.generate_signed_export()
+
+    @app.post("/api/v1/lifecycle/retention")
+    def enforce_retention(db: DB, user: Actor, assessment_days: int = 90, evidence_days: int = 14):
+        from aegis.lifecycle import DataLifecycleManager, RetentionPolicy
+        from aegis.models import FindingEvidence, Observation
+
+        require_role(user, *CONTROL_ROLES)
+        policy = RetentionPolicy(
+            assessment_retention_days=assessment_days,
+            raw_evidence_retention_days=evidence_days,
+        )
+        asmt_rows = db.scalars(
+            select(Assessment).where(Assessment.organization_id == user.organization_id)
+        ).all()
+        obs_rows = db.scalars(
+            select(Observation).where(Observation.organization_id == user.organization_id)
+        ).all()
+        fe_rows = db.scalars(
+            select(FindingEvidence)
+            .join(Assessment, Assessment.id == FindingEvidence.assessment_id)
+            .where(Assessment.organization_id == user.organization_id)
+        ).all()
+
+        asmts_data = [{"id": a.id, "created_at": a.created_at} for a in asmt_rows]
+        obs_data = [
+            {
+                "id": o.id,
+                "assessment_id": o.assessment_id,
+                "observed_at": o.observed_at,
+                "evidence_hash": o.evidence_hash,
+            }
+            for o in obs_rows
+        ]
+        fe_data = [
+            {"id": f.id, "assessment_id": f.assessment_id, "evidence_hash": f.evidence_hash} for f in fe_rows
+        ]
+
+        manager = DataLifecycleManager()
+        report, _ = manager.enforce_retention(
+            assessments=asmts_data,
+            observations=obs_data,
+            finding_evidence=fe_data,
+            policy=policy,
+            organization_id=user.organization_id,
+        )
+        return report.to_dict()
 
     def report_data(assessment_id: str, db: Session, user: User) -> dict:
         row = owned(db, Assessment, assessment_id, user)
@@ -1440,12 +1852,104 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def report(assessment_id: str, db: DB, user: Actor, format: str = "html"):
         data = report_data(assessment_id, db, user)
         body, content_type = render_report(data, format)
-        extension = "md" if format == "markdown" else format
+        extension = "md" if format == "markdown" else ("zip" if format in {"bundle", "zip"} else format)
         return Response(
             body,
             media_type=content_type,
             headers={"Content-Disposition": f'attachment; filename="sharay-{assessment_id}.{extension}"'},
         )
+
+    @app.get("/api/v1/assessments/{assessment_id}/bundle")
+    def assessment_bundle(assessment_id: str, db: DB, user: Actor):
+        from packages.reporting.bundle import EvidenceBundleBuilder
+
+        data = report_data(assessment_id, db, user)
+        bundle_bytes = EvidenceBundleBuilder.build_bundle(assessment_id, data)
+        return Response(
+            bundle_bytes,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="sharay-{assessment_id}-evidence.zip"'},
+        )
+
+    @app.get("/api/v1/assessments/{assessment_id}/executive-dashboard")
+    def executive_dashboard(assessment_id: str, db: DB, user: Actor):
+        from packages.reporting.trends import ExecutiveDashboardGenerator, FindingRecord
+
+        data = report_data(assessment_id, db, user)
+        findings = [FindingRecord.from_dict(f) for f in data.get("findings", [])]
+        obs = data.get("observations", [])
+        target_name = data.get("target", {}).get("url") or "Target"
+        return ExecutiveDashboardGenerator.generate_dashboard(
+            findings=findings,
+            total_endpoints_discovered=max(len(obs), 1),
+            total_endpoints_tested=max(len(obs), 1),
+            target_name=target_name,
+        )
+
+    @app.get("/api/v1/assessments/{assessment_id}/trends")
+    def assessment_trends(assessment_id: str, db: DB, user: Actor, prev_id: str | None = None):
+        from packages.reporting.trends import AssessmentTrendEngine, FindingRecord
+
+        curr_data = report_data(assessment_id, db, user)
+        curr_findings = [FindingRecord.from_dict(f) for f in curr_data.get("findings", [])]
+
+        prev_findings: list[FindingRecord] = []
+        prior_id = prev_id
+        if not prior_id:
+            curr_row = owned(db, Assessment, assessment_id, user)
+            prior = (
+                db.query(Assessment)
+                .filter(
+                    Assessment.target_id == curr_row.target_id,
+                    Assessment.id != curr_row.id,
+                    Assessment.status.in_(TERMINAL),
+                    Assessment.created_at < curr_row.created_at,
+                )
+                .order_by(Assessment.created_at.desc())
+                .first()
+            )
+            if prior:
+                prior_id = prior.id
+
+        if prior_id:
+            try:
+                prev_data = report_data(prior_id, db, user)
+                prev_findings = [FindingRecord.from_dict(f) for f in prev_data.get("findings", [])]
+            except Exception:
+                prev_findings = []
+
+        diff = AssessmentTrendEngine.compute_differential(
+            prev_assessment_id=prior_id or "none",
+            prev_findings=prev_findings,
+            curr_assessment_id=assessment_id,
+            curr_findings=curr_findings,
+        )
+        return diff.to_dict()
+
+    @app.post("/api/v1/findings/{finding_id}/ticket")
+    def push_ticket(
+        finding_id: str,
+        db: DB,
+        user: Actor,
+        platform: str = "github",
+        project_key: str = "SEC",
+    ):
+        from packages.reporting.integrations import TicketingPushEngine
+        from packages.reporting.trends import FindingRecord
+
+        finding_row = owned(db, Finding, finding_id, user)
+        f_dict = finding_view(db, finding_row)
+        finding_record = FindingRecord.from_dict(f_dict)
+
+        if not hasattr(app.state, "ticketing_engine") or app.state.ticketing_engine is None:
+            app.state.ticketing_engine = TicketingPushEngine()
+
+        result = app.state.ticketing_engine.push_finding_ticket(
+            finding=finding_record,
+            platform=platform,
+            project_key=project_key,
+        )
+        return result
 
     @app.post("/api/v1/reports/{assessment_id}", status_code=202)
     def submit_report_job(assessment_id: str, db: DB, user: Actor, format: str = "pdf"):
@@ -1725,6 +2229,108 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "provider_reason": provider_state["reason"],
             **analysis,
         }
+
+    @app.get("/api/v1/onboarding/state")
+    def get_onboarding_state(user: Actor):
+        from aegis.onboarding import get_onboarding_wizard
+
+        wizard = get_onboarding_wizard(user.organization_id)
+        state = wizard.state
+        return {
+            "current_step": state.current_step.value,
+            "owner_username": state.owner_username,
+            "mfa_enrolled": state.mfa_enrolled,
+            "container_engine": state.container_engine,
+            "container_verified": state.container_verified,
+            "egress_verified": state.egress_verified,
+            "seed_assessment_id": state.seed_assessment_id,
+            "completed_at": state.completed_at,
+            "step_history": state.step_history,
+        }
+
+    @app.post("/api/v1/onboarding/advance")
+    def advance_onboarding_state(payload: OnboardingAdvanceInput, user: Actor, db: Session = Depends(get_db)):
+        require_role(user, *CONTROL_ROLES)
+        from aegis.onboarding import OnboardingStep, get_onboarding_wizard
+
+        wizard = get_onboarding_wizard(user.organization_id)
+        try:
+            target_step = OnboardingStep(payload.step)
+        except ValueError:
+            raise HTTPException(400, f"Invalid onboarding step: {payload.step}")
+        ok, msg = wizard.advance_step(target_step, payload.data)
+        if not ok:
+            raise HTTPException(400, msg)
+        audit(
+            db,
+            user.organization_id,
+            user.id,
+            "onboarding.step_advanced",
+            payload.step,
+            {"new_step": wizard.state.current_step.value, "message": msg},
+        )
+        db.commit()
+        return {
+            "success": True,
+            "message": msg,
+            "current_step": wizard.state.current_step.value,
+        }
+
+    @app.post("/api/v1/system/update/check")
+    def check_system_update(payload: UpdateCheckInput, user: Actor):
+        require_role(user, *SCAN_ROLES)
+        from aegis.onboarding import ZeroTelemetryUpdateManager
+
+        mgr = ZeroTelemetryUpdateManager()
+        manifest = mgr.check_for_update(payload.manifest_json)
+        return {
+            "has_update": manifest is not None,
+            "manifest": (
+                {
+                    "version": manifest.version,
+                    "release_date": manifest.release_date,
+                    "sha256_hash": manifest.sha256_hash,
+                    "binary_url": manifest.binary_url,
+                    "mandatory_update": manifest.mandatory_update,
+                    "signature": manifest.signature,
+                }
+                if manifest
+                else None
+            ),
+        }
+
+    @app.post("/api/v1/system/update/apply")
+    def apply_system_update(payload: UpdateApplyInput, user: Actor, db: Session = Depends(get_db)):
+        require_role(user, *CONTROL_ROLES)
+        from aegis.onboarding import ReleaseManifest, ZeroTelemetryUpdateManager
+
+        mgr = ZeroTelemetryUpdateManager()
+        try:
+            binary_bytes = base64.b64decode(payload.binary_bytes_b64)
+            manifest = ReleaseManifest(
+                version=payload.manifest["version"],
+                release_date=payload.manifest["release_date"],
+                sha256_hash=payload.manifest["sha256_hash"],
+                binary_url=payload.manifest["binary_url"],
+                mandatory_update=payload.manifest.get("mandatory_update", False),
+                signature=payload.manifest["signature"],
+            )
+        except Exception as exc:
+            raise HTTPException(400, f"Invalid update payload: {exc}")
+
+        ok, msg = mgr.apply_update_staged(binary_bytes, manifest, payload.target_install_path)
+        if not ok:
+            raise HTTPException(400, msg)
+        audit(
+            db,
+            user.organization_id,
+            user.id,
+            "system.update_applied",
+            manifest.version,
+            {"target_path": payload.target_install_path, "message": msg},
+        )
+        db.commit()
+        return {"success": True, "message": msg, "version": manifest.version}
 
     output = ROOT / "apps" / "web" / "out"
     if output.is_dir():

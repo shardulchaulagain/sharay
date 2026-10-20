@@ -208,6 +208,10 @@ class OnboardingAdvanceInput(Input):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class SourceAnalysisInput(Input):
+    path: str = Field(min_length=1, max_length=4096)
+
+
 class UpdateCheckInput(Input):
     manifest_json: str = Field(min_length=2)
 

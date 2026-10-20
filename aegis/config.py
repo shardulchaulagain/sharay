@@ -25,6 +25,12 @@ class Settings:
     def origin(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
+    @property
+    def source_root(self) -> Path:
+        """The only tree source-analysis assessments may read. Operator paths are confined here."""
+        env = os.environ.get("SHARAY_SOURCE_ROOT")
+        return Path(env).absolute() if env else (self.data_dir / "source")
+
     @classmethod
     def from_env(cls) -> "Settings":
         folder = Path(

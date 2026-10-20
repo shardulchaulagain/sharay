@@ -246,6 +246,11 @@ class ConsoleCommandsTests(unittest.TestCase):
         self.drain()
         self.session.write(b"he")
         self.session.write(b"lp\n")
+        for _ in range(50):
+            time.sleep(0.02)
+            self.session.read_available()
+            if b"sharay> " in self.session.output_buffer:
+                break
         cursor, first = self.session.output_since(0)
         _, second = self.session.output_since(0)
         self.assertEqual(first, second)

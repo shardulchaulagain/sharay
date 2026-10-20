@@ -42,6 +42,10 @@ _CONTENT_TYPES = {
     "json": "application/json",
     "markdown": "text/markdown; charset=utf-8",
     "pdf": "application/pdf",
+    "sarif": "application/sarif+json",
+    "csv": "text/csv; charset=utf-8",
+    "bundle": "application/zip",
+    "zip": "application/zip",
 }
 
 
@@ -104,7 +108,7 @@ class ReportJobManager:
         norm_format = format.strip().lower()
         if norm_format == "md":
             norm_format = "markdown"
-        if norm_format not in {"html", "json", "markdown", "pdf"}:
+        if norm_format not in _CONTENT_TYPES:
             raise ValueError("Unsupported report format")
         if not isinstance(report_data, dict):
             raise ValueError("Report data must be a dictionary")
@@ -176,7 +180,7 @@ class ReportJobManager:
                 return
             job.status = "rendering"
 
-        ext = "md" if job.format == "markdown" else job.format
+        ext = "md" if job.format == "markdown" else ("zip" if job.format == "bundle" else job.format)
         output_file = self.reports_dir / f"sharay-{job.job_id}.{ext}"
         output_created = False
 

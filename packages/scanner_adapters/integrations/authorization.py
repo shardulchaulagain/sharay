@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import json
 import socket
 import ssl
 import time
@@ -111,6 +112,19 @@ def _send_auth_probe(
         conn.close()
 
 
+def _extract_token_from_json(data: Any) -> str | None:
+    """Recursively search for bearer token / JWT in JSON response structures."""
+    if isinstance(data, dict):
+        for key in ("token", "access_token", "accessToken", "jwt", "id_token", "auth_token"):
+            if key in data and isinstance(data[key], str) and len(data[key]) > 8:
+                return data[key]
+        for v in data.values():
+            found = _extract_token_from_json(v)
+            if found:
+                return found
+    return None
+
+
 class AuthenticatedSession:
     """Manages an active authenticated HTTP session with cookie jar, token rotation, and transparent re-auth."""
 
@@ -151,19 +165,31 @@ class AuthenticatedSession:
         return headers
 
     def reauthenticate(self, timeout: float = 4.0) -> bool:
-        """Transparently re-authenticate using rotating tokens or automated login flow."""
+        """Transparently re-authenticate using rotating tokens or automated JSON/form login flow."""
         # 1. Rotate token from pool if configured
         if self.auth_config.rotating_tokens:
             self._token_index = (self._token_index + 1) % len(self.auth_config.rotating_tokens)
             self._active_token = self.auth_config.rotating_tokens[self._token_index]
             return True
 
-        # 2. Automated login flow
+        # 2. Automated login flow (supporting both JSON and Form encodings)
         if self.auth_config.login_url and self.auth_config.login_payload:
             method = self.auth_config.login_method.upper()
-            payload = urlencode(self.auth_config.login_payload)
+            is_json = bool(
+                self.auth_config.custom_headers.get("Content-Type") == "application/json"
+                or isinstance(self.auth_config.login_payload, dict)
+            )
+
+            if is_json:
+                payload = json.dumps(self.auth_config.login_payload)
+                content_type = "application/json"
+            else:
+                payload = urlencode(self.auth_config.login_payload)
+                content_type = "application/x-www-form-urlencoded"
+
             login_headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Type": content_type,
+                "Accept": "application/json, text/plain, */*",
                 "Host": self.destination.host,
             }
             try:
@@ -176,7 +202,8 @@ class AuthenticatedSession:
                     body=payload if method != "GET" else None,
                     timeout=timeout,
                 )
-                # Parse Set-Cookie headers
+
+                # A. Parse cookies
                 set_cookie = resp_headers.get("set-cookie")
                 if set_cookie:
                     for part in set_cookie.split(";"):
@@ -193,9 +220,19 @@ class AuthenticatedSession:
                             ):
                                 self._cookie_jar[k] = v
 
+                # B. Parse and capture Bearer token from JSON response body
+                try:
+                    resp_json = json.loads(body)
+                    extracted_token = _extract_token_from_json(resp_json)
+                    if extracted_token:
+                        self._active_token = extracted_token
+                except Exception:
+                    pass
+
+                # C. Check success indicator
                 if self.auth_config.success_indicator:
-                    return self.auth_config.success_indicator in body or status in (200, 302)
-                return status in (200, 302)
+                    return self.auth_config.success_indicator in body or status in (200, 201, 302)
+                return status in (200, 201, 302)
             except Exception:
                 return False
         return False

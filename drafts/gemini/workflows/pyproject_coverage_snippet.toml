@@ -1,0 +1,27 @@
+# Pyproject.toml configuration additions for Code Coverage (>= 90%) and Mutmut Mutation Testing
+
+[tool.coverage.run]
+source = ["aegis", "packages", "services"]
+omit = [
+    "tests/*",
+    "drafts/*",
+    "migrations/*",
+]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
+[tool.mutmut]
+paths_to_mutate = "packages/scanner_adapters/reproducer.py"
+backup = false
+runner = "python -m pytest -x tests/product/test_reproducer.py"

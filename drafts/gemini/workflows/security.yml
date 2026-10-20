@@ -1,0 +1,106 @@
+name: SHARAY Self-Security Review & Supply Chain Guard
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: '0 3 * * *'  # Daily 3 AM UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sast-and-code-audit:
+    name: SAST Code Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install SAST Tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install bandit semgrep
+
+      - name: Run Bandit AST Security Scan
+        run: |
+          bandit -r aegis packages services -ll -ii -f screen
+
+      - name: Run Semgrep Rulesets (OWASP Top 10 & AppSec)
+        run: |
+          semgrep scan --config=auto --error
+
+  secret-detection:
+    name: Repository Secret & Key Leak Detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Gitleaks Secret Scanner
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-vulnerability-audit:
+    name: Dependency Vulnerability Audit (OSV & CVE)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit
+
+      - name: Run Pinned Dependency Vulnerability Audit
+        run: |
+          pip-audit -r requirements.txt -r requirements-dev.txt
+
+  audit-ledger-tamper-check:
+    name: Audit Ledger Cryptographic Tamper-Evidence Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify Audit Ledger Merkle Anchors
+        run: |
+          python -m pytest drafts/gemini/test_auth_totp_and_audit_notary.py -k test_notary_chain -v

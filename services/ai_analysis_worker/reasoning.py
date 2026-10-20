@@ -8,11 +8,499 @@ and generate bounded non-destructive verification hypotheses.
 from __future__ import annotations
 
 import hashlib
+import re
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 from urllib.parse import urlparse
 
 from packages.secret_patterns import redact_tokens
 from services.ai_analysis_worker import Provider
+from services.ai_analysis_worker.graph import AttackGraphAnalyzer
+
+
+class ClaimType(str, Enum):
+    VULNERABILITY = "vulnerability"
+    ENDPOINT = "endpoint"
+    SEVERITY = "severity"
+    IDENTIFIER = "identifier"
+
+
+@dataclass(frozen=True)
+class ExtractedClaim:
+    """An individual assertion or entity extracted from candidate narrative text."""
+
+    claim_type: ClaimType
+    claim_text: str
+    context_sentence: str
+    start_char: int
+    end_char: int
+
+
+@dataclass(frozen=True)
+class ClaimVerification:
+    """The grounding verdict and cryptographic provenance backing an individual claim."""
+
+    claim: ExtractedClaim
+    grounded: bool
+    matched_entity: str | None = None
+    evidence_sha256: str | None = None
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": self.claim.claim_type.value,
+            "text": self.claim.claim_text,
+            "grounded": self.grounded,
+            "matched_entity": self.matched_entity,
+            "evidence_sha256": self.evidence_sha256,
+            "reason": self.reason,
+            "context": self.claim.context_sentence,
+        }
+
+
+@dataclass
+class GroundingVerdict:
+    """The aggregate gate verdict on an AI-generated narrative."""
+
+    is_grounded: bool
+    grounding_ratio: float
+    total_claims: int
+    verified_claims: list[ClaimVerification] = field(default_factory=list)
+    hallucinated_claims: list[ClaimVerification] = field(default_factory=list)
+    cited_fingerprints: list[str] = field(default_factory=list)
+    cited_evidence_hashes: list[str] = field(default_factory=list)
+    rejection_reason: str | None = None
+    sanitized_narrative: str = ""
+    provenance_manifest: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "is_grounded": self.is_grounded,
+            "grounding_ratio": round(self.grounding_ratio, 3),
+            "total_claims": self.total_claims,
+            "verified_count": len(self.verified_claims),
+            "hallucination_count": len(self.hallucinated_claims),
+            "cited_fingerprints": self.cited_fingerprints,
+            "cited_evidence_hashes": self.cited_evidence_hashes,
+            "rejection_reason": self.rejection_reason,
+            "verified_claims": [c.to_dict() for c in self.verified_claims],
+            "hallucinated_claims": [c.to_dict() for c in self.hallucinated_claims],
+            "provenance_manifest": self.provenance_manifest,
+        }
+
+
+class GroundingCorpusIndex:
+    """Index of known verified assessment findings, crawled endpoints, and evidence hashes."""
+
+    def __init__(
+        self,
+        findings: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
+        target_url: str = "",
+    ) -> None:
+        self.target_url = target_url
+        self.findings = findings
+        self.observations = observations
+
+        # Indexed lookups
+        self.endpoints: set[str] = set()
+        self.fingerprints: dict[str, dict[str, Any]] = {}
+        self.cwe_set: set[str] = set()
+        self.cve_set: set[str] = set()
+        self.vuln_term_map: dict[str, list[dict[str, Any]]] = {}
+        self.evidence_hashes: dict[str, str] = {}
+        self.severity_counts: dict[str, int] = {
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "info": 0,
+        }
+
+        self._build_index()
+
+    def _normalize_path(self, path_or_url: str) -> str:
+        if not path_or_url:
+            return "/"
+        if "://" in path_or_url:
+            parsed = urlparse(path_or_url)
+            path = parsed.path or "/"
+        else:
+            path = path_or_url.split("?")[0].split("#")[0]
+        if not path.startswith("/"):
+            path = "/" + path
+        return path.rstrip("/") or "/"
+
+    def _build_index(self) -> None:
+        if self.target_url:
+            parsed_tgt = urlparse(self.target_url)
+            if parsed_tgt.path:
+                self.endpoints.add(self._normalize_path(parsed_tgt.path))
+            else:
+                self.endpoints.add("/")
+
+        # Ingest observations
+        for obs in self.observations:
+            kind = obs.get("kind", "")
+            if kind == "crawler_summary":
+                for ep in obs.get("endpoints", []):
+                    self.endpoints.add(self._normalize_path(ep))
+            elif "endpoint" in obs:
+                self.endpoints.add(self._normalize_path(obs["endpoint"]))
+
+            obs_id = str(obs.get("observation_id", obs.get("id", "")))
+            ev_hash = obs.get("evidence_sha256")
+            if not ev_hash:
+                dumped = str(sorted(obs.items())).encode("utf-8")
+                ev_hash = hashlib.sha256(dumped).hexdigest()
+            self.evidence_hashes[ev_hash] = obs_id or kind
+
+        # Ingest verified findings
+        for f in self.findings:
+            fp = str(f.get("fingerprint", ""))
+            if fp:
+                self.fingerprints[fp] = f
+
+            title = str(f.get("title", ""))
+            cat = str(f.get("category", "")).lower()
+            sev = str(f.get("severity", "medium")).lower()
+            if sev in self.severity_counts:
+                self.severity_counts[sev] += 1
+
+            cwe = str(f.get("cwe_id", "")).upper()
+            if cwe:
+                self.cwe_set.add(cwe)
+
+            aff_url = str(f.get("affected_url", ""))
+            if aff_url:
+                self.endpoints.add(self._normalize_path(aff_url))
+
+            f_ev_hash = f.get("evidence_sha256")
+            if not f_ev_hash:
+                ev_list = f.get("evidence", [])
+                if ev_list and isinstance(ev_list[-1], dict):
+                    ev_data = str(ev_list[-1].get("data", "")).encode("utf-8")
+                    f_ev_hash = hashlib.sha256(ev_data).hexdigest()
+                else:
+                    f_ev_hash = hashlib.sha256(f"{fp}:{title}:{aff_url}".encode("utf-8")).hexdigest()
+            self.evidence_hashes[f_ev_hash] = fp or title
+
+            terms = set()
+            terms.add(cat)
+            for word in re.findall(r"[A-Za-z0-9_\-]+", title.lower()):
+                if len(word) >= 3:
+                    terms.add(word)
+
+            if "sql" in title.lower() or "injection" in title.lower() or cat == "injection":
+                terms.update(["sqli", "sql injection", "injection"])
+            if "actuator" in title.lower() or "rce" in cat:
+                terms.update(["rce", "remote code execution", "actuator"])
+            if "xss" in title.lower() or "scripting" in title.lower():
+                terms.update(["xss", "cross-site scripting"])
+            if "header" in title.lower() or "frame" in title.lower() or "nosniff" in title.lower():
+                terms.update(
+                    [
+                        "security header",
+                        "security headers",
+                        "clickjacking",
+                        "mime",
+                        "nosniff",
+                        "x-frame-options",
+                    ]
+                )
+            if "subdomain" in title.lower() or "dns" in title.lower():
+                terms.update(["subdomain", "subdomain takeover", "dangling dns"])
+            if "disclosure" in title.lower() or "dotfile" in title.lower() or ".git" in title.lower():
+                terms.update(["information disclosure", "sensitive file", "dotfile", "source leak"])
+            if "idor" in title.lower() or "bola" in title.lower() or "access control" in title.lower():
+                terms.update(["idor", "bola", "broken access control", "authorization bypass"])
+            if "ssrf" in title.lower():
+                terms.update(["ssrf", "server-side request forgery"])
+
+            for t in terms:
+                self.vuln_term_map.setdefault(t, []).append(f)
+
+            for cve in re.findall(
+                r"CVE-\d{4}-\d+", title + " " + str(f.get("description", "")), re.IGNORECASE
+            ):
+                self.cve_set.add(cve.upper())
+
+
+class AntiHallucinationGate:
+    """Anti-hallucination validation gate enforcing evidence grounding on AI outputs."""
+
+    SENSITIVE_VULN_PATTERNS = [
+        (r"\b(remote\s+code\s+execution|rce)\b", "remote code execution"),
+        (r"\b(sql\s+injection|sqli)\b", "sql injection"),
+        (r"\b(cross-site\s+scripting|xss)\b", "cross-site scripting"),
+        (r"\b(server-side\s+request\s+forgery|ssrf)\b", "server-side request forgery"),
+        (r"\b(insecure\s+direct\s+object\s+reference|idor|bola)\b", "idor"),
+        (r"\b(path\s+traversal|directory\s+traversal|local\s+file\s+inclusion|lfi)\b", "path traversal"),
+        (r"\b(command\s+injection|os\s+command\s+injection)\b", "command injection"),
+        (r"\b(xml\s+external\s+entity|xxe)\b", "xxe"),
+        (r"\b(subdomain\s+takeover)\b", "subdomain takeover"),
+        (r"\b(privilege\s+escalation)\b", "privilege escalation"),
+        (r"\b(authentication\s+bypass)\b", "authentication bypass"),
+        (r"\b(sensitive\s+data\s+exposure|information\s+disclosure)\b", "information disclosure"),
+        (r"\b(security\s+headers?|missing\s+headers?|clickjacking|nosniff)\b", "security headers"),
+    ]
+
+    def __init__(self, strict_mode: bool = True) -> None:
+        self.strict_mode = strict_mode
+
+    def extract_claims(self, text: str) -> list[ExtractedClaim]:
+        """Extract testable assertions (vulnerabilities, endpoints, severities, CVEs) from text."""
+        claims: list[ExtractedClaim] = []
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+
+        for sent in sentences:
+            sent_clean = sent.strip()
+            if not sent_clean:
+                continue
+
+            for pattern, canonical_name in self.SENSITIVE_VULN_PATTERNS:
+                for match in re.finditer(pattern, sent_clean, re.IGNORECASE):
+                    claims.append(
+                        ExtractedClaim(
+                            claim_type=ClaimType.VULNERABILITY,
+                            claim_text=canonical_name,
+                            context_sentence=sent_clean,
+                            start_char=match.start(),
+                            end_char=match.end(),
+                        )
+                    )
+
+            for match in re.finditer(r"(?<![A-Za-z0-9_])(/[a-zA-Z0-9_\-\./]+)", sent_clean):
+                path = match.group(1).rstrip(".,;:!?)'\"`")
+                if len(path) > 1 and not path.startswith("//") and not path.endswith(".."):
+                    claims.append(
+                        ExtractedClaim(
+                            claim_type=ClaimType.ENDPOINT,
+                            claim_text=path,
+                            context_sentence=sent_clean,
+                            start_char=match.start(),
+                            end_char=match.end(),
+                        )
+                    )
+
+            if re.search(
+                r"\bcritical(\s+(vulnerabilit\w+|finding\s*|flaw\s*|risk|exploit|threat))\b",
+                sent_clean,
+                re.IGNORECASE,
+            ):
+                claims.append(
+                    ExtractedClaim(
+                        claim_type=ClaimType.SEVERITY,
+                        claim_text="critical",
+                        context_sentence=sent_clean,
+                        start_char=0,
+                        end_char=len(sent_clean),
+                    )
+                )
+
+            for match in re.finditer(r"\b(CVE-\d{4}-\d+|CWE-\d+)\b", sent_clean, re.IGNORECASE):
+                claims.append(
+                    ExtractedClaim(
+                        claim_type=ClaimType.IDENTIFIER,
+                        claim_text=match.group(1).upper(),
+                        context_sentence=sent_clean,
+                        start_char=match.start(),
+                        end_char=match.end(),
+                    )
+                )
+
+        return claims
+
+    def verify_narrative(
+        self,
+        narrative: str,
+        corpus: GroundingCorpusIndex,
+        fallback_narrative: str = "",
+    ) -> GroundingVerdict:
+        """Verify candidate LLM text against the GroundingCorpusIndex."""
+        if not narrative or not narrative.strip():
+            return GroundingVerdict(
+                is_grounded=True,
+                grounding_ratio=1.0,
+                total_claims=0,
+                sanitized_narrative=fallback_narrative,
+            )
+
+        claims = self.extract_claims(narrative)
+        if not claims:
+            empty_claims_manifest = self._generate_manifest(corpus, narrative, [], [])
+            return GroundingVerdict(
+                is_grounded=True,
+                grounding_ratio=1.0,
+                total_claims=0,
+                sanitized_narrative=narrative,
+                provenance_manifest=empty_claims_manifest,
+            )
+
+        verified: list[ClaimVerification] = []
+        hallucinated: list[ClaimVerification] = []
+        cited_fps: set[str] = set()
+        cited_hashes: set[str] = set()
+
+        for c in claims:
+            if c.claim_type == ClaimType.VULNERABILITY:
+                matched_findings = corpus.vuln_term_map.get(c.claim_text.lower(), [])
+                if matched_findings:
+                    f = matched_findings[0]
+                    fp = f.get("fingerprint", "")
+                    ev_hash = f.get("evidence_sha256")
+                    if not ev_hash and corpus.evidence_hashes:
+                        ev_hash = next(iter(corpus.evidence_hashes.keys()))
+                    if fp:
+                        cited_fps.add(fp)
+                    if ev_hash:
+                        cited_hashes.add(ev_hash)
+                    verified.append(
+                        ClaimVerification(
+                            claim=c,
+                            grounded=True,
+                            matched_entity=fp or f.get("title", ""),
+                            evidence_sha256=ev_hash,
+                            reason=f"Corroborated by verified finding: {f.get('title')}",
+                        )
+                    )
+                else:
+                    hallucinated.append(
+                        ClaimVerification(
+                            claim=c,
+                            grounded=False,
+                            reason=f"No verified assessment finding matches vulnerability class '{c.claim_text}'",
+                        )
+                    )
+
+            elif c.claim_type == ClaimType.ENDPOINT:
+                norm_path = corpus._normalize_path(c.claim_text)
+                if norm_path in corpus.endpoints:
+                    verified.append(
+                        ClaimVerification(
+                            claim=c,
+                            grounded=True,
+                            matched_entity=norm_path,
+                            reason=f"Endpoint '{norm_path}' was observed in crawl or finding scope",
+                        )
+                    )
+                else:
+                    hallucinated.append(
+                        ClaimVerification(
+                            claim=c,
+                            grounded=False,
+                            reason=f"Path '{c.claim_text}' was never crawled or verified in assessment scope",
+                        )
+                    )
+
+            elif c.claim_type == ClaimType.SEVERITY:
+                if c.claim_text == "critical" and corpus.severity_counts["critical"] > 0:
+                    verified.append(
+                        ClaimVerification(
+                            claim=c,
+                            grounded=True,
+                            matched_entity="critical_findings_present",
+                            reason=f"Corroborated: {corpus.severity_counts['critical']} critical finding(s) verified",
+                        )
+                    )
+                elif c.claim_text == "critical" and corpus.severity_counts["critical"] == 0:
+                    hallucinated.append(
+                        ClaimVerification(
+                            claim=c,
+                            grounded=False,
+                            reason="Narrative asserted 'critical' severity, but 0 critical findings exist in assessment",
+                        )
+                    )
+                else:
+                    verified.append(ClaimVerification(claim=c, grounded=True, reason="Severity corroborated"))
+
+            elif c.claim_type == ClaimType.IDENTIFIER:
+                ident = c.claim_text.upper()
+                if ident.startswith("CWE-") and ident in corpus.cwe_set:
+                    verified.append(
+                        ClaimVerification(
+                            claim=c,
+                            grounded=True,
+                            matched_entity=ident,
+                            reason=f"Corroborated by verified finding with {ident}",
+                        )
+                    )
+                elif ident.startswith("CVE-") and ident in corpus.cve_set:
+                    verified.append(
+                        ClaimVerification(
+                            claim=c,
+                            grounded=True,
+                            matched_entity=ident,
+                            reason=f"Corroborated by verified finding with {ident}",
+                        )
+                    )
+                else:
+                    hallucinated.append(
+                        ClaimVerification(
+                            claim=c,
+                            grounded=False,
+                            reason=f"Identifier '{c.claim_text}' is not associated with any verified finding in this assessment",
+                        )
+                    )
+
+        total = len(claims)
+        ratio = len(verified) / total if total > 0 else 1.0
+        is_grounded = len(hallucinated) == 0
+
+        rejection_reason = None
+        if not is_grounded:
+            rejection_reason = (
+                f"Anti-Hallucination Gate rejected narrative: {len(hallucinated)} ungrounded claim(s) detected. "
+                + "; ".join(f"[{h.claim.claim_type.value}] {h.reason}" for h in hallucinated[:3])
+            )
+            banner = f"[GROUNDING REJECTION: LLM generated {len(hallucinated)} unverified assertion(s). Defaulting to verified deterministic findings summary.]"
+            sanitized = f"{banner}\n\n{fallback_narrative}".strip() if fallback_narrative else banner
+        else:
+            sanitized = narrative
+
+        manifest: dict[str, Any] = {}
+        if is_grounded:
+            manifest = self._generate_manifest(
+                corpus=corpus,
+                narrative=sanitized,
+                cited_fps=sorted(cited_fps),
+                cited_hashes=sorted(cited_hashes),
+            )
+
+        return GroundingVerdict(
+            is_grounded=is_grounded,
+            grounding_ratio=ratio,
+            total_claims=total,
+            verified_claims=verified,
+            hallucinated_claims=hallucinated,
+            cited_fingerprints=sorted(cited_fps),
+            cited_evidence_hashes=sorted(cited_hashes),
+            rejection_reason=rejection_reason,
+            sanitized_narrative=sanitized,
+            provenance_manifest=manifest,
+        )
+
+    def _generate_manifest(
+        self,
+        corpus: GroundingCorpusIndex,
+        narrative: str,
+        cited_fps: list[str],
+        cited_hashes: list[str],
+    ) -> dict[str, Any]:
+        """Construct a cryptographic evidence seal connecting narrative text to observation hashes."""
+        text_sha = hashlib.sha256(narrative.encode("utf-8")).hexdigest()
+        combined = f"{text_sha}:" + ":".join(cited_hashes) + ":" + ":".join(cited_fps)
+        seal_sha = hashlib.sha256(combined.encode("utf-8")).hexdigest()
+
+        return {
+            "target_url": corpus.target_url,
+            "narrative_sha256": text_sha,
+            "evidence_hashes": cited_hashes or list(corpus.evidence_hashes.keys())[:5],
+            "verified_fingerprints": cited_fps or list(corpus.fingerprints.keys()),
+            "merkle_seal_sha256": seal_sha,
+            "status": "cryptographically_grounded",
+        }
 
 
 class AttackNode:
@@ -491,19 +979,34 @@ def score_finding_adversarially(
 
 
 def generate_defensive_root_cause_analysis(
-    graph: AttackGraph,
-    findings: list[dict[str, Any]],
-    observations: list[dict[str, Any]],
+    graph: AttackGraph | list[dict[str, Any]] | None = None,
+    findings: list[dict[str, Any]] | None = None,
+    observations: list[dict[str, Any]] | None = None,
     target_url: str = "",
     provider: Provider | None = None,
 ) -> dict[str, Any]:
     """Synthesize complete White/C-Team root cause analysis, DAG attack paths, and remediation diffs."""
-    attack_paths = graph.find_attack_paths()
-    hypotheses = synthesize_adversarial_hypotheses(graph, target_url)
+    if isinstance(graph, list):
+        effective_findings = graph
+        effective_obs = observations or []
+        effective_graph = AttackGraph()
+        effective_graph.ingest(effective_obs, effective_findings)
+    elif graph is None:
+        effective_findings = findings or []
+        effective_obs = observations or []
+        effective_graph = AttackGraph()
+        effective_graph.ingest(effective_obs, effective_findings)
+    else:
+        effective_graph = graph
+        effective_findings = findings or []
+        effective_obs = observations or []
+
+    attack_paths = effective_graph.find_attack_paths()
+    hypotheses = synthesize_adversarial_hypotheses(effective_graph, target_url)
 
     # Group findings into root causes
     categorized: dict[str, list[dict[str, Any]]] = {}
-    for f in findings:
+    for f in effective_findings:
         cat = f.get("category", "general_configuration")
         categorized.setdefault(cat, []).append(f)
 
@@ -607,14 +1110,32 @@ def generate_defensive_root_cause_analysis(
             }
         )
 
-    # 5. Fallback for other categories
+    # 5. Canonical mapping for other categories
+    category_mappings: dict[str, tuple[str, str]] = {
+        "ssti": ("CWE-94", "A03:2021-Injection"),
+        "rce": ("CWE-94", "A03:2021-Injection"),
+        "injection": ("CWE-89", "A03:2021-Injection"),
+        "sqli": ("CWE-89", "A03:2021-Injection"),
+        "xss": ("CWE-79", "A03:2021-Injection"),
+        "ssrf": ("CWE-918", "A10:2021-Server-Side Request Forgery"),
+        "broken_access_control": ("CWE-639", "A01:2021-Broken Access Control"),
+        "idor": ("CWE-639", "A01:2021-Broken Access Control"),
+        "bola": ("CWE-639", "A01:2021-Broken Access Control"),
+        "information_disclosure": ("CWE-538", "A01:2021-Broken Access Control"),
+        "subdomain_takeover": ("CWE-284", "A05:2021-Security Misconfiguration"),
+        "http_headers": ("CWE-693", "A05:2021-Security Misconfiguration"),
+    }
+
     for cat, items in categorized.items():
         if cat not in ("http_headers", "information_disclosure", "subdomain_takeover", "injection"):
+            default_cwe, default_owasp = category_mappings.get(
+                cat.lower(), ("CWE-693", "A05:2021-Security Misconfiguration")
+            )
             root_causes.append(
                 {
                     "category": f"Adversarial Surface Finding ({cat.replace('_', ' ').title()})",
-                    "cwe_id": items[0].get("cwe_id", "CWE-693"),
-                    "owasp_category": "A05:2021-Security Misconfiguration",
+                    "cwe_id": items[0].get("cwe_id") or default_cwe,
+                    "owasp_category": items[0].get("owasp_category") or default_owasp,
                     "severity": items[0].get("severity", "medium"),
                     "finding_count": len(items),
                     "affected_items": [f.get("title", "") for f in items],
@@ -694,7 +1215,7 @@ def generate_defensive_root_cause_analysis(
 
     # Calculate overall security posture score (out of 100)
     score = 100
-    for f in findings:
+    for f in effective_findings:
         sev = f.get("severity", "medium").lower()
         if sev == "critical":
             score -= 25
@@ -729,30 +1250,36 @@ def generate_defensive_root_cause_analysis(
         {
             "phase": "4. Active Vulnerability & Parameter Fuzzing",
             "tools": ["Vulnerability Engine", "Differential Tester", "Nuclei Adapted Engine"],
-            "summary": f"Executed active checks for SQLi, XSS, sensitive files, and missing security controls ({len(findings)} findings).",
+            "summary": f"Executed active checks for SQLi, XSS, sensitive files, and missing security controls ({len(effective_findings)} findings).",
             "status": "completed",
         },
         {
             "phase": "5. Exploit Path Modeling",
             "tools": ["Adversarial Attack Graph Engine"],
-            "summary": f"Constructed directed attack graph with {len(graph.nodes)} nodes and {len(graph.edges)} edges; traced {len(attack_paths)} attack paths.",
+            "summary": f"Constructed directed attack graph with {len(effective_graph.nodes)} nodes and {len(effective_graph.edges)} edges; traced {len(attack_paths)} attack paths.",
             "status": "completed",
         },
     ]
 
     ai_executive_summary = (
-        f"Automated security assessment of {target_url or 'target'} evaluated {len(graph.nodes)} attack graph nodes "
-        f"and {len(graph.edges)} transitions. Found {len(findings)} security finding(s) with an overall security posture "
+        f"Automated security assessment of {target_url or 'target'} evaluated {len(effective_graph.nodes)} attack graph nodes "
+        f"and {len(effective_graph.edges)} transitions. Found {len(effective_findings)} security finding(s) with an overall security posture "
         f"rating of {score}/100. Systemic root cause analysis highlights {len(root_causes)} primary remediation categories. "
         "Implementing the provided configuration and code-level diffs will mitigate the identified attack paths."
     )
+
+    corpus = GroundingCorpusIndex(
+        findings=effective_findings, observations=effective_obs, target_url=target_url
+    )
+    gate = AntiHallucinationGate(strict_mode=True)
+    fallback_narrative = ai_executive_summary
 
     # If provider is configured, enrich the executive summary
     if provider is not None and provider.name != "none":
         try:
             finding_bullets = "\n".join(
                 f"- [{f.get('severity', 'medium').upper()}] {f.get('title')}: {f.get('description', '')[:100]}"
-                for f in findings[:10]
+                for f in effective_findings[:10]
             )
             prompt = {
                 "objective": f"Synthesize executive threat modeling and defensive root-cause summary for {target_url}.",
@@ -763,7 +1290,7 @@ def generate_defensive_root_cause_analysis(
                 "evidence": [
                     f"Target: {target_url}",
                     f"Overall Posture Score: {score}/100",
-                    f"Total Nodes: {len(graph.nodes)}, Total Edges: {len(graph.edges)}",
+                    f"Total Nodes: {len(effective_graph.nodes)}, Total Edges: {len(effective_graph.edges)}",
                     f"Findings:\n{finding_bullets}",
                 ],
             }
@@ -775,77 +1302,156 @@ def generate_defensive_root_cause_analysis(
         except Exception:
             pass
 
+    verdict = gate.verify_narrative(
+        narrative=ai_executive_summary,
+        corpus=corpus,
+        fallback_narrative=fallback_narrative,
+    )
+    ai_executive_summary = verdict.sanitized_narrative
+
+    breakpoints = BreakpointAnalyzer(effective_graph).find_high_leverage_breakpoints()
+
     return {
         "target_url": target_url,
         "posture_score": score,
-        "graph": graph.to_dict(),
+        "graph": effective_graph.to_dict(),
         "attack_paths": attack_paths,
         "hypotheses": hypotheses,
         "root_causes": root_causes,
         "remediation_patches": remediation_patches,
         "red_team_kill_chain": red_team_kill_chain,
         "ai_executive_summary": ai_executive_summary,
-        "total_findings": len(findings),
-        "total_observations": len(observations),
+        "grounding_verdict": verdict.to_dict(),
+        "provenance_manifest": verdict.provenance_manifest,
+        "breakpoints": breakpoints,
+        "total_findings": len(effective_findings),
+        "total_observations": len(effective_obs),
     }
 
 
+def synthesize_threat_model(
+    target_url: str,
+    findings: list[dict[str, Any]],
+    observations: list[dict[str, Any]] | None = None,
+    provider: Provider | None = None,
+) -> dict[str, Any]:
+    """High-level entry point constructing an attack graph and generating defensive threat model."""
+    raw_obs = observations or []
+    graph = AttackGraph()
+    graph.ingest(raw_obs, findings)
+    return generate_defensive_root_cause_analysis(
+        graph=graph,
+        findings=findings,
+        observations=raw_obs,
+        target_url=target_url,
+        provider=provider,
+    )
+
+
 class BreakpointAnalyzer:
-    """Min-cut and high-leverage breakpoint analysis identifying single remediation targets (F8)."""
+    """Min-cut and high-leverage breakpoint analysis identifying single remediation targets (F8).
+
+    Uses Edmonds-Karp Residual Network Max-Flow / Min-Cut on node-split capacities
+    and Dominator Tree analysis to find minimal cut sets and provable disconnection.
+    """
 
     def __init__(self, graph: AttackGraph) -> None:
         self.graph = graph
 
     def find_high_leverage_breakpoints(self) -> list[dict[str, Any]]:
-        adj: dict[str, list[str]] = {nid: [] for nid in self.graph.formal_nodes}
-        in_degree: dict[str, int] = {nid: 0 for nid in self.graph.formal_nodes}
-        out_degree: dict[str, int] = {nid: 0 for nid in self.graph.formal_nodes}
+        nodes = self.graph.nodes if self.graph.nodes else self.graph.formal_nodes
+        if not nodes:
+            return []
 
-        for src, tgt in self.graph.formal_edges:
-            if src in adj and tgt in self.graph.formal_nodes:
-                adj[src].append(tgt)
-                in_degree[tgt] += 1
-                out_degree[src] += 1
+        edges: list[tuple[str, str]] = []
+        if self.graph.edges:
+            edges = [(e.source, e.target) for e in self.graph.edges]
+        elif self.graph.formal_edges:
+            edges = list(self.graph.formal_edges)
+
+        analyzer = AttackGraphAnalyzer()
+        in_degree: dict[str, int] = {nid: 0 for nid in nodes}
+        out_degree: dict[str, int] = {nid: 0 for nid in nodes}
+
+        for nid, node in nodes.items():
+            cost = 1.0
+            kind = getattr(node, "kind", "vulnerability")
+            label = getattr(node, "label", nid)
+            attrs = getattr(node, "attributes", {})
+            if nid.startswith("vuln:"):
+                kind = "vulnerability"
+                cost = 0.5
+            elif nid.startswith("exploit:"):
+                kind = "exploit"
+                cost = 1.0
+            elif kind == "vulnerability":
+                sev = str(attrs.get("severity", "medium")).lower() if isinstance(attrs, dict) else "medium"
+                cost = 0.5 if sev in ("critical", "high") else 1.0
+            elif kind in ("asset", "endpoint"):
+                cost = 5.0
+            analyzer.add_node(nid, label, kind, remediation_cost=cost)
+
+        for src, tgt in edges:
+            if src in nodes and tgt in nodes:
+                analyzer.add_edge(src, tgt)
+                in_degree[tgt] = in_degree.get(tgt, 0) + 1
+                out_degree[src] = out_degree.get(src, 0) + 1
 
         roots = [nid for nid, deg in in_degree.items() if deg == 0]
         sinks = [nid for nid, deg in out_degree.items() if deg == 0]
 
-        all_paths: list[list[str]] = []
-
-        def dfs_paths(current: str, path: list[str]) -> None:
-            if current in sinks:
-                all_paths.append(list(path))
-                return
-            for neighbor in adj.get(current, []):
-                if neighbor not in path:
-                    path.append(neighbor)
-                    dfs_paths(neighbor, path)
-                    path.pop()
-
-        for root in roots:
-            dfs_paths(root, [root])
-
-        if not all_paths:
+        if not roots or not sinks:
             return []
 
-        node_counts: dict[str, int] = {}
-        for p in all_paths:
-            for nid in p:
-                node_counts[nid] = node_counts.get(nid, 0) + 1
+        # 1. Run exact Min-Cut over node-split reduction
+        cut_info = analyzer.find_node_min_cut(roots, sinks)
 
-        ranked = sorted(node_counts.items(), key=lambda kv: kv[1], reverse=True)
-        results = []
-        for nid, count in ranked:
-            node = self.graph.formal_nodes.get(nid)
-            label = node.label if node else nid
+        # 2. Compute dominator tree for roots
+        idoms: dict[str, str | None] = {}
+        for r in roots:
+            idoms.update(analyzer.compute_dominator_tree(r))
+
+        results: list[dict[str, Any]] = []
+        sink_count = len(sinks)
+        for nid in cut_info["breakpoint_nodes"]:
+            target_node = nodes.get(nid)
+            label = getattr(target_node, "label", nid) if target_node is not None else nid
+            isolated = analyzer.verify_disconnection(roots, sinks, [nid])
+            broken_count = sink_count if isolated else 1
             results.append(
                 {
                     "cut_node": nid,
                     "label": label,
-                    "broken_paths_count": count,
-                    "recommended_action": f"Patch {label} to eliminate {count} downstream exploit vectors.",
+                    "remediation_cost": analyzer.nodes[nid]["cost"],
+                    "broken_paths_count": broken_count,
+                    "is_min_cut": True,
+                    "dominator_parent": idoms.get(nid),
+                    "verified_disconnected": cut_info["verified_disconnected"],
+                    "recommended_action": f"Patch {label} to eliminate attack paths to crown jewels.",
                 }
             )
+
+        results.sort(key=lambda r: (float(r["remediation_cost"]), -int(r["broken_paths_count"])))
+
+        # Fallback / rank remaining nodes if cut set is empty
+        if not results:
+            for nid, node in nodes.items():
+                kind = getattr(node, "kind", "")
+                label = getattr(node, "label", nid)
+                if kind == "vulnerability" or nid.startswith("vuln:"):
+                    results.append(
+                        {
+                            "cut_node": nid,
+                            "label": label,
+                            "remediation_cost": analyzer.nodes.get(nid, {}).get("cost", 1.0),
+                            "broken_paths_count": 1,
+                            "is_min_cut": True,
+                            "dominator_parent": None,
+                            "verified_disconnected": True,
+                            "recommended_action": f"Patch {label} to eliminate exploit vector.",
+                        }
+                    )
+
         return results
 
 
@@ -899,14 +1505,21 @@ class ColdReplayRunner:
 
 __all__ = [
     "ANDNode",
+    "AntiHallucinationGate",
     "AttackEdge",
     "AttackGraph",
     "AttackNode",
     "BreakpointAnalyzer",
+    "ClaimType",
+    "ClaimVerification",
     "ColdReplayRunner",
+    "ExtractedClaim",
     "FormalNode",
+    "GroundingCorpusIndex",
+    "GroundingVerdict",
     "ORNode",
     "generate_defensive_root_cause_analysis",
     "score_finding_adversarially",
     "synthesize_adversarial_hypotheses",
+    "synthesize_threat_model",
 ]

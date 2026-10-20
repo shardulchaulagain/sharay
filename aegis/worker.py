@@ -132,22 +132,31 @@ def mark_interrupted(sessions):
         db.commit()
 
 
-def run_one(sessions, stopping=lambda: False, *, request_starts=None) -> bool:
+def _execute_leased_assessment(
+    sessions,
+    lease: Any,
+    stopping: Any = lambda: False,
+    *,
+    request_starts=None,
+) -> tuple[str, str | None]:
+    if isinstance(lease, str):
+        assessment_id = lease
+    elif hasattr(lease, "assessment_id"):
+        assessment_id = lease.assessment_id
+    else:
+        raise ValueError(f"Invalid assessment lease: {lease}")
+
     with sessions() as db:
         db.execute(text("BEGIN IMMEDIATE"))
-        row = db.scalar(
-            select(Assessment).where(Assessment.status == "queued").order_by(Assessment.created_at).limit(1)
-        )
+        row = db.get(Assessment, assessment_id)
         if row is None:
             db.rollback()
-            return False
-        row.status, row.stage, row.started_at = "running", "Validating approved scope", time.time()
-        assessment_id, organization_id, target_id = row.id, row.organization_id, row.target_id
+            return "failed", "Assessment not found"
+        organization_id, target_id = row.organization_id, row.target_id
         snapshot = row.scope_snapshot
         target = db.get(Target, target_id)
         owned = target is not None and target.verification_status == "operator_authorized"
         profile = row.profile
-        audit(db, organization_id, "worker", "assessment.started", row.id)
         db.commit()
 
     def cancelled():
@@ -228,6 +237,7 @@ def run_one(sessions, stopping=lambda: False, *, request_starts=None) -> bool:
                 if destination.host in ("127.0.0.1", "::1", "localhost")
                 else resolve_pinned(destination.host)
             )
+            auth = scan_cfg.get("auth")
             result = scan_comprehensive(
                 destination,
                 pinned_ip,
@@ -237,6 +247,7 @@ def run_one(sessions, stopping=lambda: False, *, request_starts=None) -> bool:
                 depth=depth,
                 tools=tools,
                 max_seconds=max_seconds,
+                auth=auth,
             )
         else:
             try:
@@ -385,7 +396,8 @@ def run_one(sessions, stopping=lambda: False, *, request_starts=None) -> bool:
         db.execute(text("BEGIN IMMEDIATE"))
         current = db.get(Assessment, assessment_id)
         if current is None:
-            return True
+            return "failed", "Assessment not found"
+
         checks = redact(result.get("checks", []))
         for check in checks:
             exit_code = next(
@@ -827,6 +839,26 @@ def run_one(sessions, stopping=lambda: False, *, request_starts=None) -> bool:
             },
         )
         db.commit()
+        return outcome, current.error
+
+
+def run_one(sessions, stopping=lambda: False, *, request_starts=None) -> bool:
+    with sessions() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        row = db.scalar(
+            select(Assessment).where(Assessment.status == "queued").order_by(Assessment.created_at).limit(1)
+        )
+        if row is None:
+            db.rollback()
+            return False
+        row.status, row.stage, row.started_at = "running", "Validating approved scope", time.time()
+        assessment_id, organization_id = row.id, row.organization_id
+        audit(db, organization_id, "worker", "assessment.started", row.id)
+        db.commit()
+
+    outcome, _err = _execute_leased_assessment(
+        sessions, assessment_id, stopping=stopping, request_starts=request_starts
+    )
     return True
 
 
@@ -901,6 +933,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--workers", type=int, default=1, help="Concurrent worker count")
     parser.add_argument("--parent-stdin", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     settings = Settings(Path(args.data_dir), start_worker=False)
@@ -928,9 +961,20 @@ def main():
             with watch_parent_stdin(args.parent_stdin, lambda: request_stop(None, None)):
                 try:
                     mark_interrupted(sessions)
-                    while not stop[0]:
-                        if not run_one(sessions, lambda: stop[0], request_starts=request_starts):
-                            time.sleep(0.25)
+                    if args.workers > 1:
+                        from aegis.queue import ConcurrentJobQueue, ConcurrentWorkerPool
+
+                        queue = ConcurrentJobQueue(sessions)
+                        pool = ConcurrentWorkerPool(queue, worker_count=args.workers)
+                        pool.start()
+                        while not stop[0]:
+                            queue.reap_expired_leases(requeue=True)
+                            time.sleep(0.5)
+                        pool.stop()
+                    else:
+                        while not stop[0]:
+                            if not run_one(sessions, lambda: stop[0], request_starts=request_starts):
+                                time.sleep(0.25)
                 finally:
                     mark_interrupted(sessions)
         finally:

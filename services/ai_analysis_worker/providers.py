@@ -156,3 +156,9 @@ __all__ = [
     "register_auto_detector",
     "secret",
 ]
+
+# Importing the vendor adapters module runs its registrations (the real provider adapters and the
+# environment auto-detector), so a configured provider can actually be built. Without it only
+# "none" is available. Kept at the bottom so this module's own names are defined first; the vendor
+# API code and HTTP client live in that module, never here.
+from services.ai_analysis_worker import vendors as _vendors  # noqa: E402,F401

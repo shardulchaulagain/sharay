@@ -1,5 +1,25 @@
-"""Local assessment exports. Rendering never executes target content."""
+"""Local assessment exports and forensic evidence packaging."""
 
+from .bundle import EvidenceBundleBuilder
+from .integrations import TicketingPushEngine
 from .reports import redact, render_report
+from .sarif import CsvExporter, SarifExporter
+from .trends import (
+    AssessmentTrendEngine,
+    DifferentialReport,
+    ExecutiveDashboardGenerator,
+    FindingRecord,
+)
 
-__all__ = ["redact", "render_report"]
+__all__ = [
+    "AssessmentTrendEngine",
+    "CsvExporter",
+    "DifferentialReport",
+    "EvidenceBundleBuilder",
+    "ExecutiveDashboardGenerator",
+    "FindingRecord",
+    "SarifExporter",
+    "TicketingPushEngine",
+    "redact",
+    "render_report",
+]

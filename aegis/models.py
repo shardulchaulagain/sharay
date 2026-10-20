@@ -107,7 +107,10 @@ class Assessment(Base):
 class OriginCooldown(Base):
     __tablename__ = "origin_cooldowns"
     origin: Mapped[str] = mapped_column(Text, primary_key=True)
-    interval: Mapped[float] = mapped_column(Float)
+    interval: Mapped[float] = mapped_column(Float, default=0.5)
+    active_worker_id: Mapped[str | None] = mapped_column(String(100), nullable=True, default=None)
+    acquired_at: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    last_completed_at: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
 
 
 class Observation(Base):

@@ -110,7 +110,9 @@ def _request_endpoint(
         or "vulnerabilities" in path
         or target_port == 4280
     ):
-        sec_level = os.environ.get("SHARAY_DVWA_SECURITY", os.environ.get("SHARAY_LAB_SECURITY_LEVEL", "high"))
+        sec_level = os.environ.get(
+            "SHARAY_DVWA_SECURITY", os.environ.get("SHARAY_LAB_SECURITY_LEVEL", "high")
+        )
         req_headers["Cookie"] = f"security={sec_level}"
     if headers:
         req_headers.update(headers)
@@ -285,7 +287,9 @@ def _evaluate_boolean_blind_sqli(
             repro_url = f"{destination.origin}{ep}?{urlencode(true_dict)}"
             false_url = f"{destination.origin}{ep}?{urlencode(false_dict)}"
 
-            lab_sec = os.environ.get("SHARAY_DVWA_SECURITY", os.environ.get("SHARAY_LAB_SECURITY_LEVEL", "high"))
+            lab_sec = os.environ.get(
+                "SHARAY_DVWA_SECURITY", os.environ.get("SHARAY_LAB_SECURITY_LEVEL", "high")
+            )
             return {
                 "category": "injection",
                 "severity": "critical",
@@ -514,7 +518,14 @@ def audit_deep_vulnerabilities(
                                     "extra_params": {"Submit": "Submit"} if "Submit" in sql_dict else {},
                                     "reproduction_steps": f"Issue {method_used} request to {aff_url} with Cookie: security={lab_sec} to observe database syntax error in response.",
                                 },
-                                "evidence": [{"endpoint": ep, "parameter": param, "status": s_status, "method": method_used}],
+                                "evidence": [
+                                    {
+                                        "endpoint": ep,
+                                        "parameter": param,
+                                        "status": s_status,
+                                        "method": method_used,
+                                    }
+                                ],
                             }
                         )
                         break
@@ -689,7 +700,13 @@ def audit_deep_vulnerabilities(
                             if lab_hdrs:
                                 p_headers.update(lab_hdrs)
                             c_status, _, c_body_post, _ = _request_endpoint(
-                                destination, allow_ip, "POST", ep, body=p_body, headers=p_headers, timeout=timeout
+                                destination,
+                                allow_ip,
+                                "POST",
+                                ep,
+                                body=p_body,
+                                headers=p_headers,
+                                timeout=timeout,
                             )
                             if (
                                 "sharay_canary_cmd" in c_body_post
@@ -735,7 +752,14 @@ def audit_deep_vulnerabilities(
                                         "extra_params": {"Submit": "Submit"} if "Submit" in cmd_dict else {},
                                         "reproduction_steps": f"Issue {method_used} request to {repro_url} and observe shell canary output in response body.",
                                     },
-                                    "evidence": [{"endpoint": ep, "parameter": param, "status": c_status, "method": method_used}],
+                                    "evidence": [
+                                        {
+                                            "endpoint": ep,
+                                            "parameter": param,
+                                            "status": c_status,
+                                            "method": method_used,
+                                        }
+                                    ],
                                 }
                             )
                             break

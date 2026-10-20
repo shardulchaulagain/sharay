@@ -1263,8 +1263,8 @@ def scan_live_zap(
                 result["checks"].append(
                     {
                         "category": "zap",
-                        "status": "completed",
-                        "detail": f"ZAP passive inspection reached execution budget ({int(bounded_seconds)}s limit hit; partial coverage).",
+                        "status": "completed_with_errors",
+                        "detail": f"ZAP passive inspection reached its execution budget ({int(bounded_seconds)}s, adaptively raised; partial coverage).",
                     }
                 )
             else:
@@ -1433,8 +1433,8 @@ def scan_live_metasploit_auxiliary(
                 result["checks"].append(
                     {
                         "category": "metasploit",
-                        "status": "completed",
-                        "detail": f"Metasploit verification reached execution budget ({int(bounded_seconds)}s limit hit; partial coverage).",
+                        "status": "completed_with_errors",
+                        "detail": f"Metasploit verification reached its execution budget ({int(bounded_seconds)}s, adaptively raised; partial coverage).",
                     }
                 )
             else:
@@ -1661,6 +1661,35 @@ def scan_comprehensive(
         "body_fuzzer",
     }
     enabled_tools = set(tools) if tools else default_tools
+
+    # Adaptive execution budget: size the total so each enabled asset still gets its floor when it
+    # runs last in the sequence, instead of the tail stage (e.g. Metasploit) being squeezed to its
+    # 20s minimum and timing out. Capped at 30 minutes so a scan can never run unbounded.
+    _STAGE_FLOORS = {
+        "nmap": 60,
+        "port_scanner": 60,
+        "crawler": 45,
+        "browser": 45,
+        "schema": 20,
+        "nuclei": 150,
+        "ffuf": 45,
+        "dalfox": 45,
+        "katana": 45,
+        "zap": 150,
+        "metasploit": 120,
+        "body_fuzzer": 60,
+        "diff": 30,
+    }
+    needed_seconds = 60 + sum(_STAGE_FLOORS.get(tool, 0) for tool in enabled_tools)
+    max_seconds = min(1800.0, max(float(max_seconds), float(needed_seconds)))
+    result["observations"].append(
+        {
+            "kind": "adaptive_budget",
+            "category": "orchestration",
+            "allocated_seconds": int(max_seconds),
+            "enabled_assets": sorted(enabled_tools),
+        }
+    )
 
     # Stage 3: Multi-Port and Service Discovery
     try:
@@ -2298,7 +2327,11 @@ def scan_comprehensive(
                                         f"A compositional-grammar {vclass.value} payload produced a reproducible "
                                         f"differential (score {v['differential_score']:.0f}) on parameter '{param}', "
                                         f"confirmed by 3x replay with a negative-control canary"
-                                        + (" after adaptively routing around a WAF block." if v["waf_bypassed"] else ".")
+                                        + (
+                                            " after adaptively routing around a WAF block."
+                                            if v["waf_bypassed"]
+                                            else "."
+                                        )
                                     ),
                                     "affected_url": destination.url,
                                     "target_url": destination.url,
@@ -2532,12 +2565,12 @@ def scan_comprehensive(
             try:
                 from packages.offensive_capability import TargetAnomalyFuzzer
 
-                fuzzer = TargetAnomalyFuzzer()
+                anomaly_fuzzer = TargetAnomalyFuzzer()
                 anomaly_findings: list[dict[str, Any]] = []
                 for param in (discovered_parameters or ["id", "q", "path"])[:3]:
                     if (time.monotonic() - started) >= max_seconds - 10:
                         break
-                    anomaly_findings.extend(fuzzer.scan_for_anomalies(destination.url, param))
+                    anomaly_findings.extend(anomaly_fuzzer.scan_for_anomalies(destination.url, param))
                 result["findings"].extend(anomaly_findings)
                 result["checks"].append(
                     {
@@ -2603,13 +2636,20 @@ def scan_comprehensive(
 
     # Stage 8b: Specialized tool belt (ffuf / dalfox / katana) over enforced egress (Sector O7).
     toolbelt_tools = [t for t in ("ffuf", "dalfox", "katana") if t in enabled_tools]
-    if mode != "passive" and toolbelt_tools and allow_ip not in ("127.0.0.1", "::1", "localhost") and runner is not None:
+    if (
+        mode != "passive"
+        and toolbelt_tools
+        and allow_ip not in ("127.0.0.1", "::1", "localhost")
+        and runner is not None
+    ):
         try:
             from packages.scanner_adapters.integrations import toolbelt
 
             elapsed = time.monotonic() - started
             tb_timeout = min(max(20.0, max_seconds - elapsed - 5.0), 300.0)
-            tb = toolbelt.run_toolbelt(destination, allow_ip, toolbelt_tools, run=runner, max_seconds=tb_timeout)
+            tb = toolbelt.run_toolbelt(
+                destination, allow_ip, toolbelt_tools, run=runner, max_seconds=tb_timeout
+            )
             result["findings"].extend(tb["findings"])
             result["checks"].extend(tb["checks"])
             if tb["urls"]:
@@ -2618,7 +2658,11 @@ def scan_comprehensive(
                 )
         except Exception as exc:
             result["checks"].append(
-                {"category": "toolbelt", "status": "completed", "detail": f"Tool belt note: {type(exc).__name__}."}
+                {
+                    "category": "toolbelt",
+                    "status": "completed",
+                    "detail": f"Tool belt note: {type(exc).__name__}.",
+                }
             )
     elif toolbelt_tools:
         result["checks"].append(

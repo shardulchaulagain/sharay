@@ -13,7 +13,7 @@ from sqlalchemy import func, select, text
 
 from aegis.config import Settings
 from aegis.database import create_database
-from aegis.models import Assessment, Finding, Observation, Project, Target, User
+from aegis.models import Assessment, Finding, FindingEvidence, Observation, Project, Target, User
 from aegis.worker import evidence_hash
 from packages.reporting import redact
 from packages.scanner_adapters import preflight, scan_comprehensive, scan_live, scan_live_nuclei
@@ -338,26 +338,36 @@ def cmd_scan(
                 )
                 if existing:
                     existing.last_seen = time.time()
+                    finding_id = existing.id
                 else:
-                    db.add(
-                        Finding(
-                            organization_id=proj.organization_id,
-                            project_id=proj.id,
-                            target_id=tgt.id,
-                            fingerprint=fp,
-                            title=clean_f["title"],
-                            category=clean_f.get("category", "template_match"),
-                            severity=clean_f.get("severity", "medium"),
-                            confidence=clean_f.get("confidence", "medium"),
-                            status="suspected",
-                            description=clean_f.get("description", ""),
-                            remediation=clean_f.get("remediation", ""),
-                            affected_url=clean_f.get("affected_url", norm_url),
-                            recommended_validations=clean_f.get("recommended_validations", []),
-                            first_seen=time.time(),
-                            last_seen=time.time(),
-                        )
+                    new_finding = Finding(
+                        organization_id=proj.organization_id,
+                        project_id=proj.id,
+                        target_id=tgt.id,
+                        fingerprint=fp,
+                        title=clean_f["title"],
+                        category=clean_f.get("category", "template_match"),
+                        severity=clean_f.get("severity", "medium"),
+                        confidence=clean_f.get("confidence", "medium"),
+                        status="suspected",
+                        description=clean_f.get("description", ""),
+                        remediation=clean_f.get("remediation", ""),
+                        affected_url=clean_f.get("affected_url", norm_url),
+                        first_seen=time.time(),
+                        last_seen=time.time(),
                     )
+                    db.add(new_finding)
+                    db.flush()
+                    finding_id = new_finding.id
+
+                db.add(
+                    FindingEvidence(
+                        finding_id=finding_id,
+                        assessment_id=asmt.id,
+                        data=clean_f,
+                        evidence_hash=evidence_hash(clean_f),
+                    )
+                )
             db.commit()
             print(f"[+] Assessment persisted to database under Project '{project_name}' (ID: {asmt.id})")
     except Exception as exc:
