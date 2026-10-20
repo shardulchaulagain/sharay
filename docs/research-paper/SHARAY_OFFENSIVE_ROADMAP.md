@@ -23,7 +23,7 @@ weak on all four. This document is the path.
 Supervised build-out on branch `feat/offensive-o3-payload-engine`. Each sector was first **verified**
 (most agent-pre-built modules were scaffold — failing/absent tests, unwired; O2 even fabricated exploit
 sessions), then made real, **wired into the live pipeline**, and proven with reproducible tests. Full
-suite: **988 passed, 0 failed**. Eight of ten offensive sectors shipped (only O9 scale and O10 QA remain).
+suite: **993 passed, 0 failed**. Nine of ten offensive sectors shipped (only O10 QA/benchmark remains).
 
 | Sector | Status | Commit | Evidence |
 | --- | --- | --- | --- |
@@ -35,6 +35,7 @@ suite: **988 passed, 0 failed**. Eight of ten offensive sectors shipped (only O9
 | O8 0-day discovery | ✅ DONE | `bf7f07c` | Anomaly/differential fuzzing → `needs_triage` research candidates, never auto-confirmed; defensive parser fuzzer verified |
 | O5 Real console | ✅ DONE | `c4e0c67` | Persistent-session infra verified; added an interactive MSF session driver (one session, many commands) + per-run console secret |
 | O7 Tool belt | ✅ DONE | `1432c5c` | ffuf/dalfox/katana adapters + interactsh ingestion over the egress sandbox; sqlmap/semgrep verified; dispatcher skips unavailable tools honestly |
+| O9 Scale | ✅ DONE | `2c17d10` | Route-template dedup + risk prioritization wired; sitemap/robots, adaptive rate, resumable state; distributed-worker resume pending Sector 4 |
 | O9 Scale | ⏳ TODO | — | Large-surface crawl, triage, resumable, distributed |
 | O10 Offensive QA | ⏳ TODO | — | Vulnerable range + exploitation benchmark |
 
@@ -303,7 +304,7 @@ Realistic 0-day falls out of coverage + adaptivity + strong oracles + fuzzing. B
   coverage of, each with an evidence bundle and a disclosure record — demonstrated at least on a seeded
   unknown in a lab.
 
-### Sector O9 — Scale for big sites
+### Sector O9 — Scale for big sites — ✅ DONE (`2c17d10`)
 
 - [ ] **Large-surface crawling:** lift the 30-page/depth-2 caps for authorized large scopes; add sitemap/
   robots/JS-route (katana) discovery; dedupe by route template; respect rate + scope.
