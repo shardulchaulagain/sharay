@@ -32,7 +32,11 @@ def route_template(url: str) -> str:
     """Collapse variable path segments to {id} so /user/1 and /user/2 share one template."""
     parts = urlsplit(url)
     path = "/".join(_templatize_segment(s) for s in parts.path.split("/"))
-    q = "?" + "&".join(sorted(k for k in (kv.split("=", 1)[0] for kv in parts.query.split("&")) if k)) if parts.query else ""
+    q = (
+        "?" + "&".join(sorted(k for k in (kv.split("=", 1)[0] for kv in parts.query.split("&")) if k))
+        if parts.query
+        else ""
+    )
     return f"{parts.scheme}://{parts.netloc}{path}{q}"
 
 
@@ -48,7 +52,18 @@ def dedupe_route_templates(urls: list[str]) -> list[str]:
     return out
 
 
-_HIGH_PATH = ("admin", "login", "auth", "account", "token", "password", "secret", "config", "debug", "console")
+_HIGH_PATH = (
+    "admin",
+    "login",
+    "auth",
+    "account",
+    "token",
+    "password",
+    "secret",
+    "config",
+    "debug",
+    "console",
+)
 _API_PATH = ("/api", "graphql", "/v1", "/v2", "/rest", "/rpc")
 _FILE_PATH = ("upload", "import", "export", "download", "attachment", "file", "avatar", "backup")
 _WRITE_PATH = ("delete", "update", "edit", "create", "save", "remove", "reset")

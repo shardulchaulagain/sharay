@@ -31,7 +31,7 @@ with SessionLocal() as db:
     if not user:
         print("User shardul not found!")
         sys.exit(1)
-    
+
     token = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(32)
     now = time.time()
@@ -56,6 +56,7 @@ HEADERS = {
     "Accept": "application/json",
 }
 
+
 def api_call(path, method="GET", data=None):
     url = f"{API_BASE}{path}"
     req = urllib.request.Request(url, method=method, headers=HEADERS)
@@ -68,6 +69,7 @@ def api_call(path, method="GET", data=None):
         body = err.read().decode("utf-8")
         print(f"[-] HTTP Error {err.code} on {method} {path}: {body}")
         raise
+
 
 # Step 2: Locate target shardulchaulagain.com
 projects = api_call("/projects")["items"]
@@ -111,7 +113,7 @@ scope_payload = {
     "emergency_stop_conditions": ["operator_cancel", "scope_expired", "policy_violation"],
 }
 
-print(f"[+] Updating scope validity window (v{scope_version} -> v{scope_version+1})...")
+print(f"[+] Updating scope validity window (v{scope_version} -> v{scope_version + 1})...")
 updated_target = api_call(
     f"/targets/{target_id}/scope",
     method="PATCH",

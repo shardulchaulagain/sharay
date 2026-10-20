@@ -104,7 +104,9 @@ class TestSectorO1CVEIntelligence(unittest.TestCase):
         ledger = AssessmentCoverageLedger(
             target_url="https://example.com/",
             detected_components=[
-                ObservedComponent("apache", "http_server", "2.4.49", "cpe:2.3:a:apache:http_server:2.4.49", "Server"),
+                ObservedComponent(
+                    "apache", "http_server", "2.4.49", "cpe:2.3:a:apache:http_server:2.4.49", "Server"
+                ),
                 ObservedComponent("php", "php", "8.1.2", "cpe:2.3:a:php:php:8.1.2", "X-Powered-By"),
             ],
         )

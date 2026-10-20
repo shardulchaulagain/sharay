@@ -45,7 +45,9 @@ class OffensivePipelineWiringTest(unittest.TestCase):
 
     def _dest(self) -> Destination:
         base = f"http://127.0.0.1:{self.port}/"
-        return Destination(base, "http", "127.0.0.1", self.port, "/", f"http://127.0.0.1:{self.port}", "127.0.0.1")
+        return Destination(
+            base, "http", "127.0.0.1", self.port, "/", f"http://127.0.0.1:{self.port}", "127.0.0.1"
+        )
 
     def test_engine_wired_fires_and_confirms_with_mitre(self):
         res = scan_comprehensive(

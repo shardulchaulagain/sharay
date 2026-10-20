@@ -33,6 +33,7 @@ def _serve(handler) -> tuple[socketserver.TCPServer, int]:
 class OOBBlindVerifierUnitTest(unittest.TestCase):
     def test_callback_confirms_only_when_received(self):
         with OOBBlindVerifier() as oob:
+
             def ssrf_fetch(base, param, payload):  # simulate a server-side fetch of the OOB URL
                 try:
                     urllib.request.urlopen(payload, timeout=2.0).read()
@@ -45,7 +46,9 @@ class OOBBlindVerifierUnitTest(unittest.TestCase):
             self.assertIn("Out-of-Band", confirmed["title"])
 
             # No fetch -> no callback -> no finding (zero false positives).
-            nothing = oob.probe_param("http://target/", "url", "ssrf", fire_fn=lambda b, p, pl: None, wait_seconds=0.4)
+            nothing = oob.probe_param(
+                "http://target/", "url", "ssrf", fire_fn=lambda b, p, pl: None, wait_seconds=0.4
+            )
             self.assertIsNone(nothing)
 
 
@@ -82,7 +85,13 @@ class OOBPipelineTest(unittest.TestCase):
         srv, port = _serve(handler)
         try:
             dest = Destination(
-                f"http://127.0.0.1:{port}/", "http", "127.0.0.1", port, "/", f"http://127.0.0.1:{port}", "127.0.0.1"
+                f"http://127.0.0.1:{port}/",
+                "http",
+                "127.0.0.1",
+                port,
+                "/",
+                f"http://127.0.0.1:{port}",
+                "127.0.0.1",
             )
             return scan_comprehensive(dest, "127.0.0.1", mode="standard", tools=["crawler"], max_seconds=30)
         finally:
@@ -140,7 +149,11 @@ class _AuthLab(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b"no")
             return
         injected = "'" in q or "SLEEP" in q.upper() or "UNION" in q.upper()
-        body = b"You have an error in your SQL syntax; check the manual" if injected else b"catalog listing ok here"
+        body = (
+            b"You have an error in your SQL syntax; check the manual"
+            if injected
+            else b"catalog listing ok here"
+        )
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -152,7 +165,13 @@ class AuthenticatedReproductionTest(unittest.TestCase):
         srv, port = _serve(_AuthLab)
         try:
             dest = Destination(
-                f"http://127.0.0.1:{port}/", "http", "127.0.0.1", port, "/", f"http://127.0.0.1:{port}", "127.0.0.1"
+                f"http://127.0.0.1:{port}/",
+                "http",
+                "127.0.0.1",
+                port,
+                "/",
+                f"http://127.0.0.1:{port}",
+                "127.0.0.1",
             )
             identity = IdentitySession(
                 name="admin",
@@ -169,7 +188,9 @@ class AuthenticatedReproductionTest(unittest.TestCase):
             res_auth = AuthenticatedReproducer().reproduce_authenticated(
                 dest, "127.0.0.1", identity, base_url=item_url, fuzz_param="id", active_payload="' OR '1'='1"
             )
-            self.assertTrue(res_auth.confirmed, "authenticated reproduction should confirm the auth-gated SQLi")
+            self.assertTrue(
+                res_auth.confirmed, "authenticated reproduction should confirm the auth-gated SQLi"
+            )
 
             # Unauthenticated: the endpoint 401s everything -> no confirmation.
             res_plain = DeterministicReproducer().verify_finding(

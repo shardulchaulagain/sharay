@@ -170,6 +170,13 @@ def active_integrations() -> list[dict]:
     backend = attestation.get("backend", "rootless-container")
     runtime = attestation.get("runtime", "podman")
 
+    try:
+        from services.source_analysis_worker.assess import _gitleaks_binary
+
+        has_gitleaks = _gitleaks_binary() is not None  # cheap glob/env check, no sandbox probe
+    except Exception:
+        has_gitleaks = False
+
     return [
         {
             "id": "safe_http",
@@ -290,16 +297,18 @@ def active_integrations() -> list[dict]:
             "id": "gitleaks",
             "name": "Gitleaks Secret Scanner",
             "version": "8.x",
-            "available": False,
-            "runnable": False,
-            "status": "unavailable",
+            "available": has_gitleaks,
+            "runnable": has_gitleaks,
+            "status": "implemented" if has_gitleaks else "unavailable",
             "supported_categories": ["secrets", "credential_detection"],
-            "scope": "Secret detection engine and SARIF report parser",
+            "scope": "Pinned Gitleaks binary run under the isolation sandbox over an authorized code tree",
             "guidance": (
-                "Binary verified and pinned (update ledger) and the parser is built, but no assessment "
-                "dispatches it yet: source-code analysis has no input surface in the product."
+                "Dispatched by Source analysis (POST /api/v1/source-analysis) under the sandbox with a "
+                "pinned config the scanned tree cannot override; output normalized into findings."
+                if has_gitleaks
+                else "No pinned Gitleaks binary installed; Source analysis falls back to the built-in secret detector."
             ),
-            "limitations": "Operates on a code tree, not an HTTP target; not reachable from the current URL-based assessment.",
+            "limitations": "Operates on a code tree, not an HTTP target. Secret values are redacted in the report.",
         },
         {
             "id": "source_analysis",
@@ -2204,6 +2213,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             provider_state.update(
                 status="failed", reason="AI provider request failed; deterministic analysis was returned."
             )
+
+        # Validate every proposed remediation patch before the UI can mark it deployable.
+        from services.ai_analysis_worker.remediation import RemediationValidator
+
+        for patch in analysis.get("remediation_patches", []):
+            if isinstance(patch, dict) and isinstance(patch.get("diff"), str):
+                patch["validation"] = RemediationValidator.validate_patch(patch["diff"], "diff").to_dict()
 
         audit(
             db,

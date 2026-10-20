@@ -32,17 +32,28 @@ def _fp(*parts: str) -> str:
 
 # --- ffuf: content / path discovery ------------------------------------------------------------
 
-def build_ffuf_argv(url: str, host: str, allow_ip: str, wordlist: str = "/wordlist.txt", rate: int = 40) -> list[str]:
+
+def build_ffuf_argv(
+    url: str, host: str, allow_ip: str, wordlist: str = "/wordlist.txt", rate: int = 40
+) -> list[str]:
     base = url.rstrip("/")
     return [
-        "-u", f"{base}/FUZZ",
-        "-w", wordlist,
-        "-mc", "200,201,204,301,302,307,401,403,405,500",
-        "-rate", str(max(1, min(int(rate), 200))),
-        "-t", "20",
-        "-timeout", "5",
-        "-of", "json",
-        "-o", "/dev/stdout",
+        "-u",
+        f"{base}/FUZZ",
+        "-w",
+        wordlist,
+        "-mc",
+        "200,201,204,301,302,307,401,403,405,500",
+        "-rate",
+        str(max(1, min(int(rate), 200))),
+        "-t",
+        "20",
+        "-timeout",
+        "5",
+        "-of",
+        "json",
+        "-o",
+        "/dev/stdout",
         "-s",
     ]
 
@@ -59,9 +70,12 @@ def parse_ffuf(data: bytes, default_target_url: str = "") -> dict[str, Any]:
             continue
         path = (r.get("input") or {}).get("FUZZ", "")
         url = r.get("url") or f"{default_target_url.rstrip('/')}/{path}"
-        sev = "high" if status in (200, 401, 403) and any(
-            k in str(path).lower() for k in ("admin", "backup", "config", ".git", ".env", "secret")
-        ) else "info"
+        sev = (
+            "high"
+            if status in (200, 401, 403)
+            and any(k in str(path).lower() for k in ("admin", "backup", "config", ".git", ".env", "secret"))
+            else "info"
+        )
         findings.append(
             {
                 "category": "content_discovery",
@@ -80,6 +94,7 @@ def parse_ffuf(data: bytes, default_target_url: str = "") -> dict[str, Any]:
 
 
 # --- dalfox: XSS ------------------------------------------------------------------------------
+
 
 def build_dalfox_argv(url: str) -> list[str]:
     return ["url", url, "--format", "json", "--no-color", "--skip-bav", "--timeout", "5", "--worker", "10"]
@@ -113,7 +128,9 @@ def parse_dalfox(data: bytes, default_target_url: str = "") -> dict[str, Any]:
                 "category": "cross_site_scripting",
                 "severity": sev,
                 "title": f"XSS candidate ({it.get('type', 'reflected')}) via dalfox",
-                "description": f"dalfox flagged a {it.get('type', 'reflected')} XSS: {it.get('evidence') or it.get('message_str', '')}"[:500],
+                "description": f"dalfox flagged a {it.get('type', 'reflected')} XSS: {it.get('evidence') or it.get('message_str', '')}"[
+                    :500
+                ],
                 "remediation": "Context-encode untrusted output and apply a strict CSP.",
                 "affected_url": data_url,
                 "fingerprint": _fp("dalfox", str(data_url), str(it.get("type", ""))),
@@ -121,13 +138,19 @@ def parse_dalfox(data: bytes, default_target_url: str = "") -> dict[str, Any]:
                 "status": "suspected",
                 "cwe_id": "CWE-79",
                 "attributes": {"tool": "dalfox", "type": it.get("type"), "cwe": it.get("cwe")},
-                "poc": {"method": it.get("method", "GET"), "parameter": it.get("param"), "payload": it.get("payload"), "url": data_url},
+                "poc": {
+                    "method": it.get("method", "GET"),
+                    "parameter": it.get("param"),
+                    "payload": it.get("payload"),
+                    "url": data_url,
+                },
             }
         )
     return {"findings": findings}
 
 
 # --- katana: deep crawl (URL discovery, not findings) -----------------------------------------
+
 
 def build_katana_argv(url: str, depth: int = 3) -> list[str]:
     return ["-u", url, "-d", str(max(1, min(int(depth), 5))), "-jc", "-silent", "-jsonl", "-rl", "50"]
@@ -144,7 +167,11 @@ def parse_katana(data: bytes) -> list[str]:
             rec = json.loads(line)
         except ValueError:
             continue
-        u = rec.get("endpoint") or (rec.get("request") or {}).get("endpoint") or (rec.get("request") or {}).get("url")
+        u = (
+            rec.get("endpoint")
+            or (rec.get("request") or {}).get("endpoint")
+            or (rec.get("request") or {}).get("url")
+        )
         if isinstance(u, str) and u not in seen:
             seen.add(u)
             urls.append(u)
@@ -152,6 +179,7 @@ def parse_katana(data: bytes) -> list[str]:
 
 
 # --- interactsh: external OOB collaborator ingestion ------------------------------------------
+
 
 def parse_interactsh(data: bytes) -> list[dict[str, Any]]:
     """Parse interactsh-client -json output into interaction records for the OOB collector."""
@@ -177,6 +205,7 @@ def parse_interactsh(data: bytes) -> list[dict[str, Any]]:
 
 # --- dispatcher --------------------------------------------------------------------------------
 
+
 def run_toolbelt(
     destination: Any,
     allow_ip: str,
@@ -196,30 +225,65 @@ def run_toolbelt(
 
     def _run(tool: str, argv: list[str], extra: dict[str, Any] | None = None):
         try:
-            return run(_IMAGES[tool], argv, allow_ip=allow_ip, allow_port=port, add_host=f"{host}:{allow_ip}",
-                       max_seconds=max_seconds, **(extra or {}))
+            return run(
+                _IMAGES[tool],
+                argv,
+                allow_ip=allow_ip,
+                allow_port=port,
+                add_host=f"{host}:{allow_ip}",
+                max_seconds=max_seconds,
+                **(extra or {}),
+            )
         except Exception as exc:  # unavailable image/runner -> honest skip
-            result["checks"].append({"category": f"toolbelt_{tool}", "status": "skipped", "detail": f"{tool} unavailable ({type(exc).__name__})."})
+            result["checks"].append(
+                {
+                    "category": f"toolbelt_{tool}",
+                    "status": "skipped",
+                    "detail": f"{tool} unavailable ({type(exc).__name__}).",
+                }
+            )
             return None
 
     if "ffuf" in tools:
-        res = _run("ffuf", build_ffuf_argv(url, host, allow_ip), {"mount_volume": wordlist_volume} if wordlist_volume else None)
+        res = _run(
+            "ffuf",
+            build_ffuf_argv(url, host, allow_ip),
+            {"mount_volume": wordlist_volume} if wordlist_volume else None,
+        )
         if res is not None:
             parsed = parse_ffuf(getattr(res, "stdout", b"") or b"", default_target_url=url)
             result["findings"].extend(parsed["findings"])
-            result["checks"].append({"category": "toolbelt_ffuf", "status": "completed", "detail": f"ffuf: {len(parsed['findings'])} path(s)."})
+            result["checks"].append(
+                {
+                    "category": "toolbelt_ffuf",
+                    "status": "completed",
+                    "detail": f"ffuf: {len(parsed['findings'])} path(s).",
+                }
+            )
     if "dalfox" in tools:
         res = _run("dalfox", build_dalfox_argv(url))
         if res is not None:
             parsed = parse_dalfox(getattr(res, "stdout", b"") or b"", default_target_url=url)
             result["findings"].extend(parsed["findings"])
-            result["checks"].append({"category": "toolbelt_dalfox", "status": "completed", "detail": f"dalfox: {len(parsed['findings'])} XSS candidate(s)."})
+            result["checks"].append(
+                {
+                    "category": "toolbelt_dalfox",
+                    "status": "completed",
+                    "detail": f"dalfox: {len(parsed['findings'])} XSS candidate(s).",
+                }
+            )
     if "katana" in tools:
         res = _run("katana", build_katana_argv(url))
         if res is not None:
             urls = parse_katana(getattr(res, "stdout", b"") or b"")
             result["urls"].extend(urls)
-            result["checks"].append({"category": "toolbelt_katana", "status": "completed", "detail": f"katana: {len(urls)} URL(s)."})
+            result["checks"].append(
+                {
+                    "category": "toolbelt_katana",
+                    "status": "completed",
+                    "detail": f"katana: {len(urls)} URL(s).",
+                }
+            )
     return result
 
 

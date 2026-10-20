@@ -76,7 +76,9 @@ class CveMatchPipelineWiringTest(unittest.TestCase):
 
     def test_pipeline_flags_cve_from_observed_server_version(self):
         base = f"http://127.0.0.1:{self.port}/"
-        dest = Destination(base, "http", "127.0.0.1", self.port, "/", f"http://127.0.0.1:{self.port}", "127.0.0.1")
+        dest = Destination(
+            base, "http", "127.0.0.1", self.port, "/", f"http://127.0.0.1:{self.port}", "127.0.0.1"
+        )
         res = scan_comprehensive(dest, "127.0.0.1", mode="standard", tools=["crawler"], max_seconds=30)
 
         checks = [c for c in res["checks"] if c.get("category") == "known_cve"]

@@ -318,9 +318,7 @@ class AssessmentCoverageLedger:
         tested_count = sum(
             1 for cve, res in self.test_results.items() if res.get("status") != "not_evaluated"
         )
-        confirmed_count = sum(
-            1 for cve, res in self.test_results.items() if res.get("status") == "confirmed"
-        )
+        confirmed_count = sum(1 for cve, res in self.test_results.items() if res.get("status") == "confirmed")
 
         coverage_pct = (tested_count / total_applicable * 100.0) if total_applicable > 0 else 100.0
 

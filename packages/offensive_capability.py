@@ -304,7 +304,9 @@ class OOBBlindVerifier:
             # Carry structured OOB evidence in attributes and keep poc as a string so downstream
             # reproducer stages do not re-process (and wrongly demote) an OOB-confirmed finding.
             finding["attributes"] = {"oob": finding.get("poc"), "parameter": param}
-            finding["poc"] = f"Out-of-band {probe_type.upper()} callback received for {base_url} param '{param}'."
+            finding["poc"] = (
+                f"Out-of-band {probe_type.upper()} callback received for {base_url} param '{param}'."
+            )
             finding["affected_url"] = base_url
         return finding
 
@@ -425,7 +427,9 @@ class TargetAnomalyFuzzer:
             "error_baseline": err_present,
         }
 
-    def _candidate(self, base_url: str, param: str, label: str, reason: str, value: str, severity: str) -> dict[str, Any]:
+    def _candidate(
+        self, base_url: str, param: str, label: str, reason: str, value: str, severity: str
+    ) -> dict[str, Any]:
         fp = hashlib.sha256(f"anomaly:{base_url}:{param}:{label}:{reason}".encode()).hexdigest()
         return {
             "category": "anomaly_research_candidate",
@@ -454,11 +458,26 @@ class TargetAnomalyFuzzer:
             except Exception:
                 continue
             if status >= 500 and not any(s >= 500 for s in base["statuses"]):
-                candidates.append(self._candidate(base_url, param, label, f"unhandled HTTP {status}", value, "medium"))
+                candidates.append(
+                    self._candidate(base_url, param, label, f"unhandled HTTP {status}", value, "medium")
+                )
             elif any(sig in body for sig in _ERROR_SIGNATURES) and not base["error_baseline"]:
-                candidates.append(self._candidate(base_url, param, label, "error/stack-trace signature surfaced", value, "medium"))
+                candidates.append(
+                    self._candidate(
+                        base_url, param, label, "error/stack-trace signature surfaced", value, "medium"
+                    )
+                )
             elif elapsed - base["median_lat"] >= 5000.0:
-                candidates.append(self._candidate(base_url, param, label, f"timing anomaly (+{elapsed - base['median_lat']:.0f}ms)", value, "low"))
+                candidates.append(
+                    self._candidate(
+                        base_url,
+                        param,
+                        label,
+                        f"timing anomaly (+{elapsed - base['median_lat']:.0f}ms)",
+                        value,
+                        "low",
+                    )
+                )
         return candidates
 
     def differential_parser_confusion(self, base_url: str, param: str) -> list[dict[str, Any]]:
@@ -472,7 +491,16 @@ class TargetAnomalyFuzzer:
                 continue
             groups.add((status, len(body) // 32))  # bucketed length
         if len(groups) > 1:
-            return [self._candidate(base_url, param, "parser_confusion", f"{len(groups)} divergent responses to equivalent encodings", "/x/../y", "medium")]
+            return [
+                self._candidate(
+                    base_url,
+                    param,
+                    "parser_confusion",
+                    f"{len(groups)} divergent responses to equivalent encodings",
+                    "/x/../y",
+                    "medium",
+                )
+            ]
         return []
 
     def scan_for_anomalies(self, base_url: str, param: str) -> list[dict[str, Any]]:

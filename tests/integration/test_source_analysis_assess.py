@@ -1,5 +1,6 @@
 """Source-analysis engine: path confinement (the trust boundary) and native detection."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -59,8 +60,21 @@ class ConfinementTests(unittest.TestCase):
             resolve_within(".", self.root / "does-not-exist")
 
 
-class AnalysisTests(unittest.TestCase):
-    def test_native_analysis_finds_a_secret_and_lists_a_dependency_without_naming_an_external_tool(self):
+class NativeAnalysisTests(unittest.TestCase):
+    """Force the built-in detector (Gitleaks unavailable) so the fallback path is deterministic."""
+
+    def setUp(self):
+        self._prev = os.environ.get("SHARAY_GITLEAKS_BIN")
+        os.environ["SHARAY_GITLEAKS_BIN"] = "/nonexistent/gitleaks"
+        self.addCleanup(
+            lambda: (
+                os.environ.__setitem__("SHARAY_GITLEAKS_BIN", self._prev)
+                if self._prev is not None
+                else os.environ.pop("SHARAY_GITLEAKS_BIN", None)
+            )
+        )
+
+    def test_built_in_analysis_finds_a_secret_and_lists_a_dependency(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
             # A synthetic AWS key shape (two halves so this test file holds no contiguous token).
@@ -72,10 +86,14 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(finding["category"], "secret_exposure")
         self.assertEqual(finding["status"], "suspected")
         self.assertTrue(finding["fingerprint"].startswith("sharay_secret:"))
-        self.assertNotIn("gitleaks", finding["description"].lower())  # the native detector ran, not Gitleaks
+        self.assertTrue(finding["affected_url"].startswith("file://"))
         self.assertTrue(any(p["name"] == "requests" for p in result["packages"]))
         categories = {c["category"] for c in result["checks"]}
-        self.assertEqual(categories, {"secret_detection", "dependency_inventory"})
+        self.assertIn("secret_detection", categories)
+        self.assertIn("dependency_inventory", categories)
+        gitleaks_check = next(c for c in result["checks"] if c["category"] == "gitleaks")
+        self.assertEqual(gitleaks_check["status"], "skipped")
+        self.assertIn("built-in", result["basis"])
 
     def test_a_clean_tree_yields_no_findings_but_still_reports_checks(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -83,8 +101,41 @@ class AnalysisTests(unittest.TestCase):
             (root / "main.py").write_text("print('nothing secret here')\n")
             result = analyze_source_tree(root)
         self.assertEqual(result["findings"], [])
-        self.assertEqual(len(result["checks"]), 2)
-        self.assertIn("no scanner binary ran", result["basis"])
+        self.assertIn("dependency_inventory", {c["category"] for c in result["checks"]})
+
+
+class GitleaksPathTests(unittest.TestCase):
+    """When the pinned Gitleaks binary and the sandbox are present, the real scanner runs."""
+
+    def setUp(self):
+        binary = Path(__file__).resolve().parents[2] / "tools" / "bin"
+        installs = sorted(binary.glob("gitleaks-*/gitleaks"))
+        if not installs:
+            self.skipTest("No pinned Gitleaks binary installed.")
+        try:
+            from services.scanner_worker import attest
+
+            if not attest().get("available"):
+                self.skipTest("Isolation sandbox unavailable here.")
+        except Exception:
+            self.skipTest("Isolation sandbox unavailable here.")
+        os.environ.pop("SHARAY_GITLEAKS_BIN", None)
+
+    def test_gitleaks_runs_and_normalizes_into_the_product_finding_shape(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            (root / "config.py").write_text('AWS_KEY = "AKIA' + "IOSFODNN7REALKEY" + '"\n')
+            result = analyze_source_tree(root)
+        gitleaks_check = next(c for c in result["checks"] if c["category"] == "gitleaks")
+        self.assertEqual(gitleaks_check["status"], "completed", gitleaks_check["detail"])
+        self.assertIn("Gitleaks", result["basis"])
+        self.assertTrue(result["findings"], "Gitleaks should report the synthetic AWS key")
+        finding = result["findings"][0]
+        self.assertEqual(finding["category"], "secret_exposure")
+        self.assertTrue(finding["fingerprint"].startswith("gitleaks:"))
+        self.assertTrue(finding["affected_url"].startswith("file://"))
+        # The redacted report never carries the raw secret value.
+        self.assertNotIn("IOSFODNN7REALKEY", str(result))
 
 
 if __name__ == "__main__":

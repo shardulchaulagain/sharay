@@ -11,7 +11,7 @@ Verifies:
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from packages.scanner_adapters.integrations.msf_rpc import (
     BenignSessionExecutionResult,
@@ -42,9 +42,7 @@ class TestSectorO2MetasploitFullCapacity(unittest.TestCase):
 
         token = self.client.login()
         self.assertEqual(token, "TEMP_MSF_RPC_AUTH_TOKEN_12345")
-        self.mock_transport.send_rpc.assert_called_with(
-            "auth.login", ["msf", "test_password"]
-        )
+        self.mock_transport.send_rpc.assert_called_with("auth.login", ["msf", "test_password"])
 
     def test_dynamic_module_tree_search(self):
         """O2.2: Searches dynamic Metasploit module tree by CVE and service keywords."""
@@ -161,9 +159,7 @@ class TestSectorO2FailClosedAndRealTransport(unittest.TestCase):
             client.search_modules("apache")
         with self.assertRaises(MsfRpcUnavailable):
             client.collect_read_only_post_evidence(1)
-        consent = OperatorConsentReceipt(
-            operator_id="o", target_url="u", approved_module="exploit/x"
-        )
+        consent = OperatorConsentReceipt(operator_id="o", target_url="u", approved_module="exploit/x")
         # Consent is present and matches, so the only reason to refuse is the missing transport —
         # i.e. it fails closed instead of returning a fabricated uid=33(www-data) session.
         with self.assertRaises(MsfRpcUnavailable):
@@ -285,7 +281,9 @@ class TestSectorO2ConsoleSearchWiring(unittest.TestCase):
             def do_POST(self):
                 n = int(self.headers.get("Content-Length", 0))
                 req = json.loads(self.rfile.read(n))
-                out = json.dumps({"jsonrpc": "2.0", "result": resp.get(req["method"], {}), "id": req["id"]}).encode()
+                out = json.dumps(
+                    {"jsonrpc": "2.0", "result": resp.get(req["method"], {}), "id": req["id"]}
+                ).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(out)))
                 self.end_headers()

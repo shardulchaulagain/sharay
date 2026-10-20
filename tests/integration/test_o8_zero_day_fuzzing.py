@@ -82,7 +82,13 @@ class ZeroDayPipelineTest(unittest.TestCase):
         srv, port = _serve(_AnomalyLab)
         try:
             dest = Destination(
-                f"http://127.0.0.1:{port}/", "http", "127.0.0.1", port, "/", f"http://127.0.0.1:{port}", "127.0.0.1"
+                f"http://127.0.0.1:{port}/",
+                "http",
+                "127.0.0.1",
+                port,
+                "/",
+                f"http://127.0.0.1:{port}",
+                "127.0.0.1",
             )
             res = scan_comprehensive(dest, "127.0.0.1", mode="adaptive", tools=["crawler"], max_seconds=40)
             self.assertTrue([c for c in res["checks"] if c.get("category") == "zero_day_research"])

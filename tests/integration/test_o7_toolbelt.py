@@ -58,7 +58,9 @@ class ArgvAndParseTest(unittest.TestCase):
         cmd = build_safe_sqlmap_command("http://t/?id=1", "id")
         self.assertIsInstance(cmd, list)
         self.assertTrue(any("http://t/?id=1" in str(c) for c in cmd))
-        self.assertFalse(any("--os-shell" in str(c) or "--os-pwn" in str(c) for c in cmd))  # no destructive flags
+        self.assertFalse(
+            any("--os-shell" in str(c) or "--os-pwn" in str(c) for c in cmd)
+        )  # no destructive flags
 
 
 class _Res:
@@ -68,10 +70,14 @@ class _Res:
 
 class DispatcherTest(unittest.TestCase):
     def _dest(self):
-        return Destination("http://t.example/", "http", "t.example", 80, "/", "http://t.example", "93.184.216.34")
+        return Destination(
+            "http://t.example/", "http", "t.example", 80, "/", "http://t.example", "93.184.216.34"
+        )
 
     def test_dispatcher_runs_tools_and_normalizes(self):
-        ffuf = b'{"results":[{"input":{"FUZZ":"admin"},"status":200,"length":1,"url":"http://t.example/admin"}]}'
+        ffuf = (
+            b'{"results":[{"input":{"FUZZ":"admin"},"status":200,"length":1,"url":"http://t.example/admin"}]}'
+        )
         dalfox = b'[{"type":"V","severity":"high","data":"http://t.example/?q=<script>","param":"q"}]'
         katana = b'{"endpoint":"http://t.example/x"}'
 

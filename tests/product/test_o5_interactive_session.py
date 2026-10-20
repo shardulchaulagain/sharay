@@ -69,7 +69,9 @@ class InteractiveSessionDriverTest(unittest.TestCase):
             consent = OperatorConsentReceipt(
                 operator_id="op", target_url="http://t/", approved_module="exploit/multi/http/x"
             )
-            with MetasploitInteractiveSession.open(client, "exploit/multi/http/x", {"RHOSTS": "127.0.0.1"}, consent) as sess:
+            with MetasploitInteractiveSession.open(
+                client, "exploit/multi/http/x", {"RHOSTS": "127.0.0.1"}, consent
+            ) as sess:
                 self.assertEqual(sess.session_id, "1")
                 self.assertIn("uid=0(root)", sess.run("id"))
                 self.assertIn("Linux target", sess.run("uname -a"))

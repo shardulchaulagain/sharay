@@ -33,9 +33,13 @@ class SurfaceScaleTest(unittest.TestCase):
         self.assertLess(ranked.index("http://t/admin/login"), ranked.index("http://t/static/logo.png"))
 
     def test_sitemap_and_robots_ingestion(self):
-        locs = s.parse_sitemap(b"<urlset><url><loc>http://t/a</loc></url><url><loc>http://t/b</loc></url></urlset>")
+        locs = s.parse_sitemap(
+            b"<urlset><url><loc>http://t/a</loc></url><url><loc>http://t/b</loc></url></urlset>"
+        )
         self.assertEqual(locs, ["http://t/a", "http://t/b"])
-        robots = s.parse_robots(b"User-agent: *\nDisallow: /admin\nAllow: /public\nSitemap: http://t/sitemap.xml")
+        robots = s.parse_robots(
+            b"User-agent: *\nDisallow: /admin\nAllow: /public\nSitemap: http://t/sitemap.xml"
+        )
         self.assertIn("/admin", robots["disallow"])
         self.assertIn("/public", robots["allow"])
         self.assertIn("http://t/sitemap.xml", robots["sitemaps"])

@@ -65,8 +65,7 @@ class BenignSessionExecutionResult:
 
 
 class RPCTransport(Protocol):
-    def send_rpc(self, method: str, params: list[Any]) -> dict[str, Any]:
-        ...
+    def send_rpc(self, method: str, params: list[Any]) -> dict[str, Any]: ...
 
 
 class HTTPJsonRPCTransport:
@@ -195,7 +194,9 @@ class MetasploitRPCClient:
             )
         # 2. Require a real msfrpcd connection — never fabricate a session.
         if self.transport is None:
-            raise MsfRpcUnavailable("No msfrpcd transport configured; refusing to report an unverified session.")
+            raise MsfRpcUnavailable(
+                "No msfrpcd transport configured; refusing to report an unverified session."
+            )
 
         t_start = time.time()
         check_passed = False
@@ -231,9 +232,7 @@ class MetasploitRPCClient:
             t_end = time.time()
             duration = t_end - t_start
 
-        receipt_canonical = (
-            f"{consent.consent_hash}:{module_name}:{session_opened}:{proof_evidence}:{clean_teardown}:{duration}"
-        )
+        receipt_canonical = f"{consent.consent_hash}:{module_name}:{session_opened}:{proof_evidence}:{clean_teardown}:{duration}"
         receipt_hash = hashlib.sha256(receipt_canonical.encode()).hexdigest()
 
         return BenignSessionExecutionResult(
@@ -248,7 +247,9 @@ class MetasploitRPCClient:
     def collect_read_only_post_evidence(self, session_id: int) -> dict[str, str]:
         """Collect read-only post-exploitation system metadata from a real session. Fails closed."""
         if self.transport is None:
-            raise MsfRpcUnavailable("No msfrpcd transport configured; cannot collect post-exploitation evidence.")
+            raise MsfRpcUnavailable(
+                "No msfrpcd transport configured; cannot collect post-exploitation evidence."
+            )
         k_res = self.transport.send_rpc("session.shell_write", [session_id, "uname -a\n"])
         os_res = self.transport.send_rpc("session.shell_write", [session_id, "cat /etc/os-release\n"])
         self.transport.send_rpc("session.stop", [session_id])

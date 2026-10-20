@@ -66,28 +66,76 @@ class Advisory:
 
 
 class AdvisorySource(Protocol):
-    def for_product(self, product: str) -> list[Advisory]:
-        ...
+    def for_product(self, product: str) -> list[Advisory]: ...
 
 
 # A small, curated set of real, header-observable web-stack CVEs with correct affected ranges.
 # This is honest ground truth, not an exhaustive feed; a live OSV/NVD source plugs in via the
 # AdvisorySource protocol for full coverage.
 BUNDLED_ADVISORIES: list[Advisory] = [
-    Advisory("CVE-2021-41773", "apache_http_server", "2.4.49", "2.4.50", "critical", "CWE-22",
-             "Apache HTTP Server path traversal and RCE"),
-    Advisory("CVE-2021-42013", "apache_http_server", "2.4.49", "2.4.51", "critical", "CWE-22",
-             "Apache HTTP Server path traversal/RCE (incomplete fix for CVE-2021-41773)"),
-    Advisory("CVE-2019-20372", "nginx", "0.7.12", "1.17.7", "medium", "CWE-444",
-             "nginx error_page request smuggling"),
-    Advisory("CVE-2022-3786", "openssl", "3.0.0", "3.0.7", "high", "CWE-787",
-             "OpenSSL X.509 punycode buffer overflow"),
-    Advisory("CVE-2024-4577", "php", "8.1.0", "8.1.29", "critical", "CWE-78",
-             "PHP-CGI Windows argument injection RCE"),
-    Advisory("CVE-2024-4577", "php", "8.2.0", "8.2.20", "critical", "CWE-78",
-             "PHP-CGI Windows argument injection RCE"),
-    Advisory("CVE-2024-4577", "php", "8.3.0", "8.3.8", "critical", "CWE-78",
-             "PHP-CGI Windows argument injection RCE"),
+    Advisory(
+        "CVE-2021-41773",
+        "apache_http_server",
+        "2.4.49",
+        "2.4.50",
+        "critical",
+        "CWE-22",
+        "Apache HTTP Server path traversal and RCE",
+    ),
+    Advisory(
+        "CVE-2021-42013",
+        "apache_http_server",
+        "2.4.49",
+        "2.4.51",
+        "critical",
+        "CWE-22",
+        "Apache HTTP Server path traversal/RCE (incomplete fix for CVE-2021-41773)",
+    ),
+    Advisory(
+        "CVE-2019-20372",
+        "nginx",
+        "0.7.12",
+        "1.17.7",
+        "medium",
+        "CWE-444",
+        "nginx error_page request smuggling",
+    ),
+    Advisory(
+        "CVE-2022-3786",
+        "openssl",
+        "3.0.0",
+        "3.0.7",
+        "high",
+        "CWE-787",
+        "OpenSSL X.509 punycode buffer overflow",
+    ),
+    Advisory(
+        "CVE-2024-4577",
+        "php",
+        "8.1.0",
+        "8.1.29",
+        "critical",
+        "CWE-78",
+        "PHP-CGI Windows argument injection RCE",
+    ),
+    Advisory(
+        "CVE-2024-4577",
+        "php",
+        "8.2.0",
+        "8.2.20",
+        "critical",
+        "CWE-78",
+        "PHP-CGI Windows argument injection RCE",
+    ),
+    Advisory(
+        "CVE-2024-4577",
+        "php",
+        "8.3.0",
+        "8.3.8",
+        "critical",
+        "CWE-78",
+        "PHP-CGI Windows argument injection RCE",
+    ),
 ]
 
 

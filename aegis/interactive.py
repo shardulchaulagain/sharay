@@ -252,9 +252,7 @@ class AttributedInputEvent:
 class MultiOperatorSessionCoordinator:
     """Coordinates collaborative interactive operator sessions with presence and attributed input."""
 
-    def __init__(
-        self, session_id: str, target_origin: str, hmac_secret: str | None = None
-    ) -> None:
+    def __init__(self, session_id: str, target_origin: str, hmac_secret: str | None = None) -> None:
         self.session_id = session_id
         self.target_origin = target_origin
         # Per-session random secret by default (never a committed constant), so attributed-input
