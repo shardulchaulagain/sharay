@@ -2589,6 +2589,34 @@ def scan_comprehensive(
             }
         )
 
+    # Stage 8b: Specialized tool belt (ffuf / dalfox / katana) over enforced egress (Sector O7).
+    toolbelt_tools = [t for t in ("ffuf", "dalfox", "katana") if t in enabled_tools]
+    if mode != "passive" and toolbelt_tools and allow_ip not in ("127.0.0.1", "::1", "localhost") and runner is not None:
+        try:
+            from packages.scanner_adapters.integrations import toolbelt
+
+            elapsed = time.monotonic() - started
+            tb_timeout = min(max(20.0, max_seconds - elapsed - 5.0), 300.0)
+            tb = toolbelt.run_toolbelt(destination, allow_ip, toolbelt_tools, run=runner, max_seconds=tb_timeout)
+            result["findings"].extend(tb["findings"])
+            result["checks"].extend(tb["checks"])
+            if tb["urls"]:
+                result["observations"].append(
+                    {"kind": "toolbelt_urls", "category": "discovery", "urls_count": len(tb["urls"])}
+                )
+        except Exception as exc:
+            result["checks"].append(
+                {"category": "toolbelt", "status": "completed", "detail": f"Tool belt note: {type(exc).__name__}."}
+            )
+    elif toolbelt_tools:
+        result["checks"].append(
+            {
+                "category": "toolbelt",
+                "status": "skipped",
+                "detail": "Tool belt runs against live targets over enforced egress; skipped for loopback/passive or when no runner is configured.",
+            }
+        )
+
     # Stage 9: OWASP ZAP Web Security Scanner
     if mode != "passive" and "zap" in enabled_tools:
         if allow_ip in ("127.0.0.1", "::1", "localhost"):

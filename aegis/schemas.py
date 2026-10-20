@@ -1,6 +1,6 @@
 """Versioned API input contracts."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -80,8 +80,11 @@ class ScanConfig(Input):
             "auth_matrix",
             "payload_forge",
             "reproducer",
+            "ffuf",
+            "dalfox",
+            "katana",
         ]
-    ] = Field(default_factory=list, max_length=15)
+    ] = Field(default_factory=list, max_length=18)
 
     @field_validator("severities")
     @classmethod
@@ -167,3 +170,49 @@ class ExploitGateConfirmation(Input):
     target_url: str
     auto_proceed: bool = False
     operator_confirmed: bool = Field(default=False, strict=True)
+
+
+class SessionCollaborateJoinInput(Input):
+    as_primary: bool = False
+    color_hex: str = Field(default="#3b82f6", max_length=16)
+
+
+class SessionCollaborateTransferInput(Input):
+    target_operator_id: str
+    reason: str = Field(default="voluntary_handoff", max_length=512)
+
+
+class SessionCollaborateTakeoverInput(Input):
+    justification: str = Field(min_length=3, max_length=512)
+
+
+class SessionCopilotInput(Input):
+    partial_cmd: str | None = Field(default=None, max_length=2048)
+    last_output: str | None = Field(default=None, max_length=16384)
+    detected_vuln_classes: list[str] | None = None
+
+
+class BulkTriageInput(Input):
+    finding_ids: list[str] = Field(min_length=1)
+    status: str = Field(pattern="^(OPEN|IN_REVIEW|CONFIRMED|RESOLVED|FALSE_POSITIVE)$")
+    justification: str = Field(default="Bulk triage update", max_length=1000)
+
+
+class SavedViewInput(Input):
+    name: str = Field(min_length=1, max_length=128)
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class OnboardingAdvanceInput(Input):
+    step: str = Field(min_length=1, max_length=64)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateCheckInput(Input):
+    manifest_json: str = Field(min_length=2)
+
+
+class UpdateApplyInput(Input):
+    binary_bytes_b64: str = Field(min_length=1)
+    manifest: dict[str, Any]
+    target_install_path: str = Field(min_length=1)
