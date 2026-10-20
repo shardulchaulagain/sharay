@@ -23,7 +23,7 @@ weak on all four. This document is the path.
 Supervised build-out on branch `feat/offensive-o3-payload-engine`. Each sector was first **verified**
 (most agent-pre-built modules were scaffold — failing/absent tests, unwired; O2 even fabricated exploit
 sessions), then made real, **wired into the live pipeline**, and proven with reproducible tests. Full
-suite: **980 passed, 0 failed**. Seven of ten offensive sectors shipped.
+suite: **988 passed, 0 failed**. Eight of ten offensive sectors shipped (only O9 scale and O10 QA remain).
 
 | Sector | Status | Commit | Evidence |
 | --- | --- | --- | --- |
@@ -34,7 +34,7 @@ suite: **980 passed, 0 failed**. Seven of ten offensive sectors shipped.
 | O6 Stateful reproduction | ✅ DONE | `71e530e` | Live OOB blind-SSRF via real callback (no FP); authenticated reproduction reaches an auth-gated SQLi |
 | O8 0-day discovery | ✅ DONE | `bf7f07c` | Anomaly/differential fuzzing → `needs_triage` research candidates, never auto-confirmed; defensive parser fuzzer verified |
 | O5 Real console | ✅ DONE | `c4e0c67` | Persistent-session infra verified; added an interactive MSF session driver (one session, many commands) + per-run console secret |
-| O7 Tool belt | ⏳ TODO | — | Integrate sqlmap/ffuf/dalfox/katana/interactsh/semgrep/etc. |
+| O7 Tool belt | ✅ DONE | `1432c5c` | ffuf/dalfox/katana adapters + interactsh ingestion over the egress sandbox; sqlmap/semgrep verified; dispatcher skips unavailable tools honestly |
 | O9 Scale | ⏳ TODO | — | Large-surface crawl, triage, resumable, distributed |
 | O10 Offensive QA | ⏳ TODO | — | Vulnerable range + exploitation benchmark |
 
@@ -255,7 +255,7 @@ This is the heart of what you said is missing.
 - Done when: reproduction confirms authenticated, JS-driven, blind, and multi-step findings on a real app,
   not just a reflected GET parameter.
 
-### Sector O7 — Tools to add (the specialized belt)
+### Sector O7 — Tools to add (the specialized belt) — ✅ DONE (`1432c5c`)
 
 Orchestrate proven tools in the egress-locked sandbox instead of reimplementing thin versions. Each runs
 containerized, pinned, scope-bounded, output-parsed into the Finding contract and reproducer-verified.
