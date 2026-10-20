@@ -1758,7 +1758,7 @@ def scan_comprehensive(
                 destination,
                 allow_ip,
                 max_depth=depth,
-                max_pages=30 if mode == "aggressive" else 20,
+                max_pages=100 if mode == "aggressive" else 20,
                 timeout=3.0,
             )
             discovered_endpoints = crawl_res.get("endpoints", [])
@@ -1998,6 +1998,18 @@ def scan_comprehensive(
                     "detail": f"Schema discovery probe note: {type(exc).__name__}.",
                 }
             )
+
+    # Sector O9: dedupe the discovered surface to route templates and prioritize it so the bounded
+    # active stages below spend their budget on high-value endpoints first, not an arbitrary slice.
+    try:
+        from packages.scanner_adapters.integrations import surface
+
+        if discovered_endpoints:
+            discovered_endpoints[:] = surface.prioritize_surface(discovered_endpoints)
+        if discovered_urls:
+            discovered_urls[:] = surface.prioritize_surface(discovered_urls)
+    except Exception:
+        pass
 
     # Stage 6: Target Intelligence & Adaptive Strategy Synthesis
     tailored_tags = tags

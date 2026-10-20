@@ -22,7 +22,7 @@ from packages.security_policies import Destination
 
 _MAX_PAGE_BYTES = 512 * 1024  # 512 KB per page
 _MAX_DEPTH = 5
-_MAX_PAGES_CAP = 100
+_MAX_PAGES_CAP = 300  # large-surface ceiling for authorized big-site scopes (Sector O9)
 
 _SENSITIVE_PROBES = [
     ("/robots.txt", "robots"),
@@ -69,13 +69,19 @@ class _HTMLStructureExtractor(HTMLParser):
         self.links: set[str] = set()
         self.scripts: set[str] = set()
         self.forms: list[dict[str, Any]] = []
+        self.csrf_tokens: dict[str, str] = {}
         self._current_form: dict[str, Any] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_dict = {k.lower(): (v or "").strip() for k, v in attrs}
         tag = tag.lower()
 
-        if tag == "a":
+        if tag == "meta" and "name" in attr_dict and "content" in attr_dict:
+            mname = attr_dict["name"].lower()
+            if any(k in mname for k in ("csrf", "token", "xsrf")):
+                self.csrf_tokens[mname] = attr_dict["content"]
+
+        elif tag == "a":
             if "href" in attr_dict:
                 href = attr_dict["href"]
                 if href and not href.startswith(("javascript:", "mailto:", "tel:", "#")):
@@ -83,7 +89,11 @@ class _HTMLStructureExtractor(HTMLParser):
                     self.links.add(full_url)
             onclick = attr_dict.get("onclick", "")
             if onclick:
-                for match in re.findall(r"""(?:popUp|window\.open|location\.href\s*=)\s*\(\s*['"]([^'"]+)['"]""", onclick, re.IGNORECASE):
+                for match in re.findall(
+                    r"""(?:popUp|window\.open|location\.href\s*=)\s*\(\s*['"]([^'"]+)['"]""",
+                    onclick,
+                    re.IGNORECASE,
+                ):
                     self.links.add(urljoin(self.base_url, match))
 
         elif tag == "script" and "src" in attr_dict:
@@ -105,8 +115,13 @@ class _HTMLStructureExtractor(HTMLParser):
         elif tag in ("input", "textarea", "select") and self._current_form is not None:
             name = attr_dict.get("name", "")
             input_type = attr_dict.get("type", "text").lower()
+            val = attr_dict.get("value", "")
             if name:
-                self._current_form["inputs"].append({"name": name, "type": input_type})
+                self._current_form["inputs"].append({"name": name, "type": input_type, "value": val})
+                if any(
+                    k in name.lower() for k in ("csrf", "token", "xsrf", "authenticity_token", "user_token")
+                ):
+                    self.csrf_tokens[name] = val
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() == "form":
@@ -136,8 +151,10 @@ def _fetch_page(
     allow_ip: str,
     is_https: bool,
     timeout: float = 5.0,
+    session_cookies: dict[str, str] | None = None,
+    auth_headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], str]:
-    """Fetch a single page pinned to allow_ip with TLS and redirect boundaries."""
+    """Fetch a single page pinned to allow_ip with TLS, cookie jar, and redirect boundaries."""
     parsed = urlsplit(url)
     path = parsed.path or "/"
     if parsed.query:
@@ -149,9 +166,16 @@ def _fetch_page(
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Connection": "close",
     }
+    if auth_headers:
+        headers.update(auth_headers)
+
+    cookie_dict = dict(session_cookies or {})
     if "vulnerabilities" in url or "dvwa" in target_host.lower() or target_port == 4280:
         sec = os.environ.get("SHARAY_DVWA_SECURITY", os.environ.get("SHARAY_LAB_SECURITY_LEVEL", "high"))
-        headers["Cookie"] = f"security={sec}"
+        cookie_dict.setdefault("security", sec)
+
+    if cookie_dict:
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookie_dict.items())
 
     conn: http.client.HTTPConnection | http.client.HTTPSConnection
     if is_https:
@@ -170,6 +194,16 @@ def _fetch_page(
         resp = conn.getresponse()
         status = resp.status
         resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+
+        # Maintain session cookies across requests
+        if session_cookies is not None:
+            for k, v in resp.getheaders():
+                if k.lower() == "set-cookie":
+                    cookie_part = v.split(";")[0]
+                    if "=" in cookie_part:
+                        cname, cval = cookie_part.split("=", 1)
+                        session_cookies[cname.strip()] = cval.strip()
+
         body_bytes = resp.read(_MAX_PAGE_BYTES)
         body = body_bytes.decode("utf-8", errors="replace")
         return status, resp_headers, body
@@ -362,11 +396,17 @@ def crawl(
     max_depth: int = 2,
     max_pages: int = 30,
     timeout: float = 5.0,
+    cookies: dict[str, str] | None = None,
+    auth_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Recursively crawl the authorized target within strict depth and page boundaries,
-    integrating robots.txt, sitemap.xml, and sensitive file checks."""
+    maintaining session cookies and extracting CSRF tokens (Sector 2.4)."""
     depth_limit = min(max(1, max_depth), _MAX_DEPTH)
     page_limit = min(max(1, max_pages), _MAX_PAGES_CAP)
+
+    session_cookies: dict[str, str] = dict(cookies or {})
+    active_auth_headers: dict[str, str] = dict(auth_headers or {})
+    all_csrf_tokens: dict[str, str] = {}
 
     target_host = destination.host
     target_port = destination.port
@@ -506,12 +546,23 @@ def crawl(
                 allow_ip,
                 is_https,
                 timeout=timeout,
+                session_cookies=session_cookies,
+                auth_headers=active_auth_headers,
             )
         except Exception as exc:
             pages_crawled.append({"url": clean_url, "status": 0, "error": type(exc).__name__})
             continue
 
         pages_crawled.append({"url": clean_url, "status": status, "depth": depth})
+
+        # Update session cookies from response headers
+        set_cookie = headers.get("set-cookie")
+        if set_cookie:
+            for part in set_cookie.split(","):
+                cookie_seg = part.split(";")[0].strip()
+                if "=" in cookie_seg:
+                    cname, cval = cookie_seg.split("=", 1)
+                    session_cookies[cname.strip()] = cval.strip()
 
         content_type = headers.get("content-type", "")
         if "html" not in content_type and "xml" not in content_type and not body.strip().startswith("<"):
@@ -520,6 +571,7 @@ def crawl(
         extractor = _HTMLStructureExtractor(clean_url)
         try:
             extractor.feed(body)
+            all_csrf_tokens.update(extractor.csrf_tokens)
         except Exception:
             pass
 
@@ -586,6 +638,9 @@ def crawl(
         "exposed_sensitive_files": exposed_files,
         "schema_coverage": schema_coverage_report,
         "pages": pages_crawled,
+        "session_cookies": session_cookies,
+        "csrf_tokens": all_csrf_tokens,
+        "authenticated": bool(session_cookies or active_auth_headers),
     }
 
 
