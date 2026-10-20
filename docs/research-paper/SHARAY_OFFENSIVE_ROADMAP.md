@@ -23,7 +23,7 @@ weak on all four. This document is the path.
 Supervised build-out on branch `feat/offensive-o3-payload-engine`. Each sector was first **verified**
 (most agent-pre-built modules were scaffold — failing/absent tests, unwired; O2 even fabricated exploit
 sessions), then made real, **wired into the live pipeline**, and proven with reproducible tests. Full
-suite: **978 passed, 0 failed**.
+suite: **980 passed, 0 failed**. Seven of ten offensive sectors shipped.
 
 | Sector | Status | Commit | Evidence |
 | --- | --- | --- | --- |
@@ -33,7 +33,7 @@ suite: **978 passed, 0 failed**.
 | O1 Version→CVE | ✅ DONE | `ec7c333` | Grounded fingerprint→CVE (patched/bare banners flag nothing); Apache 2.4.49 → CVE-2021-41773 end-to-end |
 | O6 Stateful reproduction | ✅ DONE | `71e530e` | Live OOB blind-SSRF via real callback (no FP); authenticated reproduction reaches an auth-gated SQLi |
 | O8 0-day discovery | ✅ DONE | `bf7f07c` | Anomaly/differential fuzzing → `needs_triage` research candidates, never auto-confirmed; defensive parser fuzzer verified |
-| O5 Real console | ⏳ TODO | — | One-shot command dispatcher → persistent/stateful session |
+| O5 Real console | ✅ DONE | `c4e0c67` | Persistent-session infra verified; added an interactive MSF session driver (one session, many commands) + per-run console secret |
 | O7 Tool belt | ⏳ TODO | — | Integrate sqlmap/ffuf/dalfox/katana/interactsh/semgrep/etc. |
 | O9 Scale | ⏳ TODO | — | Large-surface crawl, triage, resumable, distributed |
 | O10 Offensive QA | ⏳ TODO | — | Vulnerable range + exploitation benchmark |
@@ -228,7 +228,7 @@ This is the heart of what you said is missing.
 - Done when: SHARAY's attack strategy visibly changes based on live target responses, and can be replayed
   deterministically from the recorded decision trace.
 
-### Sector O5 — A real interactive console (not one-shot)
+### Sector O5 — A real interactive console (not one-shot) — ✅ DONE (`c4e0c67`)
 
 - [ ] **Persistent, stateful session execution:** a real PTY/shell channel to a gated, authorized session
   (MSF session or a scoped container shell), with working directory/env/history preserved across commands
