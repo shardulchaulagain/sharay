@@ -258,6 +258,72 @@ class MetasploitRPCClient:
         }
 
 
+class MetasploitInteractiveSession:
+    """Stateful driver for a live msfrpcd session: open once, run many commands against the SAME
+    session (target-side state preserved), then clean-close. This is what the operator console
+    drives for real interaction, replacing one-shot `check` invocations. Fail-closed throughout.
+    """
+
+    def __init__(self, client: "MetasploitRPCClient", session_id: str) -> None:
+        self.client = client
+        self.session_id = session_id
+        self.history: list[tuple[str, str]] = []
+        self._closed = False
+
+    @classmethod
+    def open(
+        cls,
+        client: "MetasploitRPCClient",
+        module_name: str,
+        options: dict[str, Any],
+        consent: OperatorConsentReceipt | None,
+    ) -> "MetasploitInteractiveSession":
+        """Consent-gated: check -> exploit -> keep the opened session for interaction."""
+        if consent is None:
+            raise PermissionError("Active exploitation rejected: explicit OperatorConsentReceipt required")
+        if consent.approved_module != module_name:
+            raise PermissionError(
+                f"Consent module mismatch: approved '{consent.approved_module}', requested '{module_name}'"
+            )
+        if client.transport is None:
+            raise MsfRpcUnavailable("No msfrpcd transport configured; refusing to open a session.")
+        client.transport.send_rpc("module.check", ["exploit", module_name, options])
+        client.transport.send_rpc("module.execute", ["exploit", module_name, options])
+        sess_list = client.transport.send_rpc("session.list", [])
+        session_id = next(iter(sess_list.keys())) if sess_list else None
+        if not session_id:
+            raise MsfRpcUnavailable("Exploit ran but no session was opened; nothing to drive.")
+        return cls(client, str(session_id))
+
+    def run(self, command: str) -> str:
+        """Send one command to the live session and read its output. State persists across calls."""
+        if self._closed:
+            raise MsfRpcUnavailable("Session is closed.")
+        assert self.client.transport is not None
+        self.client.transport.send_rpc("session.shell_write", [self.session_id, command + "\n"])
+        res = self.client.transport.send_rpc("session.shell_read", [self.session_id])
+        out = res.get("data", "")
+        self.history.append((command, out))
+        return out
+
+    def close(self) -> bool:
+        if self._closed:
+            return True
+        if self.client.transport is not None:
+            try:
+                self.client.transport.send_rpc("session.stop", [self.session_id])
+            except Exception:
+                pass
+        self._closed = True
+        return True
+
+    def __enter__(self) -> "MetasploitInteractiveSession":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+
 class MsfvenomPayloadGenerator:
     """Generates non-destructive benign payloads for authorized verification."""
 
@@ -273,6 +339,7 @@ __all__ = [
     "MetasploitModuleDescriptor",
     "BenignSessionExecutionResult",
     "MetasploitRPCClient",
+    "MetasploitInteractiveSession",
     "MsfvenomPayloadGenerator",
     "HTTPJsonRPCTransport",
     "MsfRpcUnavailable",

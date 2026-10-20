@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import codecs
 import fcntl
+import hashlib
+import hmac
 import ipaddress
+import json
 import os
 import pty
+import re
+import secrets
 import shlex
 import socket
 import struct
@@ -19,13 +24,508 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urljoin, urlsplit
 
 from packages.reporting import redact
 from packages.scanner_adapters import _connect, _connection, _tls_observation
 from packages.scanner_adapters.workspace import SENSITIVE_HEADERS
 from packages.security_policies import PolicyError, ScopePolicy, check_execution_url
+
+# Regex for dangerous escape sequences: OSC (Operating System Command e.g. OSC 52 clipboard set),
+# DCS (Device Control String), APC, PM. Preserves standard CSI colors/formatting (\x1b[...m)
+_UNSAFE_ANSI_PATTERN = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC sequences
+    r"|\x1b[P^_][^\x1b]*\x1b\\"  # DCS, PM, APC sequences
+)
+
+
+def sanitize_terminal_stream(data: bytes) -> bytes:
+    """Strips dangerous terminal escape sequences while preserving safe ANSI color/cursor codes."""
+    text = data.decode("utf-8", errors="replace")
+    clean_text = _UNSAFE_ANSI_PATTERN.sub("", text)
+    return clean_text.encode("utf-8")
+
+
+@dataclass
+class StreamChunk:
+    offset: int
+    data: bytes
+    timestamp: float
+
+
+class ResumablePTYBuffer:
+    """Thread-safe ring buffer supporting client reconnect/resume with offset tracking and rate budgeting."""
+
+    def __init__(
+        self,
+        capacity_bytes: int = 1048576,  # 1 MB ring buffer
+        max_bytes_per_second: int = 131072,  # 128 KB/s max burst rate
+    ):
+        self.capacity_bytes = capacity_bytes
+        self.max_rate = max_bytes_per_second
+        self.buffer = bytearray()
+        self.head_offset: int = 0  # Global byte offset of the start of the buffer
+        self.total_written: int = 0
+        self.lock = threading.RLock()
+
+        # Rate budgeting
+        self._last_budget_check = time.monotonic()
+        self._budget_tokens = float(max_bytes_per_second)
+
+    def write(self, data: bytes) -> int:
+        """Writes sanitized data into buffer, applying rate budgeting and ring rollover."""
+        if not data:
+            return 0
+
+        clean_data = sanitize_terminal_stream(data)
+
+        with self.lock:
+            now = time.monotonic()
+            elapsed = now - self._last_budget_check
+            self._last_budget_check = now
+            self._budget_tokens = min(float(self.max_rate), self._budget_tokens + elapsed * self.max_rate)
+
+            # Apply backpressure/truncation if client is flooding output
+            if self._budget_tokens < len(clean_data):
+                allowed_size = int(max(0.0, self._budget_tokens))
+                if allowed_size > 0:
+                    clean_data = clean_data[:allowed_size] + b"\r\n[STREAM THROTTLED FOR SAFETY]\r\n"
+                else:
+                    return 0
+
+            self._budget_tokens -= len(clean_data)
+
+            self.buffer.extend(clean_data)
+            self.total_written += len(clean_data)
+
+            # Enforce max buffer size (prune from beginning)
+            if len(self.buffer) > self.capacity_bytes:
+                overflow = len(self.buffer) - self.capacity_bytes
+                del self.buffer[:overflow]
+                self.head_offset += overflow
+
+            return len(clean_data)
+
+    def read_from_offset(self, from_offset: int, max_bytes: int = 65536) -> Tuple[bytes, int]:
+        """Resumes reading from requested byte offset.
+
+        Returns (chunk_bytes, next_offset). If from_offset is older than ring buffer head,
+        reads from the oldest available offset.
+        """
+        with self.lock:
+            current_head = self.head_offset
+            current_tail = self.head_offset + len(self.buffer)
+
+            if from_offset >= current_tail:
+                return b"", current_tail
+
+            start_idx = max(0, from_offset - current_head)
+            chunk = bytes(self.buffer[start_idx : start_idx + max_bytes])
+            next_offset = current_head + start_idx + len(chunk)
+            return chunk, next_offset
+
+
+@dataclass
+class FlightLogEntry:
+    sequence: int
+    direction: str  # "stdin", "stdout", "system"
+    data: str
+    timestamp: float
+    previous_hash: str
+    entry_hash: str = ""
+
+    def compute_hash(self) -> str:
+        payload = f"{self.sequence}:{self.direction}:{self.data}:{self.timestamp}:{self.previous_hash}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class ReplayableFlightLogRecorder:
+    """Records courtroom-grade, cryptographically chained flight logs for terminal sessions."""
+
+    def __init__(self, session_id: str, operator_id: str):
+        self.session_id = session_id
+        self.operator_id = operator_id
+        self.entries: List[FlightLogEntry] = []
+        self._lock = threading.RLock()
+        self._current_hash = "0" * 64
+
+    def record(self, direction: str, text: str, timestamp: Optional[float] = None) -> FlightLogEntry:
+        now = timestamp if timestamp is not None else time.time()
+        with self._lock:
+            seq = len(self.entries)
+            entry = FlightLogEntry(
+                sequence=seq,
+                direction=direction,
+                data=text,
+                timestamp=now,
+                previous_hash=self._current_hash,
+            )
+            entry.entry_hash = entry.compute_hash()
+            self._current_hash = entry.entry_hash
+            self.entries.append(entry)
+            return entry
+
+    def verify_integrity(self) -> Tuple[bool, str]:
+        """Verifies that no entries have been modified, inserted, or omitted."""
+        with self._lock:
+            prev_hash = "0" * 64
+            for idx, entry in enumerate(self.entries):
+                if entry.sequence != idx:
+                    return False, f"Sequence gap at index {idx}: expected {idx}, got {entry.sequence}"
+                if entry.previous_hash != prev_hash:
+                    return False, f"Hash chain broken at index {idx}"
+                if entry.entry_hash != entry.compute_hash():
+                    return False, f"Entry hash tampered at index {idx}"
+                prev_hash = entry.entry_hash
+            return True, f"Flight log chain verified ({len(self.entries)} entries intact)."
+
+    def export_asciinema_v2(self) -> str:
+        """Exports session as asciinema v2 format for standard web player replay."""
+        with self._lock:
+            if not self.entries:
+                return "{}"
+            t0 = self.entries[0].timestamp
+            header = {
+                "version": 2,
+                "width": 120,
+                "height": 40,
+                "timestamp": int(t0),
+                "title": f"SHARAY Operator Session {self.session_id}",
+                "env": {"SHELL": "/bin/sharay-console", "TERM": "xterm-256color"},
+            }
+            lines = [json.dumps(header)]
+            for entry in self.entries:
+                if entry.direction in {"stdin", "stdout"}:
+                    rel_time = round(entry.timestamp - t0, 3)
+                    type_code = "i" if entry.direction == "stdin" else "o"
+                    lines.append(json.dumps([rel_time, type_code, entry.data]))
+            return "\n".join(lines)
+
+
+class FlightLogReplayer:
+    """Deterministically replays recorded flight logs for review, training, and forensic evidence."""
+
+    @staticmethod
+    def replay(
+        entries: List[FlightLogEntry],
+        playback_speed: float = 1.0,
+    ) -> Iterator[Tuple[float, str, str]]:
+        """Yields (relative_timestamp, direction, text) in chronological order."""
+        if not entries:
+            return
+        t0 = entries[0].timestamp
+        for entry in entries:
+            rel_time = (entry.timestamp - t0) / max(0.1, playback_speed)
+            yield rel_time, entry.direction, entry.data
+
+
+class OperatorRole(str, Enum):
+    PRIMARY_CONTROLLER = "PRIMARY_CONTROLLER"
+    OBSERVER = "OBSERVER"
+    AUDITOR = "AUDITOR"
+
+
+@dataclass
+class OperatorPresence:
+    operator_id: str
+    username: str
+    role: str = OperatorRole.OBSERVER.value
+    color_hex: str = "#22c55e"
+    last_seen: float = field(default_factory=time.time)
+    cursor_position: int = 0
+    is_active: bool = True
+
+
+@dataclass
+class AttributedInputEvent:
+    event_id: str
+    session_id: str
+    operator_id: str
+    username: str
+    input_text: str
+    timestamp: float
+    sequence_num: int
+    signature: str
+
+
+class MultiOperatorSessionCoordinator:
+    """Coordinates collaborative interactive operator sessions with presence and attributed input."""
+
+    def __init__(
+        self, session_id: str, target_origin: str, hmac_secret: str | None = None
+    ) -> None:
+        self.session_id = session_id
+        self.target_origin = target_origin
+        # Per-session random secret by default (never a committed constant), so attributed-input
+        # signatures cannot be forged by anyone reading the source.
+        self.hmac_secret = (hmac_secret or secrets.token_hex(32)).encode("utf-8")
+
+        self.operators: Dict[str, OperatorPresence] = {}
+        self.primary_controller_id: Optional[str] = None
+        self.audit_keystroke_log: List[AttributedInputEvent] = []
+        self.handoff_ledger: List[Dict[str, Any]] = []
+        self.terminal_event_log: List[Tuple[float, str, str]] = []  # (rel_time, stream_type, data)
+        self.session_start_time = time.time()
+        self._seq = 0
+
+    def join_session(
+        self,
+        operator_id: str,
+        username: str,
+        as_primary: bool = False,
+        color_hex: str = "#3b82f6",
+        now: Optional[float] = None,
+    ) -> OperatorPresence:
+        ts = now if now is not None else time.time()
+        role = (
+            OperatorRole.PRIMARY_CONTROLLER.value
+            if (as_primary or not self.operators)
+            else OperatorRole.OBSERVER.value
+        )
+        presence = OperatorPresence(
+            operator_id=operator_id,
+            username=username,
+            role=role,
+            color_hex=color_hex,
+            last_seen=ts,
+            is_active=True,
+        )
+        self.operators[operator_id] = presence
+
+        if role == OperatorRole.PRIMARY_CONTROLLER.value:
+            self.primary_controller_id = operator_id
+            self._record_handoff(None, operator_id, "initial_primary_assignment", ts)
+
+        return presence
+
+    def leave_session(self, operator_id: str, now: Optional[float] = None) -> None:
+        ts = now if now is not None else time.time()
+        op = self.operators.get(operator_id)
+        if not op:
+            return
+        op.is_active = False
+        op.last_seen = ts
+
+        # If primary controller leaves, transfer control to first active observer
+        if self.primary_controller_id == operator_id:
+            next_controller = next(
+                (o for o in self.operators.values() if o.is_active and o.operator_id != operator_id), None
+            )
+            if next_controller:
+                self.primary_controller_id = next_controller.operator_id
+                next_controller.role = OperatorRole.PRIMARY_CONTROLLER.value
+                self._record_handoff(operator_id, next_controller.operator_id, "primary_left_session", ts)
+            else:
+                self.primary_controller_id = None
+
+    def transfer_control(
+        self,
+        current_controller_id: str,
+        target_operator_id: str,
+        reason: str = "voluntary_handoff",
+        now: Optional[float] = None,
+    ) -> bool:
+        ts = now if now is not None else time.time()
+        if self.primary_controller_id != current_controller_id:
+            return False
+        target_op = self.operators.get(target_operator_id)
+        if not target_op or not target_op.is_active:
+            return False
+
+        current_op = self.operators.get(current_controller_id)
+        if current_op:
+            current_op.role = OperatorRole.OBSERVER.value
+
+        target_op.role = OperatorRole.PRIMARY_CONTROLLER.value
+        self.primary_controller_id = target_operator_id
+        self._record_handoff(current_controller_id, target_operator_id, reason, ts)
+        return True
+
+    def preempt_takeover(
+        self,
+        requesting_operator_id: str,
+        justification: str,
+        is_lead: bool = True,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Lead operator or auditor can forcefully take over control with mandatory audit justification."""
+        ts = now if now is not None else time.time()
+        if not is_lead:
+            return False
+        req_op = self.operators.get(requesting_operator_id)
+        if not req_op or not req_op.is_active:
+            return False
+
+        old_controller = self.primary_controller_id
+        if old_controller and old_controller in self.operators:
+            self.operators[old_controller].role = OperatorRole.OBSERVER.value
+
+        req_op.role = OperatorRole.PRIMARY_CONTROLLER.value
+        self.primary_controller_id = requesting_operator_id
+        self._record_handoff(old_controller, requesting_operator_id, f"lead_takeover: {justification}", ts)
+        return True
+
+    def record_input(
+        self,
+        operator_id: str,
+        input_chunk: str,
+        now: Optional[float] = None,
+    ) -> Tuple[bool, Optional[AttributedInputEvent]]:
+        """Attributed input: only primary controller can write commands; inputs are cryptographically signed."""
+        ts = now if now is not None else time.time()
+        if self.primary_controller_id != operator_id:
+            return False, None
+
+        op = self.operators.get(operator_id)
+        if not op:
+            return False, None
+
+        op.last_seen = ts
+        self._seq += 1
+
+        sig_payload = f"{self.session_id}:{self._seq}:{operator_id}:{ts}:{input_chunk}".encode("utf-8")
+        signature = hmac.new(self.hmac_secret, sig_payload, hashlib.sha256).hexdigest()
+
+        event = AttributedInputEvent(
+            event_id=f"input-{self._seq:06d}",
+            session_id=self.session_id,
+            operator_id=operator_id,
+            username=op.username,
+            input_text=input_chunk,
+            timestamp=ts,
+            sequence_num=self._seq,
+            signature=signature,
+        )
+        self.audit_keystroke_log.append(event)
+        rel_time = ts - self.session_start_time
+        self.terminal_event_log.append((rel_time, "i", input_chunk))
+        return True, event
+
+    def record_output(self, output_chunk: str, now: Optional[float] = None) -> None:
+        ts = now if now is not None else time.time()
+        rel_time = ts - self.session_start_time
+        self.terminal_event_log.append((rel_time, "o", output_chunk))
+
+    def _record_handoff(self, from_op: Optional[str], to_op: str, reason: str, ts: float) -> None:
+        self.handoff_ledger.append(
+            {
+                "from_operator": from_op,
+                "to_operator": to_op,
+                "reason": reason,
+                "timestamp": ts,
+            }
+        )
+
+    def export_asciinema_v2(self, title: Optional[str] = None) -> str:
+        """Exports courtroom-grade asciinema v2 format jsonl recording."""
+        header = {
+            "version": 2,
+            "width": 120,
+            "height": 36,
+            "timestamp": int(self.session_start_time),
+            "title": title or f"SHARAY Operator Flight Log - {self.session_id}",
+            "env": {
+                "SHELL": "/bin/sh",
+                "TERM": "xterm-256color",
+                "TARGET_ORIGIN": self.target_origin,
+            },
+        }
+
+        lines = [json.dumps(header)]
+        for rel_time, stream_type, data in self.terminal_event_log:
+            lines.append(json.dumps([round(rel_time, 4), stream_type, data]))
+
+        return "\n".join(lines)
+
+
+class TerminalAutocompleteAndCopilot:
+    """Provides scoped command completion, history search, and inline AI copilot suggestions."""
+
+    def __init__(self, in_scope_endpoints: Optional[List[str]] = None) -> None:
+        self.in_scope_endpoints = sorted(in_scope_endpoints or ["/", "/api", "/login", "/graphql", "/health"])
+        self.command_history: List[str] = []
+        self._standard_verbs = [
+            "curl -v",
+            "curl -s -X POST",
+            "curl -H 'Content-Type: application/json'",
+            "verify-exploit",
+            "check-sqli",
+            "check-xss",
+            "check-ssrf",
+            "replay-packet",
+            "export-bundle",
+            "inspect-headers",
+        ]
+
+    def add_history(self, cmd: str) -> None:
+        clean = cmd.strip()
+        if clean and (not self.command_history or self.command_history[-1] != clean):
+            self.command_history.append(clean)
+
+    def search_history(self, prefix: str) -> List[str]:
+        clean = prefix.strip()
+        if not clean:
+            return list(reversed(self.command_history[-10:]))
+        return [cmd for cmd in reversed(self.command_history) if cmd.startswith(clean)]
+
+    def get_completions(self, partial_cmd: str, target_origin: str = "https://target.corp") -> List[str]:
+        """Provides context-aware command suggestions pinned to authorized target endpoints."""
+        partial = partial_cmd.strip()
+        suggestions: List[str] = []
+
+        if not partial:
+            return self._standard_verbs[:5]
+
+        # Suggest standard commands matching prefix
+        for v in self._standard_verbs:
+            if v.startswith(partial):
+                suggestions.append(v)
+
+        # If user is writing curl, suggest in-scope endpoint URLs
+        if partial.startswith("curl"):
+            for ep in self.in_scope_endpoints:
+                full_url = f"{target_origin}{ep}"
+                cand = f"{partial.rsplit(' ', 1)[0]} {full_url}" if " " in partial else f"curl {full_url}"
+                if cand not in suggestions:
+                    suggestions.append(cand)
+
+        return suggestions[:8]
+
+    def get_copilot_suggestion(
+        self,
+        last_output: str,
+        detected_vuln_classes: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, str]]:
+        """Inline AI copilot suggestion based on terminal output and assessment findings."""
+        out_lower = last_output.lower()
+        if (
+            "syntax error" in out_lower
+            or "unrecognized token" in out_lower
+            or "ora-" in out_lower
+            or "sql" in out_lower
+            or "sqlite3" in out_lower
+            or "psycopg" in out_lower
+            or "mysql" in out_lower
+        ):
+            return {
+                "action": "SQL Injection Confirmation",
+                "recommended_command": "check-sqli --technique=boolean-blind",
+                "rationale": "Database error signature detected in PTY response buffer.",
+            }
+        elif "401" in out_lower or "unauthorized" in out_lower or "session expired" in out_lower:
+            return {
+                "action": "Session Renewal",
+                "recommended_command": "login --refresh-credentials",
+                "rationale": "Server signaled expired session; trigger token re-acquisition.",
+            }
+        elif detected_vuln_classes and "SSTI" in detected_vuln_classes:
+            return {
+                "action": "SSTI Proof Replay",
+                "recommended_command": "verify-exploit --vuln-id=SSTI-01 --cold-replay=3",
+                "rationale": "SSTI confirmed; trigger automated 3x cold replay proof loop.",
+            }
+        return None
 
 
 class OwnershipState(str, Enum):
@@ -68,6 +568,10 @@ class InteractiveSession:
     output_start: int = 0
     input_buffer: str = ""
     last_request: float = 0.0
+    resumable_buffer: ResumablePTYBuffer = field(default_factory=ResumablePTYBuffer)
+    flight_recorder: Optional[ReplayableFlightLogRecorder] = None
+    coordinator: Optional[MultiOperatorSessionCoordinator] = None
+    copilot: TerminalAutocompleteAndCopilot = field(default_factory=TerminalAutocompleteAndCopilot)
     _input_lock: Any = field(default_factory=threading.Lock, repr=False)
     _output_lock: Any = field(default_factory=threading.RLock, repr=False)
     _cancel: Any = field(default_factory=threading.Event, repr=False)
@@ -169,6 +673,10 @@ class InteractiveSession:
                 bytes=len(data),
                 preview=redact(data.decode(errors="replace"))[:200],
             )
+            if self.flight_recorder:
+                self.flight_recorder.record("stdin", data.decode("utf-8", errors="replace"))
+            if self.coordinator:
+                self.coordinator.record_input(self.created_by, data.decode("utf-8", errors="replace"))
             text = self._decoder.decode(data)
             for char in text:
                 if char == "\n" and self._last_cr:
@@ -284,6 +792,20 @@ class InteractiveSession:
         if removed:
             del self.output_buffer[:removed]
             self.output_start += removed
+        if chunk:
+            sanitized = sanitize_terminal_stream(bytes(chunk))
+            self.resumable_buffer.write(sanitized)
+            if self.flight_recorder:
+                self.flight_recorder.record("stdout", sanitized.decode("utf-8", errors="replace"))
+            if self.coordinator:
+                self.coordinator.record_output(sanitized.decode("utf-8", errors="replace"))
+
+    def export_asciinema(self, title: Optional[str] = None) -> str:
+        if self.coordinator:
+            return self.coordinator.export_asciinema_v2(title=title)
+        if self.flight_recorder:
+            return self.flight_recorder.export_asciinema_v2()
+        return "{}"
 
     def output_since(self, cursor: int) -> tuple[int, bytes]:
         self.read_available()
@@ -410,6 +932,53 @@ class InteractiveSession:
                         lines.append(f"          Title: {mod_entry['title']}")
                     lines.append("-" * 78)
                     return "\n".join(lines)
+
+            if first_arg.lower() == "session":
+                # Interactive, operator-gated MSF session: open once, run benign commands, clean-close.
+                from packages.scanner_adapters.integrations.msf_rpc import (
+                    MetasploitInteractiveSession,
+                    MsfRpcUnavailable,
+                    OperatorConsentReceipt,
+                    connect,
+                    probe_msfrpc,
+                )
+
+                if self.ownership_state != OwnershipState.HUMAN_OWNED.value:
+                    raise SessionError("An interactive MSF session requires HUMAN_OWNED console control.")
+                if len(parts) < 3 or not parts[2].startswith("exploit/"):
+                    raise SessionError("Usage: msf session <exploit/module/path> [KEY=VAL ...]")
+                module = parts[2]
+                rpc_url = os.environ.get("SHARAY_MSFRPC_URL")
+                if not rpc_url or not probe_msfrpc(rpc_url, timeout=1.0):
+                    raise SessionError(
+                        "msfrpcd is not configured/reachable (set SHARAY_MSFRPC_URL); no session was opened."
+                    )
+                options: dict[str, Any] = {"RHOSTS": self.target_ip, "RPORT": target.port}
+                for kv in parts[3:]:
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        options[k.strip()] = v.strip()
+                consent = OperatorConsentReceipt(
+                    operator_id=self.created_by, target_url=self.target_url, approved_module=module
+                )
+                try:
+                    client = connect(
+                        rpc_url,
+                        os.environ.get("SHARAY_MSFRPC_USER", "msf"),
+                        os.environ.get("SHARAY_MSFRPC_PASS", ""),
+                    )
+                    lines = []
+                    with MetasploitInteractiveSession.open(client, module, options, consent) as sess:
+                        lines.append(
+                            f"[*] Interactive session {sess.session_id} opened via {module}. "
+                            "Benign verification only; auto-closing."
+                        )
+                        for cmd in ("id", "uname -a"):
+                            lines.append(f"sharay-session> {cmd}\n{sess.run(cmd).strip()}")
+                        lines.append("[*] Session closed cleanly.")
+                    return "\n".join(lines)
+                except (MsfRpcUnavailable, PermissionError) as exc:
+                    raise SessionError(f"MSF session not established: {exc}")
 
             try:
                 from services.scanner_worker.container import run_with_egress
@@ -794,6 +1363,9 @@ class TerminalManager:
                     master_fd=master,
                     slave_fd=slave,
                 )
+                session.flight_recorder = ReplayableFlightLogRecorder(session.id, session.created_by)
+                session.coordinator = MultiOperatorSessionCoordinator(session.id, session.target_url)
+                session.coordinator.join_session(session.created_by, session.created_by, as_primary=True)
                 session.resize(cols, rows)
             except Exception:
                 os.close(master)
