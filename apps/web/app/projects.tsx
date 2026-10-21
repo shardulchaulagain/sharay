@@ -151,6 +151,9 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
   const [toolNuclei, setToolNuclei] = useState(true);
   const [toolZap, setToolZap] = useState(false);
   const [toolMsf, setToolMsf] = useState(false);
+  const [toolGraphql, setToolGraphql] = useState(false);
+  const [toolWebsocket, setToolWebsocket] = useState(false);
+  const [toolWordlist, setToolWordlist] = useState(false);
   const [toolBrowser, setToolBrowser] = useState(true);
   const [toolSchema, setToolSchema] = useState(true);
   const [toolAuthMatrix, setToolAuthMatrix] = useState(true);
@@ -194,6 +197,9 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
       if (toolNuclei) activeTools.push("nuclei");
       if (toolZap) activeTools.push("zap");
       if (toolMsf) activeTools.push("metasploit");
+      if (toolGraphql) activeTools.push("graphql");
+      if (toolWebsocket) activeTools.push("websocket");
+      if (toolWordlist) activeTools.push("wordlist");
       if (toolBrowser) activeTools.push("browser");
       if (toolSchema) activeTools.push("schema");
       if (toolAuthMatrix) activeTools.push("auth_matrix");
@@ -337,6 +343,18 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
               <label className="checkbox-label">
                 <input type="checkbox" checked={mode !== "passive" && toolReproducer} onChange={e => { setToolReproducer(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
                 3x Deterministic Reproducer &amp; Negative Canary
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolGraphql} onChange={e => { setToolGraphql(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                GraphQL Introspection &amp; Misconfiguration Audit
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolWebsocket} onChange={e => { setToolWebsocket(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                WebSocket CSWSH Origin-Enforcement Audit
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolWordlist} onChange={e => { setToolWordlist(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                Wordlist Content &amp; Hidden Endpoint Discovery
               </label>
               <label className="checkbox-label">
                 <input type="checkbox" checked={mode !== "passive" && toolSensitive} onChange={e => { setToolSensitive(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />

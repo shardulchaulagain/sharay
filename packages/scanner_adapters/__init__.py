@@ -1679,6 +1679,9 @@ def scan_comprehensive(
         "metasploit": 120,
         "body_fuzzer": 60,
         "diff": 30,
+        "graphql": 30,
+        "websocket": 30,
+        "wordlist": 45,
     }
     needed_seconds = 60 + sum(_STAGE_FLOORS.get(tool, 0) for tool in enabled_tools)
     max_seconds = min(1800.0, max(float(max_seconds), float(needed_seconds)))
@@ -2734,6 +2737,47 @@ def scan_comprehensive(
                 "detail": f"Metasploit auxiliary verification skipped per scan mode '{mode}' or tool selection.",
             }
         )
+
+    # Stages 11-13: opt-in protocol audits (GraphQL, WebSocket, wordlist discovery). Non-destructive
+    # and off by default; they run only when explicitly selected so the default scan is unchanged.
+    if mode != "passive" and enabled_tools & {"graphql", "websocket", "wordlist"}:
+        from packages.scanner_adapters.integrations import (
+            graphql_scanner,
+            websocket_scanner,
+            wordlist_scanner,
+        )
+
+        optin_audits = [
+            (
+                "graphql",
+                lambda: graphql_scanner.audit_graphql_endpoint(
+                    destination, allow_ip, discovered_endpoints=discovered_urls
+                ),
+            ),
+            (
+                "websocket",
+                lambda: websocket_scanner.audit_websocket_endpoint(
+                    destination, allow_ip, discovered_endpoints=discovered_urls
+                ),
+            ),
+            ("wordlist", lambda: wordlist_scanner.scan_wordlist_directories(destination, allow_ip)),
+        ]
+        for tool_key, run_audit in optin_audits:
+            if tool_key not in enabled_tools:
+                continue
+            try:
+                audit_res = run_audit()
+                result["findings"].extend(audit_res.get("findings", []))
+                result["observations"].extend(audit_res.get("observations", []))
+                result["checks"].extend(audit_res.get("checks", []))
+            except Exception as exc:
+                result["checks"].append(
+                    {
+                        "category": tool_key,
+                        "status": "completed_with_errors",
+                        "detail": f"{tool_key} audit note: {type(exc).__name__}.",
+                    }
+                )
 
     # Deduplicate findings by fingerprint
     deduped_findings: list[dict[str, Any]] = []

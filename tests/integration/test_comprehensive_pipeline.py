@@ -241,6 +241,51 @@ class ComprehensivePipelineTests(unittest.TestCase):
         self.assertGreaterEqual(budget["allocated_seconds"], 330)
         self.assertLessEqual(budget["allocated_seconds"], 1800)
 
+    def test_optin_protocol_audits_run_only_when_selected(self):
+        def benign_runner(image, argv, **kwargs):
+            raw = b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n"
+            return SimpleNamespace(outcome="completed", exit_code=0, stdout=raw, output_truncated=False)
+
+        base = "packages.scanner_adapters.integrations."
+        sentinels = {
+            "graphql_scanner.audit_graphql_endpoint": {
+                "findings": [{"fingerprint": "gql1", "title": "GraphQL introspection", "severity": "medium"}],
+                "checks": [{"category": "graphql", "status": "completed", "detail": "audited"}],
+            },
+            "websocket_scanner.audit_websocket_endpoint": {
+                "findings": [],
+                "checks": [{"category": "websocket", "status": "completed", "detail": "audited"}],
+            },
+            "wordlist_scanner.scan_wordlist_directories": {
+                "findings": [],
+                "checks": [{"category": "wordlist", "status": "completed", "detail": "audited"}],
+            },
+        }
+        mocks = {name: patch(base + name, return_value=result) for name, result in sentinels.items()}
+        started = {name: m.start() for name, m in mocks.items()}
+        for m in mocks.values():
+            self.addCleanup(m.stop)
+
+        # Not selected -> the audits never run and emit no checks.
+        default_res = scan_comprehensive(self._dest, "93.184.216.34", run=benign_runner)
+        for stub in started.values():
+            stub.assert_not_called()
+        self.assertFalse(
+            any(c["category"] in {"graphql", "websocket", "wordlist"} for c in default_res["checks"])
+        )
+
+        # Selected -> each audit runs and its checks/findings are merged.
+        res = scan_comprehensive(
+            self._dest, "93.184.216.34", run=benign_runner, tools=["graphql", "websocket", "wordlist"]
+        )
+        for stub in started.values():
+            stub.assert_called()
+        categories = {c["category"] for c in res["checks"]}
+        self.assertEqual(
+            {"graphql", "websocket", "wordlist"} & categories, {"graphql", "websocket", "wordlist"}
+        )
+        self.assertTrue(any(f.get("fingerprint") == "gql1" for f in res["findings"]))
+
 
 if __name__ == "__main__":
     unittest.main()
