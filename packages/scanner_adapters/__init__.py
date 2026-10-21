@@ -526,7 +526,7 @@ def _tls_observation(connection: http.client.HTTPConnection, destination: Destin
     cipher = sock.cipher()
     if binary is None or cipher is None:
         raise ssl.SSLError("TLS certificate or cipher evidence is unavailable.")
-    return {
+    observation = {
         "kind": "tls_handshake",
         "category": "tls",
         "url": destination.url,
@@ -540,6 +540,14 @@ def _tls_observation(connection: http.client.HTTPConnection, destination: Destin
         "protocol": sock.version(),
         "cipher": cipher[0],
     }
+    # Structured certificate facts (issuer, validity window, SANs, self-signed) from the parser.
+    try:
+        from packages.scanner_adapters.integrations import tls as tls_parser
+
+        observation["certificate"] = tls_parser.parse_peer_certificate(certificate)
+    except (ValueError, KeyError):
+        pass
+    return observation
 
 
 def scan(
