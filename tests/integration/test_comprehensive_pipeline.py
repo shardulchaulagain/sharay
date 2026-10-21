@@ -286,6 +286,28 @@ class ComprehensivePipelineTests(unittest.TestCase):
         )
         self.assertTrue(any(f.get("fingerprint") == "gql1" for f in res["findings"]))
 
+    def test_cve_intelligence_runs_only_when_selected(self):
+        vulnerable_headers = b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\nserver: Apache/2.4.49\r\n\r\n"
+
+        def runner(image, argv, **kwargs):
+            raw = vulnerable_headers if "curl" in image else b"[]"
+            return SimpleNamespace(outcome="completed", exit_code=0, stdout=raw, output_truncated=False)
+
+        default_res = scan_comprehensive(self._dest, "93.184.216.34", run=runner)
+        self.assertFalse(any(c["category"] == "cve_intelligence" for c in default_res["checks"]))
+        self.assertFalse(
+            any(str(f.get("fingerprint", "")).startswith("cve:") for f in default_res["findings"])
+        )
+
+        res = scan_comprehensive(self._dest, "93.184.216.34", run=runner, tools=["cve"])
+        self.assertTrue(any(c["category"] == "cve_intelligence" for c in res["checks"]))
+        cve_titles = [f["title"] for f in res["findings"] if str(f.get("fingerprint", "")).startswith("cve:")]
+        self.assertTrue(any("CVE-2021-41773" in t for t in cve_titles), cve_titles)
+        for finding in res["findings"]:
+            if str(finding.get("fingerprint", "")).startswith("cve:"):
+                self.assertEqual(finding["status"], "suspected")
+                self.assertEqual(finding["confidence"], "low")
+
 
 if __name__ == "__main__":
     unittest.main()

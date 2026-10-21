@@ -151,6 +151,7 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
   const [toolNuclei, setToolNuclei] = useState(true);
   const [toolZap, setToolZap] = useState(false);
   const [toolMsf, setToolMsf] = useState(false);
+  const [toolCve, setToolCve] = useState(false);
   const [toolGraphql, setToolGraphql] = useState(false);
   const [toolWebsocket, setToolWebsocket] = useState(false);
   const [toolWordlist, setToolWordlist] = useState(false);
@@ -197,6 +198,7 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
       if (toolNuclei) activeTools.push("nuclei");
       if (toolZap) activeTools.push("zap");
       if (toolMsf) activeTools.push("metasploit");
+      if (toolCve) activeTools.push("cve");
       if (toolGraphql) activeTools.push("graphql");
       if (toolWebsocket) activeTools.push("websocket");
       if (toolWordlist) activeTools.push("wordlist");
@@ -343,6 +345,10 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
               <label className="checkbox-label">
                 <input type="checkbox" checked={mode !== "passive" && toolReproducer} onChange={e => { setToolReproducer(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
                 3x Deterministic Reproducer &amp; Negative Canary
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={mode !== "passive" && toolCve} onChange={e => { setToolCve(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                Version-to-CVE Intelligence (banner-based)
               </label>
               <label className="checkbox-label">
                 <input type="checkbox" checked={mode !== "passive" && toolGraphql} onChange={e => { setToolGraphql(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />

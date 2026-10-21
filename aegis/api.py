@@ -311,6 +311,18 @@ def active_integrations() -> list[dict]:
             "limitations": "Operates on a code tree, not an HTTP target. Secret values are redacted in the report.",
         },
         {
+            "id": "cve_intelligence",
+            "name": "Version-to-CVE Intelligence",
+            "version": "1.0.0",
+            "available": True,
+            "runnable": True,
+            "status": "implemented",
+            "supported_categories": ["known_vulnerability", "cve", "version_fingerprint"],
+            "scope": "Offline CPE translation and CVE matching from observed version banners; anti-hallucination (no version, no CVE)",
+            "guidance": "Opt-in HTTP stage (select 'cve'); emits suspected CVE findings from Server/X-Powered-By versions, not verified live.",
+            "limitations": "Banner-based inference only; curated offline advisory set, not a full NVD feed.",
+        },
+        {
             "id": "graphql",
             "name": "GraphQL Security Audit",
             "version": "1.0.0",

@@ -779,7 +779,47 @@ def _parse_http_headers(raw: str) -> tuple[int, list[tuple[str, str]]]:
     return status, headers
 
 
-def scan_live(destination: Destination, allow_ip: str, *, run: Callable[..., Any] | None = None) -> dict:
+def _cve_finding(cve: Any, url: str) -> dict[str, Any]:
+    """A suspected known-vulnerability finding inferred from an observed version banner."""
+    severity = cve.severity if cve.severity in ("critical", "high", "medium", "low", "info") else "medium"
+    return {
+        "fingerprint": f"cve:{cve.cve_id}:{url}",
+        "title": f"{cve.cve_id} may affect an observed component"[:250],
+        "category": "known_vulnerability",
+        "severity": severity,
+        "confidence": "low",  # banner-based inference, not a verified exploit
+        "status": "suspected",
+        "description": (
+            f"{cve.cve_id} ({cve.cwe_id}, CVSS {cve.cvss_score}): {cve.summary} "
+            "Inferred from an observed version banner; not verified live."
+        ),
+        "remediation": "Confirm the running version, update to a fixed release, and verify exploitability before acting.",
+        "affected_url": url,
+        "recommended_validations": [],
+    }
+
+
+def _detect_cves_from_headers(headers: list[tuple[str, str]], url: str) -> tuple[list[dict], int]:
+    """Translate observed version banners into suspected CVE findings (offline, anti-hallucination)."""
+    from packages.cve_intelligence import CPETranslator, CVEIntelligenceEngine
+
+    header_dict = {name: value for name, value in headers}
+    engine = CVEIntelligenceEngine()
+    findings: list[dict] = []
+    components = CPETranslator.extract_from_headers(header_dict)
+    for component in components:
+        for cve in engine.match_cves(component):  # match_cves refuses versionless components
+            findings.append(_cve_finding(cve, url))
+    return findings, len(components)
+
+
+def scan_live(
+    destination: Destination,
+    allow_ip: str,
+    *,
+    run: Callable[..., Any] | None = None,
+    detect_cve: bool = False,
+) -> dict:
     """Assess a live, in-scope, ownership-verified target's security headers over the enforced
     single-destination egress runner. `curl --resolve` pins the connection to the authorized IP
     (the allowlist drops everything else, DNS included), so no name is resolved in-container. Reuses
@@ -941,6 +981,19 @@ def scan_live(destination: Destination, allow_ip: str, *, run: Callable[..., Any
     }
     result["observations"].append(observation)
     result["findings"] = _findings(observation)
+    if detect_cve:
+        cve_findings, component_count = _detect_cves_from_headers(headers, url)
+        result["findings"].extend(cve_findings)
+        result["checks"].append(
+            {
+                "category": "cve_intelligence",
+                "status": "completed",
+                "detail": (
+                    f"Version-to-CVE matching over {component_count} observed component(s): "
+                    f"{len(cve_findings)} suspected CVE finding(s). Banner-based, not verified live."
+                ),
+            }
+        )
     result["checks"].append(
         {
             "category": "http_headers",
@@ -1690,6 +1743,7 @@ def scan_comprehensive(
         "graphql": 30,
         "websocket": 30,
         "wordlist": 45,
+        "cve": 10,
     }
     needed_seconds = 60 + sum(_STAGE_FLOORS.get(tool, 0) for tool in enabled_tools)
     max_seconds = min(1800.0, max(float(max_seconds), float(needed_seconds)))
@@ -1775,7 +1829,7 @@ def scan_comprehensive(
             )
 
     # Stage 4: HTTP Security Headers & Cookie Hardening
-    http_res = scan_live(destination, allow_ip, run=runner)
+    http_res = scan_live(destination, allow_ip, run=runner, detect_cve="cve" in enabled_tools)
     result["requests_performed"] += http_res.get("requests_performed", 0)
     result["observations"].extend(http_res.get("observations", []))
     result["findings"].extend(http_res.get("findings", []))
