@@ -132,6 +132,59 @@ def _run_gitleaks(root: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         }
 
 
+_OPENAPI_NAMES = {"openapi.json", "swagger.json"}
+
+
+def _ingest_openapi(root: Path) -> dict[str, Any]:
+    """Ingest the first OpenAPI/Swagger JSON schema in the tree, if any, into a posture check."""
+    schema: Path | None = None
+    scanned = 0
+    for folder, folders, files in os.walk(root):  # never follows directory symlinks
+        folders[:] = [d for d in folders if not d.startswith(".")]
+        for name in files:
+            scanned += 1
+            if name.lower() in _OPENAPI_NAMES:
+                schema = Path(folder, name)
+                break
+        if schema is not None or scanned > 50000:
+            break
+    if schema is None:
+        return {
+            "category": "api_schema",
+            "status": "skipped",
+            "detail": "No OpenAPI/Swagger JSON schema found in the tree.",
+        }
+    try:
+        from packages.scanner_adapters.integrations import openapi
+
+        report = openapi.ingest(schema)
+    except Exception as exc:
+        return {
+            "category": "api_schema",
+            "status": "completed_with_errors",
+            "detail": f"OpenAPI ingestion error ({type(exc).__name__}).",
+        }
+    rel = schema.relative_to(root).as_posix()
+    if report.get("version") is None:
+        return {
+            "category": "api_schema",
+            "status": "completed_with_errors",
+            "detail": f"'{rel}' is not a supported OpenAPI 3.0/3.1 JSON document.",
+        }
+    counts: dict[str, int] = {}
+    for observation in report["observations"]:
+        counts[observation["check"]] = counts.get(observation["check"], 0) + 1
+    notable = (
+        ", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in sorted(counts.items()))
+        or "no notable posture observations"
+    )
+    return {
+        "category": "api_schema",
+        "status": "completed",
+        "detail": f"OpenAPI {report['version']} schema '{rel}': {len(report['endpoints'])} endpoint(s); {notable}.",
+    }
+
+
 def analyze_source_tree(root: Path) -> dict[str, Any]:
     """Scan a confined tree for secrets (Gitleaks when available, else built-in) and inventory deps."""
     dependency_report = inventory(root)
@@ -175,6 +228,7 @@ def analyze_source_tree(root: Path) -> dict[str, Any]:
             ),
         }
     )
+    checks.append(_ingest_openapi(root))
     return {
         "basis": f"source analysis: secrets via {secret_tool}, declared dependencies in-process",
         "findings": findings,

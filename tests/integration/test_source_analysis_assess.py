@@ -103,6 +103,33 @@ class NativeAnalysisTests(unittest.TestCase):
         self.assertEqual(result["findings"], [])
         self.assertIn("dependency_inventory", {c["category"] for c in result["checks"]})
 
+    def test_an_openapi_schema_in_the_tree_is_ingested_into_an_api_schema_check(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            (root / "openapi.json").write_text(
+                json.dumps(
+                    {
+                        "openapi": "3.0.1",
+                        "info": {"title": "t", "version": "1"},
+                        "paths": {"/public": {"get": {"responses": {"200": {"description": "ok"}}}}},
+                    }
+                )
+            )
+            result = analyze_source_tree(root)
+        api = next(c for c in result["checks"] if c["category"] == "api_schema")
+        self.assertEqual(api["status"], "completed")
+        self.assertIn("endpoint(s)", api["detail"])
+
+    def test_no_schema_present_is_a_skipped_api_schema_check(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            (root / "main.py").write_text("x = 1\n")
+            result = analyze_source_tree(root)
+        api = next(c for c in result["checks"] if c["category"] == "api_schema")
+        self.assertEqual(api["status"], "skipped")
+
 
 class GitleaksPathTests(unittest.TestCase):
     """When the pinned Gitleaks binary and the sandbox are present, the real scanner runs."""
