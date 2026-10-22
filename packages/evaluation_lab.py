@@ -17,6 +17,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
+# A benchmark pass requires at least this recall over the handcrafted ground-truth corpus. The
+# reference detectors achieve 1.0; the bar prevents a detector that flags nothing from passing.
+MIN_BENCHMARK_RECALL = 1.0
+
 
 class VulnClass(str, Enum):
     SQL_INJECTION = "sql_injection"
@@ -73,7 +77,9 @@ class DetectorMetrics:
     @property
     def precision(self) -> float:
         denom = self.true_positives + self.false_positives
-        return self.true_positives / denom if denom > 0 else 1.0
+        # No positive predictions means precision is undefined, not perfect: a detector that
+        # flags nothing must never score 1.0.
+        return self.true_positives / denom if denom > 0 else 0.0
 
     @property
     def recall(self) -> float:
@@ -366,8 +372,10 @@ class EvaluationBenchmarkRunner:
             total_tn += metrics.true_negatives
             total_fn += metrics.false_negatives
 
-        overall_precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 1.0
-        overall_recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 1.0
+        # Precision/recall default to 0.0 (not 1.0) when undefined: a detector that predicts nothing
+        # has not demonstrated precision, and a benchmark with no positive ground truth cannot pass.
+        overall_precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
+        overall_recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
         overall_fpr = total_fp / (total_fp + total_tn) if (total_fp + total_tn) > 0 else 0.0
 
         return {
@@ -376,7 +384,13 @@ class EvaluationBenchmarkRunner:
                 "overall_precision": round(overall_precision, 4),
                 "overall_recall": round(overall_recall, 4),
                 "overall_false_positive_rate": round(overall_fpr, 4),
-                "status": "PASS" if overall_fpr == 0.0 and overall_precision == 1.0 else "FAIL",
+                # A pass needs zero false positives AND perfect precision AND non-trivial recall; a
+                # detector that finds nothing (recall 0) can no longer pass.
+                "status": "PASS"
+                if (
+                    overall_fpr == 0.0 and overall_precision == 1.0 and overall_recall >= MIN_BENCHMARK_RECALL
+                )
+                else "FAIL",
             },
             "classes": results,
         }

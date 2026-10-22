@@ -190,7 +190,8 @@ def sanitize_input(user_param: str) -> str:
 """
     res = RemediationValidator.validate_patch(valid_patch, language="python")
     assert res.is_valid is True
-    assert res.deployable is True
+    # Heuristic validation is suggestion-only; it never claims deployability.
+    assert res.deployable is False
     assert res.syntax_error is None
 
     invalid_patch = """
@@ -240,7 +241,7 @@ def test_remediation_patch_validator_unified_diff():
 """
     res = RemediationValidator.validate_patch(valid_diff, "diff")
     assert res.is_valid is True
-    assert res.deployable is True
+    assert res.deployable is False
 
     invalid_diff = "Just change line 10 to use cursor.execute"
     res_bad = RemediationValidator.validate_patch(invalid_diff, "diff")

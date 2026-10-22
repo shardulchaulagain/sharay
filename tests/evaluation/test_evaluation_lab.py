@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from packages.evaluation_lab import (
+    DEFAULT_REFERENCE_DETECTORS,
     EvaluationBenchmarkRunner,
     VulnClass,
     get_ground_truth_corpus,
@@ -118,6 +119,27 @@ class EvaluationLabTests(unittest.TestCase):
         self.assertEqual(summary["overall_precision"], 1.0)
         self.assertEqual(summary["overall_recall"], 1.0)
         self.assertGreaterEqual(summary["total_evaluation_cases"], 10)
+
+    def test_null_detector_fails_the_gate(self) -> None:
+        """E02: a detector that flags nothing must FAIL, not PASS with precision 1.0 / recall 0."""
+        null = {vc: (lambda case: False) for vc in DEFAULT_REFERENCE_DETECTORS}
+        summary = self.runner.run_evaluation(null)["summary"]
+        self.assertEqual(summary["overall_precision"], 0.0)
+        self.assertEqual(summary["overall_recall"], 0.0)
+        self.assertEqual(summary["status"], "FAIL")
+
+    def test_noisy_detector_fails_on_false_positives(self) -> None:
+        """A detector that flags everything has false positives and must FAIL."""
+        noisy = {vc: (lambda case: True) for vc in DEFAULT_REFERENCE_DETECTORS}
+        summary = self.runner.run_evaluation(noisy)["summary"]
+        self.assertGreater(summary["overall_false_positive_rate"], 0.0)
+        self.assertEqual(summary["status"], "FAIL")
+
+    def test_reference_detectors_still_pass(self) -> None:
+        summary = self.runner.run_evaluation()["summary"]
+        self.assertEqual(summary["overall_precision"], 1.0)
+        self.assertEqual(summary["overall_recall"], 1.0)
+        self.assertEqual(summary["status"], "PASS")
 
 
 if __name__ == "__main__":

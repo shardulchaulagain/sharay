@@ -38,108 +38,84 @@ class RemediationValidationResult:
 class RemediationValidator:
     """Validates generated security patches and configs before flagging them as 'deployable'."""
 
+    # A structural/syntax check never proves a patch applies, builds, preserves behaviour or fixes
+    # the issue. So `deployable` is never set True here; it stays a suggestion for a human or a real
+    # apply/build/security pipeline to validate.
+    _SUGGESTION = (
+        " Structural check only; not proven to apply, build, preserve behaviour or fix the issue — "
+        "treat as a suggestion pending real apply/build/security validation."
+    )
+
     @staticmethod
     def validate_patch(code: str, language: str = "python") -> RemediationValidationResult:
         lang = language.strip().lower()
-        if not code or not code.strip():
+
+        def outcome(is_valid: bool, details: str, syntax_error: str | None = None):
             return RemediationValidationResult(
-                is_valid=False,
+                is_valid=is_valid,
                 language=lang,
-                syntax_error="Empty patch content",
+                syntax_error=syntax_error,
                 deployable=False,
-                details="No code provided in remediation patch",
+                details=details + (RemediationValidator._SUGGESTION if is_valid else ""),
             )
+
+        if not code or not code.strip():
+            return outcome(False, "No code provided in remediation patch.", "Empty patch content")
 
         # 1. Python patches: AST compilation
         if lang in {"python", "py"}:
             try:
                 ast.parse(code)
-                return RemediationValidationResult(
-                    is_valid=True,
-                    language=lang,
-                    deployable=True,
-                    details="Python AST parsed successfully without syntax errors.",
-                )
+                return outcome(True, "Python AST parsed without syntax errors.")
             except SyntaxError as err:
-                return RemediationValidationResult(
-                    is_valid=False,
-                    language=lang,
-                    syntax_error=f"Line {err.lineno}: {err.msg}",
-                    deployable=False,
-                    details=f"Python syntax compilation failed: {err}",
+                return outcome(
+                    False, f"Python syntax compilation failed: {err}", f"Line {err.lineno}: {err.msg}"
                 )
 
         # 2. JSON / JSON-schema patches
-        if lang in {"json"}:
+        if lang == "json":
             try:
                 json.loads(code)
-                return RemediationValidationResult(
-                    is_valid=True,
-                    language=lang,
-                    deployable=True,
-                    details="JSON structure validated successfully.",
-                )
+                return outcome(True, "JSON parsed successfully.")
             except json.JSONDecodeError as err:
-                return RemediationValidationResult(
-                    is_valid=False,
-                    language=lang,
-                    syntax_error=str(err),
-                    deployable=False,
-                    details=f"JSON parsing error: {err}",
-                )
+                return outcome(False, f"JSON parsing error: {err}", str(err))
 
-        # 3. Nginx / Apache / Caddy reverse-proxy config
+        # 3. Nginx / Apache / Caddy reverse-proxy config (structural only)
         if lang in {"nginx", "apache", "caddy", "conf"}:
-            open_braces = code.count("{")
-            close_braces = code.count("}")
-            if open_braces != close_braces:
-                return RemediationValidationResult(
-                    is_valid=False,
-                    language=lang,
-                    syntax_error=f"Mismatched braces: {open_braces} open vs {close_braces} close",
-                    deployable=False,
-                    details="Unbalanced configuration block structure.",
-                )
             if "\0" in code:
-                return RemediationValidationResult(
-                    is_valid=False,
-                    language=lang,
-                    syntax_error="Contains null byte",
-                    deployable=False,
-                    details="Configuration contains illegal null byte.",
+                return outcome(False, "Configuration contains an illegal null byte.", "Contains null byte")
+            open_braces, close_braces = code.count("{"), code.count("}")
+            if open_braces != close_braces:
+                return outcome(
+                    False,
+                    "Unbalanced configuration block structure.",
+                    f"Mismatched braces: {open_braces} open vs {close_braces} close",
                 )
-            return RemediationValidationResult(
-                is_valid=True,
-                language=lang,
-                deployable=True,
-                details="Configuration syntax and block balance verified.",
-            )
+            if open_braces == 0:
+                return outcome(
+                    False,
+                    "No configuration directives or blocks found.",
+                    "No recognizable configuration structure",
+                )
+            return outcome(True, "Configuration braces balance.")
 
-        # 4. Unified diff validation
+        # 4. Unified diff: must have a hunk and at least one change line (a header alone changes nothing)
         if lang in {"diff", "patch"}:
             hunk_pattern = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@", re.MULTILINE)
-            has_diff_header = (
-                code.startswith("--- ") or code.startswith("diff --git") or hunk_pattern.search(code)
-            )
-            if not has_diff_header:
-                return RemediationValidationResult(
-                    is_valid=False,
-                    language=lang,
-                    syntax_error="Malformed unified diff header",
-                    deployable=False,
-                    details="Patch missing valid unified diff or hunk headers.",
+            if not hunk_pattern.search(code):
+                return outcome(
+                    False, "Patch has no unified-diff hunk (@@); it changes nothing.", "Missing hunk header"
                 )
-            return RemediationValidationResult(
-                is_valid=True,
-                language=lang,
-                deployable=True,
-                details="Unified diff structure verified.",
-            )
+            change_lines = [
+                line
+                for line in code.splitlines()
+                if line[:1] in ("+", "-") and not line.startswith(("+++", "---"))
+            ]
+            if not change_lines:
+                return outcome(False, "Diff hunk contains no added or removed lines.", "No change lines")
+            return outcome(True, "Unified diff has a hunk with change lines.")
 
-        # Default fallback for plain shell or arbitrary config
-        return RemediationValidationResult(
-            is_valid=True,
-            language=lang,
-            deployable=True,
-            details=f"Heuristic syntax check passed for {lang}.",
+        # Unknown language: cannot be validated, so it is not valid here (never a silent pass).
+        return outcome(
+            False, f"Unrecognized patch language '{lang}'; cannot be validated.", "Unsupported language"
         )

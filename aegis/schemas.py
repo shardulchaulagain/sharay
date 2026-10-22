@@ -110,8 +110,10 @@ class ScanConfig(Input):
 
     def within_scope(self, scope: ScopePolicy | dict) -> "ScanConfig":
         policy = scope if isinstance(scope, ScopePolicy) else ScopePolicy.model_validate(scope)
-        rate = policy.request_rate if self.rate is None else self.rate
-        return self.model_copy(update={"rate": min(rate, 5000.0)})
+        # The effective rate may never exceed the approved ceiling. A requested rate only lowers it;
+        # it can never raise it above policy.request_rate (which the field already bounds at 5000).
+        requested = policy.request_rate if self.rate is None else self.rate
+        return self.model_copy(update={"rate": min(requested, policy.request_rate)})
 
     def require_local_profile(self, profile: str) -> None:
         if profile not in {"safe_http", "approved_templates", "comprehensive"}:
