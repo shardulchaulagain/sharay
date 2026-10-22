@@ -46,9 +46,10 @@ class ZeroTelemetryUpdateManager:
     ) -> None:
         self.current_version = current_version
         self.public_key_hex = public_key_hex
-        resolved_secret = notary_secret or os.environ.get(
-            "SHARAY_UPDATE_SECRET", "sharay_release_secret_2026"
-        )
+        # No embedded default: a trust root must be supplied (Ed25519 public key or an explicit/env
+        # HMAC secret). Without one, signature verification fails closed instead of trusting a
+        # source-visible shared secret that anyone could forge against.
+        resolved_secret = notary_secret or os.environ.get("SHARAY_UPDATE_SECRET")
         self.notary_secret = resolved_secret.encode("utf-8") if resolved_secret else None
         self.update_log: List[Dict[str, Any]] = []
 
@@ -112,7 +113,13 @@ class ZeroTelemetryUpdateManager:
         manifest: ReleaseManifest,
         target_install_path: str,
     ) -> Tuple[bool, str]:
-        """Verifies binary SHA-256 hash and performs atomic file swap with rollback backup."""
+        """Verify the manifest signature and binary SHA-256, then atomically swap with rollback."""
+        # 0. Signature check at the write boundary. The API calls this directly, so it cannot rely
+        # on an earlier check_for_update; an invalid or unverifiable signature must never be applied.
+        if not self.verify_manifest_signature(manifest):
+            self.update_log.append({"event": "signature_verification_failed", "version": manifest.version})
+            return (False, "Update rejected: manifest signature verification failed.")
+
         # 1. Integrity check
         calc_hash = hashlib.sha256(binary_bytes).hexdigest()
         if not hmac.compare_digest(calc_hash, manifest.sha256_hash):

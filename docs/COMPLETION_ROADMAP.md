@@ -41,13 +41,21 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   truthfully. Anchor S14, S50–S51.
 
 ### P0-C · One evidence-based finding state machine  (F06)
-- [ ] **C1 · Bulk-triage cannot invent confirmed (F06).** Bulk and individual (and import/worker/
-  retest) writers go through one transition guard; none can set `confirmed` without qualifying
-  evidence. Anchor S49, S20.
+- [x] **C1 · Bulk-triage cannot invent confirmed (F06).** The bulk endpoint now rejects CONFIRMED/
+  RESOLVED (evidence required, matching the individual endpoint) and maps OPEN/IN_REVIEW/
+  FALSE_POSITIVE to real finding statuses via `BULK_TRIAGE_STATUS_MAP` — also fixing latent status
+  corruption (it previously wrote raw `confirmed`/`resolved`/`in_review`). Evidence: before, bulk
+  CONFIRMED⇒200; after, CONFIRMED/RESOLVED⇒422, FALSE_POSITIVE⇒200 `new_status=false_positive`;
+  regression in `tests/product/test_visualization_api.py` (11 pass). `aegis/api.py`.
 
 ### P0-D · Final-boundary signatures & isolation  (F09–F12)
-- [ ] **D1 · Update applies only with a valid signature (F09/E05).** `apply_update_staged` (and the
-  API path) verify the signature at the write boundary; no embedded default signing secret. Anchor S33, S49.
+- [x] **D1 · Update applies only with a valid signature (F09/E05).** `apply_update_staged` now
+  verifies the manifest signature at the write boundary before any file I/O, and the embedded
+  default HMAC secret is removed (trust root must come from a key or `SHARAY_UPDATE_SECRET`, else it
+  fails closed). Evidence: before, invalid signature + correct hash ⇒ applied; after, no-key⇒reject,
+  wrong-sig⇒reject, correct-sig⇒apply; API `/system/update/apply` rejects a tampered signature with
+  400. Regressions in `tests/integration/test_turnkey_onboarding_and_autoupdate.py` and
+  `tests/product/test_onboarding_api.py`. `services/update_worker/updater.py`.
 - [ ] **D2 · Signed detection packs cover behavior (F10/E09).** Matcher/behavioral fields are in the
   signed canonical bytes; altering a matcher invalidates the signature. Anchor S34.
 - [ ] **D3 · Fail-closed isolation (F11/F12).** No silent host fallback when the sandbox/VM is

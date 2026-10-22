@@ -78,7 +78,13 @@ class TestOnboardingApi(unittest.TestCase):
         self.assertEqual(res_owner.json()["current_step"], "CONTAINER_VERIFICATION")
 
     def test_system_update_check_and_apply_endpoints(self):
-        secret = "sharay_release_secret_2026"
+        import os
+
+        # The server trust root is supplied by configuration, not embedded in source. Configure it
+        # for this test so the check/apply managers can verify; without it they fail closed.
+        secret = "operator-configured-update-secret"
+        os.environ["SHARAY_UPDATE_SECRET"] = secret
+        self.addCleanup(os.environ.pop, "SHARAY_UPDATE_SECRET", None)
         dummy_bin = b"SHARAY_UPDATED_BINARY_CORE_2026"
         bin_hash = hashlib.sha256(dummy_bin).hexdigest()
 
@@ -127,6 +133,18 @@ class TestOnboardingApi(unittest.TestCase):
             # Verify file was updated on disk
             with open(target_path, "rb") as f:
                 self.assertEqual(f.read(), dummy_bin)
+
+            # E05: an invalid signature is rejected by the apply endpoint (fail closed).
+            tampered = {**manifest_dict, "signature": "0" * 64}
+            res_bad = self.client.post(
+                "/api/v1/system/update/apply",
+                json={
+                    "binary_bytes_b64": b64_payload,
+                    "manifest": tampered,
+                    "target_install_path": target_path,
+                },
+            )
+            self.assertEqual(res_bad.status_code, 400)
         finally:
             Path(target_path).unlink(missing_ok=True)
             Path(f"{target_path}.bak").unlink(missing_ok=True)

@@ -113,27 +113,43 @@ class TestZeroTelemetryAutoUpdate:
 
         valid_bytes = b"NEW_SIGNED_VALID_BINARY_PAYLOAD"
         valid_hash = hashlib.sha256(valid_bytes).hexdigest()
+        binary_url = "https://releases.corp/bin"
+        canonical = f"0.2.0:2026-10-18:{valid_hash}:{binary_url}".encode()
+        good_sig = hmac.new(secret.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
 
-        manifest = ReleaseManifest(
-            version="0.2.0",
-            release_date="2026-10-18",
-            sha256_hash=valid_hash,
-            binary_url="https://releases.corp/bin",
-            mandatory_update=False,
-            signature="valid",
-        )
+        def make_manifest(signature: str) -> ReleaseManifest:
+            return ReleaseManifest(
+                version="0.2.0",
+                release_date="2026-10-18",
+                sha256_hash=valid_hash,
+                binary_url=binary_url,
+                mandatory_update=False,
+                signature=signature,
+            )
 
-        # 1. Tampered payload is rejected fail-closed
-        tampered_bytes = b"CORRUPTED_BINARY_ATTACK"
-        ok_bad, msg_bad = mgr.apply_update_staged(tampered_bytes, manifest, install_path)
-        assert ok_bad is False
-        assert "mismatch" in msg_bad.lower()
-        # Original binary remains unchanged
+        # 0. E05: an invalid signature is rejected at the write boundary before any file I/O.
+        ok_sig, msg_sig = mgr.apply_update_staged(valid_bytes, make_manifest("0" * 64), install_path)
+        assert ok_sig is False
+        assert "signature" in msg_sig.lower()
         with open(install_path, "rb") as f:
             assert f.read() == b"SHARAY_BIN_V0.1.0"
 
-        # 2. Valid payload performs atomic swap
-        ok_good, msg_good = mgr.apply_update_staged(valid_bytes, manifest, install_path)
+        # 0b. With no configured trust root, verification fails closed even for a once-valid signature.
+        keyless = ZeroTelemetryUpdateManager(current_version="0.1.0")
+        ok_keyless, _ = keyless.apply_update_staged(valid_bytes, make_manifest(good_sig), install_path)
+        assert ok_keyless is False
+
+        # 1. Correctly signed but tampered payload is rejected on the hash check.
+        signed_manifest = make_manifest(good_sig)
+        tampered_bytes = b"CORRUPTED_BINARY_ATTACK"
+        ok_bad, msg_bad = mgr.apply_update_staged(tampered_bytes, signed_manifest, install_path)
+        assert ok_bad is False
+        assert "mismatch" in msg_bad.lower()
+        with open(install_path, "rb") as f:
+            assert f.read() == b"SHARAY_BIN_V0.1.0"
+
+        # 2. Correctly signed, correct-hash payload performs the atomic swap.
+        ok_good, msg_good = mgr.apply_update_staged(valid_bytes, signed_manifest, install_path)
         assert ok_good is True
         assert mgr.current_version == "0.2.0"
         with open(install_path, "rb") as f:

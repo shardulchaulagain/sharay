@@ -165,17 +165,25 @@ class TestVisualizationApi(unittest.TestCase):
         self.assertEqual(search_res.json()["total_items"], 1)
 
     def test_bulk_triage_and_saved_views(self):
-        # 1. Bulk triage finding to CONFIRMED
+        # F06/C1: bulk triage cannot invent CONFIRMED/RESOLVED without scanner evidence.
+        for forbidden in ("CONFIRMED", "RESOLVED"):
+            denied = self.client.post(
+                "/api/v1/findings/bulk-triage",
+                json={"finding_ids": [self.f1_id], "status": forbidden, "justification": "x"},
+            )
+            self.assertEqual(denied.status_code, 422, f"{forbidden}: {denied.text}")
+        # A legitimate analyst triage status is accepted and written as a real finding status.
         bulk_res = self.client.post(
             "/api/v1/findings/bulk-triage",
             json={
                 "finding_ids": [self.f1_id],
-                "status": "CONFIRMED",
-                "justification": "Verified by senior auditor",
+                "status": "FALSE_POSITIVE",
+                "justification": "Confirmed benign by senior auditor",
             },
         )
-        self.assertEqual(bulk_res.status_code, 200)
+        self.assertEqual(bulk_res.status_code, 200, bulk_res.text)
         self.assertEqual(bulk_res.json()["updated_count"], 1)
+        self.assertEqual(bulk_res.json()["new_status"], "false_positive")
 
         # 2. Save custom view
         save_res = self.client.post(

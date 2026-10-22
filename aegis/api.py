@@ -96,6 +96,25 @@ from packages.shared_schemas import ProposedToolAction, adapter_roadmap
 COOKIE = "aegis_session"
 CONTROL_ROLES = ("owner", "security_administrator")
 SCAN_ROLES = (*CONTROL_ROLES, "analyst")
+# The only statuses a human may set by manual triage (individual or bulk). confirmed/fixed/reopened
+# require execution evidence and are set only by the worker/verifier, never by hand.
+ANALYST_TRIAGE_STATUSES = frozenset(
+    {
+        "needs_triage",
+        "suspected",
+        "inconclusive",
+        "false_positive",
+        "accepted_risk",
+        "remediation_in_progress",
+    }
+)
+# Bulk-triage input uses the TriageStatus vocabulary; only these map to a manual finding status.
+# CONFIRMED and RESOLVED require execution evidence and are intentionally absent (rejected).
+BULK_TRIAGE_STATUS_MAP = {
+    "OPEN": "needs_triage",
+    "IN_REVIEW": "suspected",
+    "FALSE_POSITIVE": "false_positive",
+}
 TERMINAL = {"completed", "completed_with_errors", "cancelled", "failed"}
 
 
@@ -1585,14 +1604,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         row = owned(db, Finding, finding_id, user)
         from aegis.models import FindingHistory
 
-        if data.status not in {
-            "needs_triage",
-            "suspected",
-            "inconclusive",
-            "false_positive",
-            "accepted_risk",
-            "remediation_in_progress",
-        }:
+        if data.status not in ANALYST_TRIAGE_STATUSES:
             raise HTTPException(
                 422, "Confirmation and fixed states require scanner evidence; choose a triage status"
             )
@@ -1680,7 +1692,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not matched_findings:
             raise HTTPException(404, "No matching findings found")
 
-        t_status = getattr(TriageStatus, payload.status, TriageStatus.CONFIRMED)
+        # Same evidence gate as the individual endpoint: bulk triage cannot invent confirmed/fixed.
+        # CONFIRMED/RESOLVED are not in the map and are rejected; the rest map to a manual status.
+        mapped_status = BULK_TRIAGE_STATUS_MAP.get(payload.status.upper())
+        if mapped_status is None:
+            raise HTTPException(
+                422, "Confirmation and fixed states require scanner evidence; choose a triage status"
+            )
+
+        t_status = getattr(TriageStatus, payload.status.upper())  # schema-validated enum member
         triaged_count = bulk_triage_engine.bulk_triage(
             [f.id for f in matched_findings],
             t_status,
@@ -1691,7 +1711,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from aegis.models import FindingHistory
 
         for f in matched_findings:
-            f.status = payload.status.lower()
+            f.status = mapped_status
             db.add(
                 FindingHistory(finding_id=f.id, status=f.status, actor=user.id, reason=payload.justification)
             )
@@ -1701,7 +1721,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "status": "ok",
             "updated_count": triaged_count,
-            "new_status": payload.status,
+            "new_status": mapped_status,
         }
 
     @app.post("/api/v1/views/saved")
