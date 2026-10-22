@@ -119,8 +119,13 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
 - [ ] **X1 · UI scans end-to-end.** From the operator UI: register target → authorize → launch →
   live status → findings → report, verified in a real browser against a loopback fixture.
 - [ ] **X2 · CLI parity.** `cmd_scan` reaches the same contract (auth precedes scan, same clamps).
-- [ ] **X3 · Operator console functionality.** The takeover console commands behave as documented,
-  with correct consent/session semantics.
+- [◐] **X3 · Operator console functionality.** _Console TLS probe/verify fixed_ (user-reported SSL
+  error): the workspace probe and the reproducer now connect to an authorized HTTPS target without
+  cert verification (self-signed/expired/mismatched certs are observations, not connection errors),
+  matching the scanner's TLS inspection; `tls_verified` recorded. Evidence: self-signed HTTPS
+  loopback server ⇒ probe status 200 / reproducer status 200 (was SSLCertVerificationError / status
+  0); regression `tests/integration/test_console_tls_probe.py`. `packages/scanner_adapters/
+  workspace.py`, `reproducer.py`. _(Remaining: consent/session command semantics — B2.)_
 - [ ] **X4 · Full suite + gates green** (unit/integration/product + web lint/typecheck/build + mypy +
   ruff), with the previously-omitted tests included.
 - [ ] **X5 · No reproduced counterexample remains** — every E01–E11 is a permanent passing regression.

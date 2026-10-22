@@ -177,13 +177,17 @@ class InteractiveWorkspace:
         started = time.monotonic()
         conn: http.client.HTTPConnection | http.client.HTTPSConnection
 
+        tls_verified: bool | None = None
         if destination.scheme == "https":
-            try:
-                import certifi
-
-                ctx = ssl.create_default_context(cafile=certifi.where())
-            except Exception:
-                ctx = ssl.create_default_context()
+            # This probe ASSESSES an authorized target, so the target's certificate validity is an
+            # observation, not a precondition: a self-signed, expired or mismatched cert must not
+            # abort the probe (that is exactly the kind of box an operator needs to inspect). Connect
+            # without verification and record that the cert was not trusted, matching the scanner's
+            # TLS inspection. Certificate posture is reported separately, never as a connection error.
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            tls_verified = False
             conn = http.client.HTTPSConnection(
                 destination.host, destination.port, timeout=effective_timeout, context=ctx
             )
@@ -230,6 +234,7 @@ class InteractiveWorkspace:
                     "port": destination.port,
                     "origin": destination.origin,
                     "path": req_path,
+                    "tls_verified": tls_verified,
                 },
             )
         finally:

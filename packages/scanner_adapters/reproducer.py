@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import ssl
 import time
 import urllib.parse
 import urllib.request
@@ -239,11 +240,16 @@ class DeterministicReproducer:
         if data is not None and "Content-Type" not in req_headers:
             req_headers["Content-Type"] = "application/x-www-form-urlencoded"
         req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
-        opener = (
-            urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            if ("127.0.0.1" in url or "localhost" in url)
-            else urllib.request.build_opener()
-        )
+        # Verifying an authorized target's own evidence must not fail on its certificate: a
+        # self-signed, expired or mismatched cert is part of what we are assessing, not a reason to
+        # abort the replay. Connect over TLS without cert verification (assessment context).
+        tls_ctx = ssl.create_default_context()
+        tls_ctx.check_hostname = False
+        tls_ctx.verify_mode = ssl.CERT_NONE
+        handlers: list[urllib.request.BaseHandler] = [urllib.request.HTTPSHandler(context=tls_ctx)]
+        if "127.0.0.1" in url or "localhost" in url:
+            handlers.insert(0, urllib.request.ProxyHandler({}))
+        opener = urllib.request.build_opener(*handlers)
         try:
             with opener.open(req, timeout=timeout) as resp:
                 body = resp.read()
