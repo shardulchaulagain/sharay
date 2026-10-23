@@ -34,8 +34,18 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   Anchor S05.
 
 ### P0-B · Correct impact & session provenance  (F05, F13)
-- [ ] **B1 · Class-specific confirmation (F05/E01).** A benign reflection/echo must NOT become
-  `confirmed/REPRODUCED`; confirmation binds a class-specific postcondition. Anchor S07, S04.
+- [x] **B1 · Class-specific confirmation (F05/E01).** A reflected canary no longer confirms when it
+  is merely our own injected input echoed back as inert text (the `DifferentialOracle` gave any
+  reflection +50, enough to reach `REPRODUCED` alone). It now contributes only +5 (observational,
+  non-confirming) when the canary is a substring of the active payload AND carries no markup
+  metacharacter; it keeps the full +50 for an unescaped markup reflection (executable XSS context) or
+  an independent effect signature (a DB-error string, a `/etc/passwd` marker) that the payload did not
+  contain. Evidence: a search box echoing `sharay_canary_7f3a` ⇒ before REPRODUCED/confirmed, after
+  DEMOTED; `"><sharay_canary>` reflected unescaped ⇒ REPRODUCED; SQL-error (`"syntax"`) and an LFI
+  passwd line the oracle's literal markers miss (`root:!:0:0:`, canary `"root:"`) ⇒ still REPRODUCED.
+  Regression `tests/product/test_reproducer.py::BenignReflectionRegressions` (3) + four prior tests
+  that had codified the unsound echo path rewritten to confirm via a real postcondition. Full suite
+  1027 pass / 1301 subtests; mypy + ruff clean. `packages/scanner_adapters/reproducer.py`.
 - [x] **B2 · RPC session provenance & teardown (F13/E11).** `execute_benign_verification` and
   `MetasploitInteractiveSession.open` now: (1) verify the module options target the consent-approved
   RHOST (`_verify_consent_target`, `PermissionError` on mismatch); (2) require a `vulnerable`/`appears`

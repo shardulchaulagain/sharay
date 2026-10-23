@@ -80,6 +80,11 @@ def transition_state(current: FindingState, target: FindingState) -> FindingStat
     return target
 
 
+# Markup metacharacters whose un-escaped reflection proves an executable (injectable) context.
+# A canary free of these reflecting back is an inert echo, not a confirmable vulnerability.
+_REFLECTION_METACHARS = (b"<", b">", b'"', b"'")
+
+
 class DifferentialOracle:
     """Evaluates HTTP response differences between baseline, mutated, and negative control probes.
 
@@ -122,6 +127,7 @@ class DifferentialOracle:
         canary: str | None = None,
         is_time_based: bool = False,
         baseline_stats: dict[str, float] | None = None,
+        active_payload: str | None = None,
     ) -> tuple[bool, float, str]:
         """Returns (is_anomaly, score, reason)."""
         score = 0.0
@@ -136,8 +142,23 @@ class DifferentialOracle:
             reflected_in_probe = canary_bytes in probe_body and not is_cmd_reflection
             reflected_in_base = canary_bytes in baseline_body
             if reflected_in_probe and not reflected_in_base:
-                score += 50.0
-                reasons.append(f"Canary '{canary}' reflected in response")
+                # A reflected canary confirms only when it is a class-specific postcondition, not when
+                # it is merely our own injected input echoed back as inert text. That inert echo (a
+                # search box, an error page quoting the term) proves the app reflects input -- it is
+                # not XSS and not any injection on its own (E01/B1). It stays confirming when either
+                # the canary carries markup metacharacters reflected UNescaped (an executable XSS
+                # context) or the canary is an independent effect signature (a DB-error string, a
+                # /etc/passwd marker) rather than a substring of the payload we sent.
+                is_injected_echo = active_payload is not None and canary in active_payload
+                is_executable = any(meta in canary_bytes for meta in _REFLECTION_METACHARS)
+                if is_injected_echo and not is_executable:
+                    score += 5.0
+                    reasons.append(
+                        f"Canary '{canary}' reflected as inert input echo (benign; not confirming)"
+                    )
+                else:
+                    score += 50.0
+                    reasons.append(f"Canary '{canary}' reflected in response")
 
         # 2. Time Delta (Blind injection with optional 3-sigma statistical baselining)
         if is_time_based:
@@ -355,6 +376,7 @@ class DeterministicReproducer:
                 elapsed,
                 canary=canary,
                 is_time_based=is_time_based,
+                active_payload=active_payload,
             )
             body_hash = DifferentialOracle.compute_response_hash(body)
             attempts.append(
@@ -394,6 +416,7 @@ class DeterministicReproducer:
             ctrl_elapsed,
             canary=canary,
             is_time_based=is_time_based,
+            active_payload=active_payload,
         )
 
         if ctrl_anomaly:

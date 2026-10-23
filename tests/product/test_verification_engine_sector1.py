@@ -215,13 +215,14 @@ class VerificationEngineSector1Tests(unittest.TestCase):
         """Sector 1.4: Reproducibility score computation on individual results and assessment aggregations."""
         reproducer = DeterministicReproducer()
 
-        # Mock consistent responses
+        # Mock consistent responses: the injected quote elicits a DB error (a class-specific
+        # postcondition), byte-identical across replays; the benign control stays clean.
         client_calls = [
-            (200, b"Baseline safe", 20.0),  # Baseline
-            (200, b"Injected: canary_token_12345", 25.0),  # Replay 1
-            (200, b"Injected: canary_token_12345", 24.0),  # Replay 2
-            (200, b"Injected: canary_token_12345", 26.0),  # Replay 3
-            (200, b"Baseline safe", 20.0),  # Negative control
+            (200, b"Welcome, user.", 20.0),  # Baseline
+            (200, b"You have an error in your SQL syntax near '''", 25.0),  # Replay 1
+            (200, b"You have an error in your SQL syntax near '''", 24.0),  # Replay 2
+            (200, b"You have an error in your SQL syntax near '''", 26.0),  # Replay 3
+            (200, b"Welcome, user.", 20.0),  # Negative control
         ]
         call_idx = 0
 
@@ -235,8 +236,8 @@ class VerificationEngineSector1Tests(unittest.TestCase):
         res = reproducer.verify_finding(
             base_url="http://target.local/search?q=test",
             fuzz_param="q",
-            active_payload="canary_token_12345",
-            canary="canary_token_12345",
+            active_payload="'",
+            canary="syntax",
         )
 
         self.assertTrue(res.confirmed)
@@ -261,13 +262,17 @@ class VerificationEngineSector1Tests(unittest.TestCase):
         """Sector 1.5: Gating test ensuring false positives are demoted fail-closed."""
         reproducer = DeterministicReproducer()
 
-        # Target reflects everything (including benign control payload)
+        # Target returns a DB error for EVERYTHING (including the benign control): non-differentiating.
         client_calls = [
             (200, b"Baseline", 20.0),
-            (200, b"Reflected: canary_x", 20.0),  # Replay 1
-            (200, b"Reflected: canary_x", 20.0),  # Replay 2
-            (200, b"Reflected: canary_x", 20.0),  # Replay 3
-            (200, b"Reflected: canary_x", 20.0),  # Negative control also reflects canary: false positive!
+            (200, b"You have an error in your SQL syntax", 20.0),  # Replay 1
+            (200, b"You have an error in your SQL syntax", 20.0),  # Replay 2
+            (200, b"You have an error in your SQL syntax", 20.0),  # Replay 3
+            (
+                200,
+                b"You have an error in your SQL syntax",
+                20.0,
+            ),  # Negative control ALSO errors: false positive!
         ]
         call_idx = 0
 
@@ -281,8 +286,8 @@ class VerificationEngineSector1Tests(unittest.TestCase):
         res = reproducer.verify_finding(
             base_url="http://target.local/echo?p=hi",
             fuzz_param="p",
-            active_payload="canary_x",
-            canary="canary_x",
+            active_payload="'",
+            canary="syntax",
         )
         self.assertFalse(res.confirmed)
         self.assertEqual(res.state, FindingState.DEMOTED)
