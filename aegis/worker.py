@@ -60,7 +60,11 @@ class PersistentRequestStarts(dict[str, tuple[float, float]]):
 
     @staticmethod
     def _interval(value):
-        if type(value) not in (int, float) or not math.isfinite(value) or value < 0.1:
+        # Any positive finite cooldown is valid. The authorized request-rate ceiling is enforced by
+        # the scope/ScanConfig; this store must not impose a hidden stricter floor -- a scope that
+        # allows e.g. 150 req/s yields a ~0.0067s interval, and rejecting it crashed every scan whose
+        # rate exceeded 10 req/s (the safe-HTTP worker never completed).
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
             raise ValueError("Invalid stored request cooldown")
         return float(value)
 

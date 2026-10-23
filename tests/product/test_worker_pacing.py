@@ -367,8 +367,19 @@ finally:
         self.assertEqual(self.connection_starts, [])
         self.assertEqual(pacing, {})
 
+    def test_high_rate_scope_scans_without_crashing(self):
+        # A scope rate above 10 req/s yields a sub-0.1s cooldown; that must pace the scan, not crash
+        # it. The persistent store previously rejected the interval, so the safe-HTTP worker failed
+        # with a generic "malformed response" error and every UI-launched scan failed at 0s.
+        job = self.enqueue(rate=150.0)
+        run_one(self.sessions)
+        self.assertEqual(self.status(job), "completed")
+        self.assertEqual(len(self.connection_starts), 1)
+
     def test_invalid_stored_interval_fails_before_connection(self):
-        for interval in (float("inf"), -1, 0, 0.05):
+        # Only a corrupt stored cooldown (non-finite or non-positive) fails closed; a fast-but-valid
+        # interval such as 0.05s (20 req/s) is legitimate and must not be treated as corruption.
+        for interval in (float("inf"), -1, 0):
             with self.subTest(interval=interval):
                 failed = self.enqueue()
                 with self.engine.begin() as connection:
