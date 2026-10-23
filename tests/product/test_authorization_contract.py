@@ -46,6 +46,47 @@ class RateCeilingTests(unittest.TestCase):
                 self.assertGreater(effective, 0)
 
 
+class UiToolOptionParityTests(unittest.TestCase):
+    """P1-1: every scan tool the operator UI can select must be accepted by the API ScanConfig.
+
+    The UI (apps/web/app/projects.tsx) offers these tool toggles; cve/graphql/websocket/wordlist
+    were previously missing from the API Literal, so selecting any of them failed launch validation.
+    """
+
+    UI_TOOLS = [
+        "nmap",
+        "crawler",
+        "sensitive",
+        "diff",
+        "nuclei",
+        "zap",
+        "metasploit",
+        "cve",
+        "graphql",
+        "websocket",
+        "wordlist",
+        "browser",
+        "schema",
+        "auth_matrix",
+        "payload_forge",
+        "reproducer",
+    ]
+
+    def test_each_ui_tool_is_accepted(self):
+        for tool in self.UI_TOOLS:
+            with self.subTest(tool=tool):
+                cfg = ScanConfig.model_validate({"mode": "adaptive", "tools": [tool]})
+                self.assertEqual(cfg.tools, [tool])
+
+    def test_full_ui_tool_selection_is_accepted(self):
+        cfg = ScanConfig.model_validate({"mode": "adaptive", "tools": self.UI_TOOLS})
+        self.assertEqual(set(cfg.tools), set(self.UI_TOOLS))
+
+    def test_unknown_tool_is_still_rejected(self):
+        with self.assertRaises(Exception):
+            ScanConfig.model_validate({"mode": "adaptive", "tools": ["bogus_tool"]})
+
+
 class WorkspaceDestinationParityTests(unittest.TestCase):
     """F01/E07: the workspace probe must enforce the same destination policy as execution."""
 

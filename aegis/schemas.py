@@ -83,8 +83,14 @@ class ScanConfig(Input):
             "ffuf",
             "dalfox",
             "katana",
+            # Tools offered in the operator UI and dispatched by scan_comprehensive; previously
+            # omitted here, so selecting any of them in the UI failed launch validation (P1-1).
+            "cve",
+            "graphql",
+            "websocket",
+            "wordlist",
         ]
-    ] = Field(default_factory=list, max_length=18)
+    ] = Field(default_factory=list, max_length=19)
 
     @field_validator("severities")
     @classmethod

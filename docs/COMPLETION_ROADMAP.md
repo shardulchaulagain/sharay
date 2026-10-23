@@ -205,8 +205,16 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
 
 ## P1 — Wire configuration, credentials, source lifecycle & operations
 
-- [ ] **P1-1 · Every UI scan option dispatches & records (wiring ledger).** No displayed option is
-  rejected by the API `Literal` list; each produces a recorded result. Anchor S45, S02.
+- [x] **P1-1 · Every UI scan option dispatches & records (wiring ledger).** The operator UI
+  (`apps/web/app/projects.tsx`) offers `cve`, `graphql`, `websocket` and `wordlist` tool toggles and
+  the scanner dispatches them (CVE stage + stages 11–13, each recording a check), but the API
+  `ScanConfig.tools` `Literal` omitted all four — selecting any of them failed launch validation
+  (422). Added the four to the Literal (max_length 18→19). UI profiles (safe_http/approved_templates/
+  comprehensive) and modes (passive/standard/adaptive/aggressive) already matched. Evidence: before,
+  `ScanConfig(tools=["cve"])` ⇒ ValidationError; after, each of the 4 and the full 16-tool UI
+  selection validate, and an unknown tool is still rejected. Regression
+  `tests/product/test_authorization_contract.py::UiToolOptionParityTests`. Full suite 1052 pass /
+  1316 subtests; mypy + ruff clean. `aegis/schemas.py`.
 - [ ] **P1-2 · Source analysis joins the normal lifecycle.** Source findings persist as
   assessment/findings/evidence and appear in reports & retests (not returned ad hoc). Anchor S21.
 - [ ] **P1-3 · SAST/SCA/SBOM assembled workflow.** Semgrep dispatch, OSV advisory source + freshness,
