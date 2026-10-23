@@ -778,16 +778,23 @@ class ImagePinningEngine:
         cls,
         image_ref: str,
         trusted_public_key: str,
-        mock_verifier_fn: Any = None,
+        verifier_fn: Any = None,
     ) -> bool:
-        """Simulate or invoke cosign signature verification against trusted public key."""
+        """Verify a cosign signature against the trusted public key via a real verifier callback.
+
+        Fail closed: with no verifier callback configured there is nothing that actually checked the
+        signature, so this refuses rather than assuming the image is signed (F12). A deployment wires
+        `verifier_fn` to `cosign verify` (or an equivalent); tests pass a deterministic stub."""
         cls.validate_image_digest_pinning(image_ref, require_digest=True)
         if not trusted_public_key:
             raise IsolationError("Trusted public key is required for image signature verification.")
 
-        if mock_verifier_fn is not None:
-            return bool(mock_verifier_fn(image_ref, trusted_public_key))
-        return True
+        if verifier_fn is None:
+            raise IsolationError(
+                "No cosign verifier is configured; refusing to assume a valid image signature "
+                "(fail closed). Wire a real cosign verifier before executing contained images."
+            )
+        return bool(verifier_fn(image_ref, trusted_public_key))
 
 
 class AttestationState(str, Enum):

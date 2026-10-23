@@ -265,8 +265,16 @@ class ContainerBackendTests(unittest.TestCase):
         with self.assertRaisesRegex(IsolationError, "violates immutability policy"):
             cb.ImagePinningEngine.validate_image_digest_pinning("alpine:latest", require_digest=True)
 
-        # Cosign signature verification
-        self.assertTrue(cb.ImagePinningEngine.verify_cosign_signature(pinned, "cosign-pub-key-123"))
+        # Cosign signature verification uses a real verifier callback; with one it reflects its
+        # verdict, and with none it fails closed (never assumes a valid signature -- F12).
+        self.assertTrue(
+            cb.ImagePinningEngine.verify_cosign_signature(pinned, "cosign-pub-key-123", lambda ref, key: True)
+        )
+        self.assertFalse(
+            cb.ImagePinningEngine.verify_cosign_signature(pinned, "cosign-pub-key-123", lambda ref, key: False)
+        )
+        with self.assertRaisesRegex(IsolationError, "No cosign verifier is configured"):
+            cb.ImagePinningEngine.verify_cosign_signature(pinned, "cosign-pub-key-123")
         with self.assertRaisesRegex(IsolationError, "Trusted public key is required"):
             cb.ImagePinningEngine.verify_cosign_signature(pinned, "")
 

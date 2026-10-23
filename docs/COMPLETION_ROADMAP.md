@@ -113,9 +113,18 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   `tests/product/test_detection_packs.py::test_matcher_tampering_invalidates_signature`; the 3 prior
   pack tests still pass. Full suite 1043 pass / 1301 subtests; mypy + ruff clean.
   `packages/detection_packs.py`.
-- [ ] **D3 · Fail-closed isolation (F11/F12).** No silent host fallback when the sandbox/VM is
-  unavailable; cosign verify needs a real verifier; attestation records controls actually applied.
-  Anchor S08, S10, S35.
+- [◐] **D3 · Fail-closed isolation (F11/F12).** _Cosign fail-open closed:_
+  `ImagePinningEngine.verify_cosign_signature` returned `True` whenever no verifier callback was
+  supplied — assuming a valid image signature with nothing having checked it. It now fails closed:
+  with no `verifier_fn` configured it raises `IsolationError` ("No cosign verifier is configured;
+  refusing to assume a valid image signature"); a real/stub verifier's verdict is reflected
+  (True/False), and the missing-trusted-key guard is unchanged. Evidence: before, `(pinned, key)` ⇒
+  True; after, `(pinned, key)` ⇒ `IsolationError`, `(pinned, key, lambda:…True)` ⇒ True,
+  `…False` ⇒ False. Regression in `tests/integration/test_container_backend.py` (24 pass). Full
+  suite 1043 pass / 1301 subtests; mypy + ruff clean. `services/scanner_worker/container.py`.
+  _(Remaining: `attest()` advertises controls from the runtime binary name rather than a
+  `podman info`/per-run capability probe; VM-branch host fallback; Chromium `--no-sandbox` — each
+  needs a live container/VM/browser to verify a fix, so deferred to the deployment-validation pass.)_
 
 ### P0-E · Repair metrics, gates & execution claims  (F07, F08, F18–F20)
 - [x] **E1 · Null detector must fail the eval gate (F18/E02).** Precision no longer defaults to 1.0
