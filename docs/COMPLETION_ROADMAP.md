@@ -91,8 +91,20 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   MIN_BENCHMARK_RECALL` (1.0 on the handcrafted corpus). Evidence: before, NULL⇒prec 1.0/recall
   0.0/**PASS**; after, NULL⇒0.0/0.0/**FAIL**, NOISY⇒FPR 1.0/**FAIL**, REFERENCE⇒1.0/1.0/**PASS**;
   regressions in `tests/evaluation/test_evaluation_lab.py` (10 pass). `packages/evaluation_lab.py`.
-- [ ] **E2 · Sound benchmark scorer (F19/E08).** No empty-CWE matches; duplicates do not inflate
-  TPs; recall ∈ [0,1]; FPR well-defined. Anchor S19.
+- [x] **E2 · Sound benchmark scorer (F19/E08).** The fixture scorer (`tests/fixtures/eval_lab/
+  evaluator.py`) yielded impossible metrics: an empty-string CWE substring-matched every item, a
+  substring CWE matched (`CWE-7`⊂`CWE-79`), each duplicate finding added another TP, so one
+  ground-truth item + three unrelated findings gave recall=3.0, F1=1.5, **PASS**; the FPR had no true
+  negatives. Rewritten: matching is keyed on location (endpoint + parameter) with CWE as an exact
+  identity that only blocks on conflict (never empty, never substring); a TP is a distinct
+  ground-truth item detected (redundant findings for one item count once), so recall ∈ [0,1] by
+  construction; added an always-defined `false_discovery_rate` and a true `false_positive_rate`
+  measured over an optional benign corpus (None when absent, never fabricated from positives); the
+  gate uses precision + FDR + measured FPR. Evidence: the impossible case now gives tp=0, recall=0.0,
+  **FAIL**; `CWE-7`≠`CWE-79`; three findings for one vuln ⇒ tp=1/recall=1.0; the mock-server corpus
+  still scores tp=4/precision=1.0/recall=0.8/fpr=0.0/**PASS**. Regressions
+  `tests/product/test_eval_lab.py::BenchmarkScorerSoundnessTests` (4) + updated end-to-end assertions;
+  catalog gains a `benign` corpus. Full suite 1036 pass / 1301 subtests; mypy + ruff clean.
 - [x] **E3 · Completion derives from execution (F07/E06).** Three fabrications removed: (1) an AI
   analysis with no graph nodes, observations or findings reported `posture_score=100` + all five
   kill-chain phases `completed` — now posture is `None` with `assessed=False`/`coverage="none"`,

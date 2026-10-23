@@ -47,5 +47,19 @@
       "parameter": null,
       "reproducible": true
     }
+  ],
+  "benign": [
+    {
+      "id": "BN-HEALTH-01",
+      "cwe": "CWE-89",
+      "endpoint": "/health",
+      "parameter": "id"
+    },
+    {
+      "id": "BN-ABOUT-01",
+      "cwe": "CWE-79",
+      "endpoint": "/about",
+      "parameter": "q"
+    }
   ]
 }
