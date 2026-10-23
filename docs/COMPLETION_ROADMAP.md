@@ -239,9 +239,23 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
 ---
 
 ## Cross-cutting acceptance (the "working SHARAY" bar)
-- [ ] **X1 · UI scans end-to-end.** From the operator UI: register target → authorize → launch →
-  live status → findings → report, verified in a real browser against a loopback fixture.
-- [ ] **X2 · CLI parity.** `cmd_scan` reaches the same contract (auth precedes scan, same clamps).
+- [x] **X1 · UI scans end-to-end.** Verified in a real browser against the live stack (`aegis serve`
+  serving the Next.js UI + loopback API on one origin) and a loopback HTTP fixture: login → create
+  project → register target `http://127.0.0.1:9011/` → review scope → record authorization (→
+  `Verified Lab`) → approve & launch → live status (`Running`) → `Completed` with **4 observations /
+  4 findings** (missing CSP, X-Content-Type-Options, Referrer-Policy, frame protection) → report
+  export returns 200 (JSON 45 KB with assessment/checks/findings/observations/scope). **This
+  walkthrough surfaced a real bug that broke every UI scan** (`6984ac1`): the worker's
+  `PersistentRequestStarts._interval` rejected any cooldown < 0.1s, so a scope at the default
+  `request_rate=150` (interval ≈ 0.0067s) crashed into a generic "malformed response" failure at 0s;
+  now only a corrupt (non-finite/non-positive) cooldown is rejected, and the same assessment
+  completes with findings. Regression `test_worker_pacing.py::test_high_rate_scope_scans_without_crashing`.
+- [x] **X2 · CLI parity.** Delivered by A4 + A3: `cmd_scan` now records the owner/target
+  authorization and the assessment (binding `scope_version`) and validates the destination via
+  `check_execution_url(owned=...)` BEFORE any probe; the rate ceiling clamps identically (A1,
+  `ScanConfig.within_scope`), finding status is derived by the worker's `_finding_status`, and the
+  scope is threaded into `scan_comprehensive` (A3). Verified by
+  `test_cli.py::CliScanAuthorizationTests` (auth precedes execution; worker-parity status; no-swallow).
 - [◐] **X3 · Operator console functionality.** _Console TLS probe/verify fixed_ (user-reported SSL
   error): the workspace probe and the reproducer now connect to an authorized HTTPS target without
   cert verification (self-signed/expired/mismatched certs are observations, not connection errors),
