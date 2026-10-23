@@ -57,6 +57,41 @@ def test_dockerfile_and_compose_security_baseline():
     assert "10/10 security baseline" in msg
 
 
+def _container_cmd(dockerfile: str) -> list[str]:
+    import json
+    import re
+
+    match = re.search(r"^CMD (\[.*\])\s*$", dockerfile, re.MULTILINE)
+    assert match, "Dockerfile has no JSON-array CMD"
+    return json.loads(match.group(1))
+
+
+def test_container_command_matches_real_cli_grammar():
+    """E10/F?: the container CMD must be accepted by the real CLI parser (not rejected, exit 2).
+
+    Validated by replaying `python -m aegis <CMD...> --help`: valid grammar exits 0, the previous
+    `serve --port ... --host ...` form exited 2 (unrecognized arguments), so the container never
+    started. Checks both the generated Dockerfile and the committed repo Dockerfile.
+    """
+    import subprocess
+    import sys
+
+    repo_dockerfile = (Path(__file__).resolve().parents[2] / "Dockerfile").read_text()
+    for dockerfile in (ProductionDeploymentConfig.generate_dockerfile(), repo_dockerfile):
+        cmd = _container_cmd(dockerfile)
+        assert "--host" not in cmd, "serve binds loopback by design; --host is not a CLI option"
+        completed = subprocess.run(
+            [sys.executable, "-m", "aegis", *cmd, "--help"],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            timeout=30,
+        )
+        assert completed.returncode == 0, (
+            f"container CMD {cmd} rejected by CLI parser (exit {completed.returncode}): "
+            f"{completed.stderr.decode()[-200:]}"
+        )
+
+
 def test_openapi_schema_export():
     """Verify versioned OpenAPI route documentation generation."""
     with tempfile.TemporaryDirectory() as tmp_dir:

@@ -215,9 +215,14 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   stored redacted evidence. Anchor S06, S12.
 - [ ] **P1-5 · AI investigations persist.** Typed plan → policy → operator approval → execution →
   usage/outcome survive restart. Anchor S29.
-- [ ] **P1-6 · Working deployment.** One supported deployment from clean env: login → authorized
-  scan → report → restart → recovery. Dockerfile command matches the real CLI; Postgres path real or
-  removed. Anchor S26, S42–S44, S48.
+- [◐] **P1-6 · Working deployment.** One supported deployment from clean env: login → authorized
+  scan → report → restart → recovery. _Done:_ the container command now matches the real CLI —
+  `serve --port … --host …` (rejected by argparse, exit 2, so the container never started — E10) is
+  now `--port 8000 serve` (parent option before the subcommand; no `--host`, serve binds loopback),
+  fixed in both the committed `Dockerfile` and `ProductionDeploymentConfig.generate_dockerfile()`,
+  with a regression that replays the CMD through the real parser. _(Remaining: the Postgres compose
+  path — real or removed, incl. its hardcoded default password — and an end-to-end clean-env deploy
+  run, which needs a live container.)_ Anchor S26, S42–S44, S48.
 - [ ] **P1-7 · Durable integrations.** Retention actually mutates the DB; ticketing hits a real
   provider or is labelled local; notary trust root configured. Anchor S36, S37, S24.
 - [ ] **P1-8 · MFA / project RBAC enforced.** TOTP persists + gates login; project membership
@@ -248,12 +253,19 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   driven session provably correlated to this run. _(Remaining for full X3: end-to-end console
   walk-through under X1/X2.)_
 - [◐] **X4 · Full suite + gates green** (unit/integration/product + web lint/typecheck/build + mypy +
-  ruff), with the previously-omitted tests included. _Python side green and now complete:_ the
-  authoritative `engineering/run_tests.py` exits 0 running all 1037 tests (957 via unittest + 1037
-  via pytest; the 80 pytest-style tests no longer skipped — E5), ruff + mypy clean per touched file.
-  Web `tsc --noEmit` clean. _(Remaining: a single `check.py --run-gates` run recording all four
-  Python gates + web lint/build as one evidence bundle.)_
-- [ ] **X5 · No reproduced counterexample remains** — every E01–E11 is a permanent passing regression.
+  ruff), with the previously-omitted tests included. **`check.py --run-gates` bundle is green:**
+  `{python-unit-and-integration-tests: passed, python-lint: passed, python-format: passed,
+  python-types: passed}` (test gate diagnostics `tests_run=967, failures=0, errors=0, skipped=0`; the
+  runner also runs the full 1047-test pytest leg, E5). Web side clean: `tsc --noEmit` exit 0, `eslint`
+  exit 0 (1 pre-existing non-blocking warning), `oxlint` exit 0. Fixed en route: 4 pre-existing lint
+  errors in `scripts/run_live_scan.py` and format drift in 3 edited files. _(Remaining: `next build`
+  not run — heavier, deferred to the deployment-validation pass.)_
+- [x] **X5 · No reproduced counterexample remains** — every E01–E11 is a permanent passing
+  regression: E01 benign reflection (B1), E02 null detector (E1), E03 rate ceiling (A1), E04 patch
+  validator (E4), E05 invalid update (D1), E06 empty-AI completion (E3), E07 private destination
+  (A2), E08 alternate scorer (E2), E09 signed matcher (D2), E10 Docker CLI command mismatch
+  (`test_packaging_and_deploy.py::test_container_command_matches_real_cli_grammar`), E11 RPC session
+  (B2). Each reproduced first, then pinned by a test that fails on the old behavior.
 
 ---
 

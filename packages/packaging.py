@@ -163,8 +163,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=3s --retries=3 \\
     CMD curl -f http://localhost:8000/api/v1/overview || exit 1
 
+# `--port` is a top-level option and must precede the subcommand; `serve` takes no `--host`
+# (it binds loopback by design). `serve --port ... --host ...` is rejected by argparse (exit 2).
 ENTRYPOINT ["python", "-m", "aegis"]
-CMD ["serve", "--port", "8000", "--host", "0.0.0.0"]
+CMD ["--port", "8000", "serve"]
 """
 
     @staticmethod

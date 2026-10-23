@@ -14,13 +14,13 @@ import json
 import secrets
 import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 
+from aegis.auth import digest
 from aegis.config import Settings
 from aegis.database import create_database
-from aegis.models import SessionRecord, Target, User
-from aegis.auth import digest
+from aegis.models import SessionRecord, User
 
 settings = Settings.from_env()
 engine, SessionLocal = create_database(settings, migrate=False)
@@ -140,7 +140,7 @@ print(f"[+] Target approved! Status: {approved_target['verification_status']}")
 
 # Step 5: Launch Assessment
 idempotency_key = f"scan-{secrets.token_hex(8)}"
-print(f"[+] Launching assessment with profile=comprehensive, mode=adaptive...")
+print("[+] Launching assessment with profile=comprehensive, mode=adaptive...")
 assessment = api_call(
     "/assessments",
     method="POST",
@@ -171,7 +171,7 @@ for _ in range(60):
     if status in ("completed", "failed", "cancelled"):
         break
 
-print(f"\n[+] Final assessment state:")
+print("\n[+] Final assessment state:")
 print(f"    Status: {state.get('status')}")
 print(f"    Stage: {state.get('stage')}")
 print(f"    Findings count: {len(state.get('findings', []))}")
