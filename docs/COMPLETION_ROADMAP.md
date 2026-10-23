@@ -36,9 +36,22 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
 ### P0-B · Correct impact & session provenance  (F05, F13)
 - [ ] **B1 · Class-specific confirmation (F05/E01).** A benign reflection/echo must NOT become
   `confirmed/REPRODUCED`; confirmation binds a class-specific postcondition. Anchor S07, S04.
-- [ ] **B2 · RPC session provenance & teardown (F13/E11).** No execute after a safe precheck;
-  session must correlate to the job/target; consent options must match; `close()` reports failure
-  truthfully. Anchor S14, S50–S51.
+- [x] **B2 · RPC session provenance & teardown (F13/E11).** `execute_benign_verification` and
+  `MetasploitInteractiveSession.open` now: (1) verify the module options target the consent-approved
+  RHOST (`_verify_consent_target`, `PermissionError` on mismatch); (2) require a `vulnerable`/`appears`
+  precheck before `module.execute` (no execute after a safe precheck); (3) snapshot `session.list`
+  before/after and bind only to a NEW session whose host metadata matches the approved target —
+  `close()`/`open` fail closed (`MsfRpcUnavailable`) when no correlated session exists; (4) `close()`
+  returns the real teardown result (False if `session.stop` errors). `approved_rhost` is in the signed
+  consent hash; the console (`aegis/interactive.py`) pins RHOSTS/RHOST/RPORT to the authorized target.
+  Also tightened `_select_correlated_session`: a lone new session is accepted only when its target is
+  genuinely unknown, never when its own host metadata names a different host (reproduced provenance
+  hole). Evidence: safe-precheck⇒refused, `module.execute` never called; unrelated/pre-existing
+  session (host 10.0.0.250 ≠ approved 10.0.0.5)⇒`MsfRpcUnavailable`; options RHOSTS mismatch⇒
+  `PermissionError`; happy path⇒session 9, `close()`⇒True; `session.stop` raises⇒`close()`⇒False.
+  Regressions `tests/product/test_msf_rpc_sector_o2.py::SessionProvenanceRegressions` (5) +
+  `test_o5_interactive_session.py` (stateful, approved_rhost) — 16 pass; mypy clean; full suite 1024
+  pass / 1301 subtests. `packages/scanner_adapters/integrations/msf_rpc.py`, `aegis/interactive.py`.
 
 ### P0-C · One evidence-based finding state machine  (F06)
 - [x] **C1 · Bulk-triage cannot invent confirmed (F06).** The bulk endpoint now rejects CONFIRMED/
@@ -125,7 +138,10 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   matching the scanner's TLS inspection; `tls_verified` recorded. Evidence: self-signed HTTPS
   loopback server ⇒ probe status 200 / reproducer status 200 (was SSLCertVerificationError / status
   0); regression `tests/integration/test_console_tls_probe.py`. `packages/scanner_adapters/
-  workspace.py`, `reproducer.py`. _(Remaining: consent/session command semantics — B2.)_
+  workspace.py`, `reproducer.py`. Console `msf session` consent/session semantics now hardened (B2):
+  RHOSTS/RHOST/RPORT pinned to the authorized target, execution gated on a vulnerable precheck, the
+  driven session provably correlated to this run. _(Remaining for full X3: end-to-end console
+  walk-through under X1/X2.)_
 - [ ] **X4 · Full suite + gates green** (unit/integration/product + web lint/typecheck/build + mypy +
   ruff), with the previously-omitted tests included.
 - [ ] **X5 · No reproduced counterexample remains** — every E01–E11 is a permanent passing regression.

@@ -15,8 +15,10 @@ from unittest.mock import MagicMock
 
 from packages.scanner_adapters.integrations.msf_rpc import (
     BenignSessionExecutionResult,
+    MetasploitInteractiveSession,
     MetasploitModuleDescriptor,
     MetasploitRPCClient,
+    MsfRpcUnavailable,
     MsfvenomPayloadGenerator,
     OperatorConsentReceipt,
 )
@@ -82,9 +84,11 @@ class TestSectorO2MetasploitFullCapacity(unittest.TestCase):
         self.mock_transport.send_rpc.side_effect = [
             # check call response
             {"code": "vulnerable", "reason": "Target vulnerable to path traversal"},
+            # session list BEFORE execution (no pre-existing sessions)
+            {},
             # exploit execution call response
             {"job_id": 101, "uuid": "sess-uuid-99"},
-            # session list polling
+            # session list AFTER execution: a new session correlated to the authorized target
             {"1": {"type": "shell", "info": "sh", "target_host": "104.21.13.218"}},
             # command execution output
             {"data": "uid=33(www-data) gid=33(www-data) groups=33(www-data)\n"},
@@ -96,6 +100,7 @@ class TestSectorO2MetasploitFullCapacity(unittest.TestCase):
             operator_id="operator_shardul",
             target_url="https://example.com/",
             approved_module="exploit/multi/http/apache_normalize_path",
+            approved_rhost="104.21.13.218",
             non_destructive_command="id",
             session_lifetime_limit_seconds=10.0,
         )
@@ -191,11 +196,11 @@ class TestSectorO2FailClosedAndRealTransport(unittest.TestCase):
             },
             "module.check": {"code": "vulnerable"},
             "module.execute": {"job_id": 42, "uuid": "u-1"},
-            "session.list": {"1": {"type": "shell", "target_host": "127.0.0.1"}},
             "session.shell_write": {"data": "uid=0(root) gid=0(root)\n"},
             "session.stop": {"result": "success"},
         }
         seen_auth_header = {}
+        state = {"executed": False}
 
         class H(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):
@@ -205,9 +210,16 @@ class TestSectorO2FailClosedAndRealTransport(unittest.TestCase):
                 n = int(self.headers.get("Content-Length", 0))
                 req = json.loads(self.rfile.read(n))
                 seen_auth_header["value"] = self.headers.get("Authorization")
-                out = json.dumps(
-                    {"jsonrpc": "2.0", "result": responses.get(req["method"], {}), "id": req["id"]}
-                ).encode()
+                method = req["method"]
+                if method == "module.execute":
+                    state["executed"] = True
+                    result = responses["module.execute"]
+                elif method == "session.list":
+                    # A new session correlated to the target appears only after execution.
+                    result = {"1": {"type": "shell", "target_host": "127.0.0.1"}} if state["executed"] else {}
+                else:
+                    result = responses.get(method, {})
+                out = json.dumps({"jsonrpc": "2.0", "result": result, "id": req["id"]}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(out)))
@@ -308,6 +320,91 @@ class TestSectorO2ConsoleSearchWiring(unittest.TestCase):
             os.environ.pop("SHARAY_MSFRPC_URL", None)
             srv.shutdown()
             srv.server_close()
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class _StatefulRPC:
+    """A fake msfrpcd transport: the session appears only after module.execute."""
+
+    def __init__(self, *, check_code="vulnerable", session=None, stop_raises=False):
+        self.check_code = check_code
+        self.session = session if session is not None else {"9": {"target_host": "10.0.0.5"}}
+        self.stop_raises = stop_raises
+        self.executed = False
+        self.calls: list[str] = []
+
+    def send_rpc(self, method, params):
+        self.calls.append(method)
+        if method == "module.check":
+            return {"code": self.check_code}
+        if method == "module.execute":
+            self.executed = True
+            return {"job_id": 1}
+        if method == "session.list":
+            return self.session if self.executed else {}
+        if method in ("session.shell_write", "session.shell_read"):
+            return {"data": "uid=0(root)"}
+        if method == "session.stop":
+            if self.stop_raises:
+                raise RuntimeError("stop failed")
+            return {"result": "success"}
+        return {}
+
+
+class SessionProvenanceRegressions(unittest.TestCase):
+    """E11/F13: consent, target, session and teardown must refer to the same authorized action."""
+
+    def _consent(self, rhost="10.0.0.5"):
+        return OperatorConsentReceipt(
+            operator_id="op",
+            target_url="https://10.0.0.5/",
+            approved_module="exploit/test/mod",
+            approved_rhost=rhost,
+        )
+
+    def test_execute_is_refused_when_precheck_is_not_vulnerable(self):
+        rpc = _StatefulRPC(check_code="safe")
+        client = MetasploitRPCClient(transport=rpc)
+        with self.assertRaises(MsfRpcUnavailable):
+            MetasploitInteractiveSession.open(
+                client, "exploit/test/mod", {"RHOSTS": "10.0.0.5"}, self._consent()
+            )
+        self.assertNotIn("module.execute", rpc.calls)
+
+    def test_consent_target_mismatch_is_rejected(self):
+        client = MetasploitRPCClient(transport=_StatefulRPC())
+        with self.assertRaises(PermissionError):
+            MetasploitInteractiveSession.open(
+                client, "exploit/test/mod", {"RHOSTS": "10.0.0.9"}, self._consent()
+            )
+
+    def test_unrelated_preexisting_session_is_not_driven(self):
+        # The only session belongs to another host and was present before execution.
+        rpc = _StatefulRPC(session={"7": {"target_host": "10.0.0.250"}})
+        rpc.executed = False
+        client = MetasploitRPCClient(transport=rpc)
+        with self.assertRaises(MsfRpcUnavailable):
+            MetasploitInteractiveSession.open(
+                client, "exploit/test/mod", {"RHOSTS": "10.0.0.5"}, self._consent()
+            )
+
+    def test_close_reports_failure_when_stop_errors(self):
+        client = MetasploitRPCClient(transport=_StatefulRPC(stop_raises=True))
+        sess = MetasploitInteractiveSession.open(
+            client, "exploit/test/mod", {"RHOSTS": "10.0.0.5"}, self._consent()
+        )
+        self.assertIs(sess.close(), False)
+
+    def test_happy_path_opens_correlated_session_and_closes_cleanly(self):
+        client = MetasploitRPCClient(transport=_StatefulRPC())
+        sess = MetasploitInteractiveSession.open(
+            client, "exploit/test/mod", {"RHOSTS": "10.0.0.5"}, self._consent()
+        )
+        self.assertEqual(sess.session_id, "9")
+        self.assertIs(sess.close(), True)
 
 
 if __name__ == "__main__":

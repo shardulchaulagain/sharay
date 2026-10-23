@@ -952,12 +952,20 @@ class InteractiveSession:
                         "msfrpcd is not configured/reachable (set SHARAY_MSFRPC_URL); no session was opened."
                     )
                 options: dict[str, Any] = {"RHOSTS": self.target_ip, "RPORT": target.port}
+                # The target address is fixed by the pinned target; user KEY=VAL may tune module
+                # options but can never redirect RHOSTS/RHOST/RPORT to a different host.
+                locked = {"RHOSTS", "RHOST", "RPORT"}
                 for kv in parts[3:]:
                     if "=" in kv:
                         k, v = kv.split("=", 1)
+                        if k.strip().upper() in locked:
+                            raise SessionError("RHOSTS/RHOST/RPORT are fixed by the authorized target.")
                         options[k.strip()] = v.strip()
                 consent = OperatorConsentReceipt(
-                    operator_id=self.created_by, target_url=self.target_url, approved_module=module
+                    operator_id=self.created_by,
+                    target_url=self.target_url,
+                    approved_module=module,
+                    approved_rhost=self.target_ip,
                 )
                 try:
                     client = connect(

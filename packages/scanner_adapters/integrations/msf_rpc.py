@@ -30,6 +30,10 @@ class OperatorConsentReceipt:
     target_url: str
     approved_module: str
     non_destructive_command: str = "id"
+    # The exact authorized target address the exploit may use (the pinned RHOST). When set, the
+    # module options must target this host or execution is refused; this stops a caller from
+    # approving one target and then firing at another.
+    approved_rhost: str = ""
     session_lifetime_limit_seconds: float = 10.0
     consent_timestamp: float = dataclasses.field(default_factory=time.time)
     consent_hash: str = ""
@@ -38,7 +42,7 @@ class OperatorConsentReceipt:
         if not self.consent_hash:
             canonical = (
                 f"{self.operator_id}:{self.target_url}:{self.approved_module}:"
-                f"{self.non_destructive_command}:{self.consent_timestamp}"
+                f"{self.approved_rhost}:{self.non_destructive_command}:{self.consent_timestamp}"
             )
             self.consent_hash = hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -122,6 +126,79 @@ def connect(url: str, username: str, password: str, timeout: float = 10.0) -> "M
     return client
 
 
+def _host_only(value: str) -> str:
+    """Extract a bare host from a URL or host[:port], lowercased, brackets/port stripped."""
+    from urllib.parse import urlsplit
+
+    text = (value or "").strip()
+    if "://" in text:
+        host = urlsplit(text).hostname or ""
+    else:
+        host = text.split("/", 1)[0]
+        if host.startswith("["):  # bracketed IPv6
+            host = host[1 : host.find("]")] if "]" in host else host[1:]
+        elif host.count(":") == 1:  # host:port (not IPv6)
+            host = host.split(":", 1)[0]
+    return host.lower()
+
+
+def _options_rhost(options: dict[str, Any]) -> str:
+    return _host_only(str(options.get("RHOSTS") or options.get("RHOST") or ""))
+
+
+def _verify_consent_target(options: dict[str, Any], consent: OperatorConsentReceipt) -> None:
+    """Refuse when the module options target a host the consent did not approve."""
+    expected = (
+        _host_only(consent.approved_rhost) if consent.approved_rhost else _host_only(consent.target_url)
+    )
+    actual = _options_rhost(options)
+    if not actual or not expected or actual != expected:
+        raise PermissionError(
+            f"Consent target mismatch: approved '{expected or '(none)'}', options target '{actual or '(none)'}'"
+        )
+
+
+def _precheck_is_vulnerable(check_res: dict[str, Any]) -> bool:
+    return check_res.get("code") in ("vulnerable", "appears")
+
+
+_SESSION_HOST_FIELDS = ("target_host", "session_host", "tunnel_peer", "host")
+
+
+def _session_targets_host(info: Any, expected_host: str) -> bool:
+    if not isinstance(info, dict):
+        return False
+    for field in _SESSION_HOST_FIELDS:
+        value = _host_only(str(info.get(field) or ""))
+        if value and value == expected_host:
+            return True
+    return False
+
+
+def _session_has_host_metadata(info: Any) -> bool:
+    """True when the session reports any host at all (so an unmatched host is a real contradiction)."""
+    if not isinstance(info, dict):
+        return False
+    return any(str(info.get(field) or "").strip() for field in _SESSION_HOST_FIELDS)
+
+
+def _select_correlated_session(after: dict[str, Any], before_ids: set[str], expected_host: str) -> str | None:
+    """Pick the session created by THIS run (new id) whose target matches the expected host.
+
+    Never falls back to a pre-existing or unrelated session: returns None (fail closed) if no new
+    session correlates to the authorized target.
+    """
+    new_ids = [sid for sid in after if str(sid) not in before_ids]
+    for sid in new_ids:
+        if _session_targets_host(after.get(sid), expected_host):
+            return str(sid)
+    # Accept a single new session ONLY when its target is genuinely unknown -- never when its own
+    # host metadata names a different host (that is a contradiction, not missing information).
+    if len(new_ids) == 1 and not _session_has_host_metadata(after.get(new_ids[0])):
+        return str(new_ids[0])
+    return None
+
+
 class MetasploitRPCClient:
     """Programmatic client for msfrpcd with operator consent safety gating."""
 
@@ -197,36 +274,42 @@ class MetasploitRPCClient:
             raise MsfRpcUnavailable(
                 "No msfrpcd transport configured; refusing to report an unverified session."
             )
+        # 3. The options must target exactly the host the operator approved.
+        _verify_consent_target(options, consent)
 
         t_start = time.time()
         check_passed = False
         session_opened = False
         proof_evidence = ""
         clean_teardown = False
+        expected_host = _options_rhost(options)
 
         try:
-            # Stage 1: Precondition check
+            # Stage 1: Precondition check. A non-vulnerable precheck stops here; execution only
+            # proceeds when the target actually appears vulnerable.
             check_res = self.transport.send_rpc("module.check", ["exploit", module_name, options])
-            if check_res.get("code") in ("vulnerable", "appears"):
-                check_passed = True
-
-            # Stage 2: Benign execution against a real session
-            exp_res = self.transport.send_rpc("module.execute", ["exploit", module_name, options])
-            if exp_res.get("job_id") or exp_res.get("uuid"):
-                session_opened = True
-
-            sess_list = self.transport.send_rpc("session.list", [])
-            sess_id = next(iter(sess_list.keys())) if sess_list else None
-            if sess_id:
-                cmd_res = self.transport.send_rpc(
-                    "session.shell_write", [sess_id, f"{consent.non_destructive_command}\n"]
-                )
-                proof_evidence = cmd_res.get("data", "")
-                # Immediate clean session kill
-                kill_res = self.transport.send_rpc("session.stop", [sess_id])
-                clean_teardown = kill_res.get("result") == "success"
+            check_passed = _precheck_is_vulnerable(check_res)
+            if not check_passed:
+                clean_teardown = True  # nothing was opened, so nothing to tear down
             else:
-                clean_teardown = True
+                # Stage 2: execute, then bind to the session THIS run created for THIS target.
+                before_ids = {str(sid) for sid in (self.transport.send_rpc("session.list", []) or {})}
+                self.transport.send_rpc("module.execute", ["exploit", module_name, options])
+                after = self.transport.send_rpc("session.list", []) or {}
+                sess_id = _select_correlated_session(after, before_ids, expected_host)
+                if sess_id:
+                    session_opened = True
+                    cmd_res = self.transport.send_rpc(
+                        "session.shell_write", [sess_id, f"{consent.non_destructive_command}\n"]
+                    )
+                    proof_evidence = cmd_res.get("data", "")
+                    try:
+                        kill_res = self.transport.send_rpc("session.stop", [sess_id])
+                        clean_teardown = kill_res.get("result") == "success"
+                    except Exception:
+                        clean_teardown = False  # a failed stop is reported truthfully
+                else:
+                    clean_teardown = True  # no correlated session opened; nothing to tear down
 
         finally:
             t_end = time.time()
@@ -288,12 +371,22 @@ class MetasploitInteractiveSession:
             )
         if client.transport is None:
             raise MsfRpcUnavailable("No msfrpcd transport configured; refusing to open a session.")
-        client.transport.send_rpc("module.check", ["exploit", module_name, options])
+        # Options must target the approved host; a non-vulnerable precheck refuses to execute.
+        _verify_consent_target(options, consent)
+        check_res = client.transport.send_rpc("module.check", ["exploit", module_name, options])
+        if not _precheck_is_vulnerable(check_res):
+            raise MsfRpcUnavailable(
+                "Precheck did not confirm the target is vulnerable; refusing to open a session."
+            )
+        before_ids = {str(sid) for sid in (client.transport.send_rpc("session.list", []) or {})}
         client.transport.send_rpc("module.execute", ["exploit", module_name, options])
-        sess_list = client.transport.send_rpc("session.list", [])
-        session_id = next(iter(sess_list.keys())) if sess_list else None
+        after = client.transport.send_rpc("session.list", []) or {}
+        # Only drive a session THIS run created for THIS target — never a pre-existing/unrelated one.
+        session_id = _select_correlated_session(after, before_ids, _options_rhost(options))
         if not session_id:
-            raise MsfRpcUnavailable("Exploit ran but no session was opened; nothing to drive.")
+            raise MsfRpcUnavailable(
+                "Exploit ran but no session correlated to the authorized target was opened; nothing to drive."
+            )
         return cls(client, str(session_id))
 
     def run(self, command: str) -> str:
@@ -308,15 +401,18 @@ class MetasploitInteractiveSession:
         return out
 
     def close(self) -> bool:
+        """Tear the session down and report truthfully whether the stop succeeded."""
         if self._closed:
             return True
+        torn_down = False
         if self.client.transport is not None:
             try:
-                self.client.transport.send_rpc("session.stop", [self.session_id])
+                result = self.client.transport.send_rpc("session.stop", [self.session_id])
+                torn_down = result.get("result") == "success" if isinstance(result, dict) else bool(result)
             except Exception:
-                pass
+                torn_down = False
         self._closed = True
-        return True
+        return torn_down
 
     def __enter__(self) -> "MetasploitInteractiveSession":
         return self

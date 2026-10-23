@@ -23,7 +23,7 @@ from packages.scanner_adapters.integrations.msf_rpc import (
 
 class InteractiveSessionDriverTest(unittest.TestCase):
     def test_stateful_session_runs_many_commands_then_closes(self):
-        state = {"last_cmd": "", "writes": 0, "stopped": False}
+        state = {"last_cmd": "", "writes": 0, "stopped": False, "executed": False}
         outputs = {"id": "uid=0(root) gid=0(root)", "uname -a": "Linux target 5.15.0 x86_64"}
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -39,9 +39,11 @@ class InteractiveSessionDriverTest(unittest.TestCase):
                 elif m == "module.check":
                     result = {"code": "vulnerable"}
                 elif m == "module.execute":
+                    state["executed"] = True
                     result = {"job_id": 7}
                 elif m == "session.list":
-                    result = {"1": {"type": "shell"}}
+                    # The new session appears only after execution (so it correlates to this run).
+                    result = {"1": {"type": "shell", "target_host": "127.0.0.1"}} if state["executed"] else {}
                 elif m == "session.shell_write":
                     assert params[0] == "1"  # always the same opened session
                     state["last_cmd"] = params[1].strip()
@@ -67,7 +69,10 @@ class InteractiveSessionDriverTest(unittest.TestCase):
         try:
             client = connect(f"http://127.0.0.1:{port}/api/v1/json-rpc", "msf", "pw")
             consent = OperatorConsentReceipt(
-                operator_id="op", target_url="http://t/", approved_module="exploit/multi/http/x"
+                operator_id="op",
+                target_url="http://t/",
+                approved_module="exploit/multi/http/x",
+                approved_rhost="127.0.0.1",
             )
             with MetasploitInteractiveSession.open(
                 client, "exploit/multi/http/x", {"RHOSTS": "127.0.0.1"}, consent
