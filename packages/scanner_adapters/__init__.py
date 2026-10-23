@@ -25,6 +25,9 @@ from packages.security_policies import (
     check_execution_url as check_url,
 )
 from packages.security_policies import (
+    check_url as check_scope_url,
+)
+from packages.security_policies import (
     validate_execution_scope as validate_scope,
 )
 
@@ -1575,6 +1578,8 @@ def scan_comprehensive(
     depth: int = 2,
     tools: list[str] | None = None,
     auth: dict[str, Any] | None = None,
+    scope: ScopePolicy | dict[str, Any] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Execute the unified multi-stage assessment pipeline against an authorized target:
     1. Passive Recon & TLS metadata inspection.
@@ -1595,6 +1600,27 @@ def scan_comprehensive(
         "outcome": "completed",
         "requests_performed": 0,
     }
+
+    # The full ScopePolicy and the operator cancellation callback survive dispatch here (F03): the
+    # scope path/exclusion contract filters every crawler-discovered endpoint before any active
+    # stage probes it, and a cancellation request short-circuits the remaining active stages.
+    policy: ScopePolicy | None = (
+        ScopePolicy.model_validate(scope)
+        if scope is not None and not isinstance(scope, ScopePolicy)
+        else scope
+    )
+
+    def _stop() -> bool:
+        return bool(cancelled and cancelled())
+
+    def _in_scope(candidate_url: str) -> bool:
+        if policy is None:
+            return True
+        try:
+            check_scope_url(policy, candidate_url)
+            return True
+        except PolicyError:
+            return False
 
     # Stage 1: Passive Recon & TLS Inspection
     if destination.scheme == "https":
@@ -1829,7 +1855,7 @@ def scan_comprehensive(
     discovered_parameters: list[str] = []
     discovered_urls: list[str] = []
     discovered_forms: list[dict[str, Any]] = []
-    if "crawler" in enabled_tools:
+    if "crawler" in enabled_tools and not _stop():
         try:
             from packages.scanner_adapters.integrations import crawler
 
@@ -1844,6 +1870,41 @@ def scan_comprehensive(
             discovered_parameters = crawl_res.get("parameters", [])
             discovered_urls = crawl_res.get("urls", [])
             discovered_forms = crawl_res.get("forms", [])
+
+            # Excluded-path contract (F03): drop any discovered endpoint/URL the scope does not allow
+            # BEFORE the active stages iterate over them, so an out-of-scope or excluded path is never
+            # probed (not merely filtered from the results).
+            if policy is not None:
+
+                def _abs(endpoint: str) -> str:
+                    if endpoint.startswith(("http://", "https://")):
+                        return endpoint
+                    return destination.origin + (endpoint if endpoint.startswith("/") else "/" + endpoint)
+
+                kept_endpoints = [e for e in discovered_endpoints if _in_scope(_abs(e))]
+                kept_urls = [u for u in discovered_urls if _in_scope(u)]
+                kept_forms = [
+                    form for form in discovered_forms if _in_scope(_abs(str(form.get("action", "/"))))
+                ]
+                excluded_count = (
+                    (len(discovered_endpoints) - len(kept_endpoints))
+                    + (len(discovered_urls) - len(kept_urls))
+                    + (len(discovered_forms) - len(kept_forms))
+                )
+                discovered_endpoints, discovered_urls, discovered_forms = (
+                    kept_endpoints,
+                    kept_urls,
+                    kept_forms,
+                )
+                if excluded_count:
+                    result["checks"].append(
+                        {
+                            "category": "scope_enforcement",
+                            "status": "completed",
+                            "detail": f"Excluded {excluded_count} out-of-scope path(s) from active probing per the approved scope.",
+                        }
+                    )
+
             exposed_files = (
                 crawl_res.get("exposed_sensitive_files", []) if "sensitive" in enabled_tools else []
             )
@@ -2135,7 +2196,7 @@ def scan_comprehensive(
         )
 
     # Stage 7: Active Behavioral Differential Testing
-    if mode != "passive" and "diff" in enabled_tools:
+    if mode != "passive" and "diff" in enabled_tools and not _stop():
         try:
             from packages.scanner_adapters.integrations import differential
 
@@ -2465,6 +2526,8 @@ def scan_comprehensive(
         reproducer = DeterministicReproducer()
         reproduced_count = 0
         for finding in result["findings"]:
+            if _stop():  # operator cancellation halts further active re-probing
+                break
             poc = finding.get("poc")
             if isinstance(poc, dict) and finding.get("status", "suspected") in (
                 "suspected",
@@ -2642,7 +2705,7 @@ def scan_comprehensive(
                 )
 
     # Stage 8: Active Nuclei Vulnerability & CVE Scanning (Context-Adapted & Multi-Endpoint)
-    if mode != "passive" and "nuclei" in enabled_tools:
+    if mode != "passive" and "nuclei" in enabled_tools and not _stop():
         if allow_ip in ("127.0.0.1", "::1", "localhost"):
             nuclei_res = {"outcome": "completed"}
             result["checks"].append(
@@ -2755,7 +2818,7 @@ def scan_comprehensive(
         )
 
     # Stage 10: Metasploit Auxiliary Non-Destructive Verification
-    if mode != "passive" and "metasploit" in enabled_tools:
+    if mode != "passive" and "metasploit" in enabled_tools and not _stop():
         if allow_ip in ("127.0.0.1", "::1", "localhost"):
             result["checks"].append(
                 {
@@ -2841,7 +2904,17 @@ def scan_comprehensive(
     http_outcome = http_res.get("outcome", "completed")
     nuclei_outcome = nuclei_res.get("outcome", "completed")
     has_failed_checks = any(c.get("status") == "failed" for c in result["checks"])
-    if http_outcome == "failed" and nuclei_outcome == "failed":
+    if _stop():
+        # Operator cancellation requested during the run: the remaining active stages were skipped.
+        result["outcome"] = "cancelled"
+        result["checks"].append(
+            {
+                "category": "pipeline",
+                "status": "cancelled",
+                "detail": "Operator cancellation honored; remaining active stages were not dispatched.",
+            }
+        )
+    elif http_outcome == "failed" and nuclei_outcome == "failed":
         result["outcome"] = "failed"
     elif has_failed_checks:
         result["outcome"] = "completed_with_errors"
@@ -2858,6 +2931,8 @@ def scan_comprehensive(
             "category": "pipeline",
             "status": "completed"
             if result["outcome"] in ("completed", "completed_with_errors")
+            else "cancelled"
+            if result["outcome"] == "cancelled"
             else "failed",
             "detail": f"Comprehensive pipeline finished: {len(result['findings'])} finding(s), {len(result['observations'])} observation(s) across 10 stages.",
         }

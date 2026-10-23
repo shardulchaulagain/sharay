@@ -248,6 +248,8 @@ def _execute_leased_assessment(
                 tools=tools,
                 max_seconds=max_seconds,
                 auth=auth,
+                scope=scope,
+                cancelled=cancelled,
             )
         else:
             try:

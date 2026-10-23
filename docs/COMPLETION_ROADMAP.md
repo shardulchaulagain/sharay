@@ -37,9 +37,22 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   `tests/product/test_authorization_contract.py::WorkspaceDestinationParityTests`. Full suite 1037
   pass / 1301 subtests; mypy + ruff clean. `packages/scanner_adapters/workspace.py`, `aegis/cli.py`,
   `aegis/__main__.py`, `aegis/api.py`.
-- [ ] **A3 · Scope + cancellation survive dispatch (F03).** Comprehensive scan receives the full
-  `ScopePolicy` + cancel callback; excluded-path contract enforced for crawler/sensitive/browser/
-  reproducer paths. Anchor S04, S06–S11.
+- [◐] **A3 · Scope + cancellation survive dispatch (F03).** `scan_comprehensive` received only the
+  `Destination` + options — no `ScopePolicy` and no cancel callback — so it could neither enforce the
+  excluded-path contract nor stop mid-run. It now takes `scope` and `cancelled` (wired from the
+  worker, which already holds both, and from the CLI). (1) Every crawler-discovered endpoint, URL and
+  form action is filtered through the plain `check_url` path/exclusion contract BEFORE the active
+  stages iterate them, so an out-of-scope or excluded path is never probed (not merely filtered from
+  results); the count excluded is recorded as a `scope_enforcement` check. (2) A cancellation request
+  short-circuits the heavy active stages (crawler, differential, nuclei, metasploit) and the
+  reproducer re-probe loop, and the run finalizes with outcome `cancelled`. Evidence: `cancelled`
+  True at dispatch ⇒ outcome `cancelled`, crawler never invoked; scope `allowed_paths=["/app"]` with
+  discovered `/app/ok` + `/admin/secret` ⇒ only `/app/ok` kept, `scope_enforcement` check emitted.
+  Regressions in `tests/integration/test_comprehensive_pipeline.py` (2). Full suite 1045 pass / 1301
+  subtests; mypy + ruff clean. `packages/scanner_adapters/__init__.py`, `aegis/worker.py`,
+  `aegis/cli.py`. _(Residual: cancellation granularity on the minor opt-in audits; the in-crawler
+  sensitive-file probe runs inside `crawler.crawl` before scope filtering — gate it at the crawler
+  itself next.)_
 - [x] **A4 · CLI approval provenance (F04).** `cmd_scan` scanned first, then auto-provisioned an
   owner with a baked-in password (`admin-cli-owner-pass-123`), auto-marked every new target
   `operator_authorized`, persisted finding status as a flat `"suspected"`, and swallowed any

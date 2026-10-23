@@ -345,6 +345,45 @@ class ComprehensivePipelineTests(unittest.TestCase):
         )
         self.assertFalse(any(c["status"] == "completed" for c in net_checks if "boom" in c.get("detail", "")))
 
+    def test_cancellation_survives_dispatch_and_skips_active_stages(self):
+        # F03/A3: a cancellation that is True by dispatch time skips the active stages and the run
+        # reports outcome "cancelled" -- the crawler is never invoked.
+        with patch("packages.scanner_adapters.integrations.crawler.crawl") as crawl:
+            res = scan_comprehensive(
+                self._dest, "93.184.216.34", run=self._basic_runner, cancelled=lambda: True
+            )
+        self.assertEqual(res["outcome"], "cancelled")
+        crawl.assert_not_called()
+        self.assertTrue(any(c.get("status") == "cancelled" for c in res["checks"]))
+
+    def test_scope_excludes_out_of_scope_discovered_paths(self):
+        # F03/A3: the scope path contract filters crawler-discovered endpoints before active probing.
+        scope = ScopePolicy.model_validate(
+            {
+                "hosts": ["example.com"],
+                "allowed_origins": ["https://example.com"],
+                "allowed_paths": ["/app"],
+                "allowed_cidrs": [],
+                "categories": ["http_headers"],
+                "starts_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+                "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            }
+        )
+        crawl_result = {
+            "endpoints": ["/app/ok", "/admin/secret"],
+            "parameters": [],
+            "urls": ["https://example.com/app/ok", "https://example.com/admin/secret"],
+            "forms": [],
+            "pages_visited": 1,
+        }
+        with patch("packages.scanner_adapters.integrations.crawler.crawl", return_value=crawl_result):
+            res = scan_comprehensive(
+                self._dest, "93.184.216.34", run=self._basic_runner, scope=scope, tools=["crawler"]
+            )
+        summary = next(o for o in res["observations"] if o.get("kind") == "crawler_summary")
+        self.assertEqual(summary["endpoints"], ["/app/ok"])  # /admin/secret dropped as out of scope
+        self.assertTrue(any(c["category"] == "scope_enforcement" for c in res["checks"]))
+
 
 if __name__ == "__main__":
     unittest.main()

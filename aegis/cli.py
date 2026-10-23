@@ -347,6 +347,7 @@ def cmd_scan(
                 mode=mode,
                 depth=depth,
                 tools=all_tools,
+                scope=scope_dict,
             )
 
         elapsed = round(time.monotonic() - started_mono, 2)
