@@ -231,8 +231,15 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   with a regression that replays the CMD through the real parser. _(Remaining: the Postgres compose
   path — real or removed, incl. its hardcoded default password — and an end-to-end clean-env deploy
   run, which needs a live container.)_ Anchor S26, S42–S44, S48.
-- [ ] **P1-7 · Durable integrations.** Retention actually mutates the DB; ticketing hits a real
-  provider or is labelled local; notary trust root configured. Anchor S36, S37, S24.
+- [◐] **P1-7 · Durable integrations.** _Retention now mutates the DB:_ the `/lifecycle/retention`
+  endpoint discarded `enforce_retention`'s result and reported a purge that never happened. It now
+  deletes each expired assessment with its observations and finding-evidence rows (org-scoped) in the
+  request transaction. Evidence: a 120-day-old assessment + its observation are gone after the call
+  (`purged_assessments_count=1`), a fresh one remains. Regression
+  `tests/product/test_retention_mutates_db.py`. Full suite 1053 pass. `aegis/api.py`. _(Remaining:
+  observation PII-redaction write-back — the endpoint passes records without their `data`, so the
+  age-gated redaction is a no-op; and ticketing-to-a-real-provider or labelled-local, notary trust
+  root configured.)_ Anchor S36, S37, S24.
 - [ ] **P1-8 · MFA / project RBAC enforced.** TOTP persists + gates login; project membership
   enforced on normal API access. Anchor S22–S23, S31, S49.
 

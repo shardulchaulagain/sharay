@@ -19,7 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -1883,13 +1883,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ]
 
         manager = DataLifecycleManager()
-        report, _ = manager.enforce_retention(
+        report, updated = manager.enforce_retention(
             assessments=asmts_data,
             observations=obs_data,
             finding_evidence=fe_data,
             policy=policy,
             organization_id=user.organization_id,
         )
+        # Actually mutate the DB (P1-7): the endpoint previously discarded the result and reported a
+        # purge that never happened. Delete each expired assessment together with its observations
+        # and finding-evidence rows, within this org, so retention is real.
+        kept_ids = {str(a["id"]) for a in updated["assessments"]}
+        purged_ids = [a.id for a in asmt_rows if str(a.id) not in kept_ids]
+        if purged_ids:
+            db.execute(delete(FindingEvidence).where(FindingEvidence.assessment_id.in_(purged_ids)))
+            db.execute(delete(Observation).where(Observation.assessment_id.in_(purged_ids)))
+            db.execute(
+                delete(Assessment).where(
+                    Assessment.id.in_(purged_ids),
+                    Assessment.organization_id == user.organization_id,
+                )
+            )
+            db.commit()
         return report.to_dict()
 
     def report_data(assessment_id: str, db: Session, user: User) -> dict:
