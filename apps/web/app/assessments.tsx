@@ -790,19 +790,29 @@ export function AIRootCausePanel({ assessmentId }: { assessmentId: string }) {
           <div style={{ display: "flex", alignItems: "center", gap: "20px", background: "#0b121a", padding: "12px", borderRadius: "8px", border: "1px solid #1a2533" }}>
             <div>
               <span className="eyebrow">POSTURE SCORE</span>
-              <h2 style={{ margin: 0, color: data.posture_score > 75 ? "#10b981" : "#f59e0b" }}>
-                {data.posture_score} / 100
-              </h2>
+              {data.posture_score == null ? (
+                <h2 style={{ margin: 0, color: "#94a3b8" }} title="No assessment activity recorded; posture is unknown, not clean.">
+                  Not assessed
+                </h2>
+              ) : (
+                <h2 style={{ margin: 0, color: data.posture_score > 75 ? "#10b981" : "#f59e0b" }}>
+                  {data.posture_score} / 100
+                </h2>
+              )}
             </div>
             <div style={{ flex: 1 }}>
               <span className="eyebrow">RED TEAM KILL CHAIN PROGRESSION</span>
               <div style={{ display: "flex", gap: "6px", marginTop: "4px" }}>
-                {(data.red_team_kill_chain || []).map((step, idx) => (
-                  <div key={idx} style={{ flex: 1, background: "#111b27", borderRadius: "4px", padding: "4px 8px", borderLeft: "3px solid #0ea5e9" }}>
-                    <small style={{ color: "#94a3b8", display: "block" }}>Phase {idx + 1}</small>
-                    <strong style={{ fontSize: "10px", color: "#f1f5f9" }}>{step.phase.split(". ")[1] || step.phase}</strong>
-                  </div>
-                ))}
+                {(data.red_team_kill_chain || []).map((step, idx) => {
+                  const ran = step.status === "completed";
+                  return (
+                    <div key={idx} style={{ flex: 1, background: "#111b27", borderRadius: "4px", padding: "4px 8px", borderLeft: `3px solid ${ran ? "#10b981" : "#475569"}` }}>
+                      <small style={{ color: "#94a3b8", display: "block" }}>Phase {idx + 1}</small>
+                      <strong style={{ fontSize: "10px", color: ran ? "#f1f5f9" : "#64748b" }}>{step.phase.split(". ")[1] || step.phase}</strong>
+                      <small style={{ display: "block", color: ran ? "#10b981" : "#64748b", fontSize: "9px" }}>{ran ? "completed" : "not executed"}</small>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>

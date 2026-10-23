@@ -159,8 +159,8 @@ function AIInvestigations({ revision }: { revision: number }) {
       <div className="metrics" style={{ gridTemplateColumns: "repeat(4, 1fr)", marginBottom: 20 }}>
         <div className="metric">
           <div className="metric-label"><span>POSTURE SCORE</span></div>
-          <div className="metric-value" style={{ color: (investigation?.posture_score ?? 80) >= 80 ? "#75c9bc" : "#e08a4e", fontSize: 22 }}>
-            {investigation ? `${investigation.posture_score} / 100` : "80 / 100"}
+          <div className="metric-value" style={{ color: investigation?.posture_score == null ? "#94a3b8" : investigation.posture_score >= 80 ? "#75c9bc" : "#e08a4e", fontSize: 22 }}>
+            {!investigation ? "—" : investigation.posture_score == null ? "Not assessed" : `${investigation.posture_score} / 100`}
           </div>
           <p className="panel-note" style={{ margin: "4px 0 0" }}>Defensive Posture Rating</p>
         </div>

@@ -1629,8 +1629,8 @@ def scan_comprehensive(
             result["checks"].append(
                 {
                     "category": "tls_inspection",
-                    "status": "completed",
-                    "detail": f"TLS probe completed (handshake note: {type(exc).__name__}).",
+                    "status": "failed",
+                    "detail": f"TLS handshake probe did not complete ({type(exc).__name__}).",
                 }
             )
     else:
@@ -1676,8 +1676,8 @@ def scan_comprehensive(
         result["checks"].append(
             {
                 "category": "dns_intelligence",
-                "status": "completed",
-                "detail": f"DNS intelligence probe note: {type(exc).__name__}.",
+                "status": "failed",
+                "detail": f"DNS intelligence probe did not complete ({type(exc).__name__}).",
             }
         )
 
@@ -1693,8 +1693,8 @@ def scan_comprehensive(
         result["checks"].append(
             {
                 "category": "subdomain_discovery",
-                "status": "completed",
-                "detail": f"Subdomain discovery note: {type(exc).__name__}.",
+                "status": "failed",
+                "detail": f"Subdomain discovery did not complete ({type(exc).__name__}).",
             }
         )
 
@@ -1767,43 +1767,28 @@ def scan_comprehensive(
             timeout=1.0,
         )
         port_obs = port_res.get("observations", [])
-        if not port_obs:
-            port_obs = [
-                {
-                    "kind": "network_service",
-                    "category": "network_inventory",
-                    "address": allow_ip,
-                    "port": destination.port,
-                    "protocol": "tcp",
-                    "state": "open",
-                    "service": destination.scheme,
-                    "captured_at": datetime.now(UTC).isoformat(),
-                    "tool": "sharay_port_verifier",
-                }
-            ]
         result["observations"].extend(port_obs)
         result["findings"].extend(port_res.get("findings", []))
         if port_res.get("check"):
             result["checks"].append(port_res["check"])
+        elif not port_obs:
+            # The scan ran and observed no open TCP services. Record that honestly -- never
+            # fabricate an "open" port that was not actually seen (E06/F07).
+            result["checks"].append(
+                {
+                    "category": "network_inventory",
+                    "status": "completed",
+                    "detail": "Port discovery completed; no open TCP services observed on the probed ports.",
+                }
+            )
     except Exception as exc:
-        result["observations"].append(
-            {
-                "kind": "network_service",
-                "category": "network_inventory",
-                "address": allow_ip,
-                "port": destination.port,
-                "protocol": "tcp",
-                "state": "open",
-                "service": destination.scheme,
-                "captured_at": datetime.now(UTC).isoformat(),
-                "tool": "sharay_port_verifier",
-            }
-        )
+        # The port scan did not run to completion -- do NOT fabricate an "open" service. The HTTP
+        # stage below establishes real reachability from its own connection and evidence.
         result["checks"].append(
             {
                 "category": "network_inventory",
-                "status": "completed",
-                "detail": f"Native port scan note: {type(exc).__name__}; verified port {destination.port}.",
+                "status": "failed",
+                "detail": f"Native port scan did not complete ({type(exc).__name__}: {exc}); port {destination.port} state unverified.",
             }
         )
 
@@ -1823,8 +1808,8 @@ def scan_comprehensive(
             result["checks"].append(
                 {
                     "category": "network_inventory",
-                    "status": "completed",
-                    "detail": f"Nmap inventory probe completed (note: {type(exc).__name__}).",
+                    "status": "failed",
+                    "detail": f"Nmap inventory probe did not complete ({type(exc).__name__}: {exc}).",
                 }
             )
 
@@ -1930,8 +1915,8 @@ def scan_comprehensive(
             result["checks"].append(
                 {
                     "category": "web_crawler",
-                    "status": "completed",
-                    "detail": f"Crawler completed discovery (note: {type(exc).__name__}).",
+                    "status": "failed",
+                    "detail": f"Crawler discovery did not complete ({type(exc).__name__}).",
                 }
             )
     else:
@@ -2002,8 +1987,8 @@ def scan_comprehensive(
             result["checks"].append(
                 {
                     "category": "headless_browser",
-                    "status": "completed",
-                    "detail": f"Headless browser note: {type(exc).__name__}.",
+                    "status": "failed",
+                    "detail": f"Headless browser stage did not complete ({type(exc).__name__}).",
                 }
             )
 
@@ -2088,8 +2073,8 @@ def scan_comprehensive(
             result["checks"].append(
                 {
                     "category": "schema_ingestion",
-                    "status": "completed",
-                    "detail": f"Schema discovery probe note: {type(exc).__name__}.",
+                    "status": "failed",
+                    "detail": f"Schema discovery probe did not complete ({type(exc).__name__}).",
                 }
             )
 
@@ -2136,8 +2121,8 @@ def scan_comprehensive(
             result["checks"].append(
                 {
                     "category": "adaptive_intelligence",
-                    "status": "completed",
-                    "detail": f"Adaptive synthesis note: {type(exc).__name__}.",
+                    "status": "failed",
+                    "detail": f"Adaptive synthesis did not complete ({type(exc).__name__}).",
                 }
             )
     else:
@@ -2168,8 +2153,8 @@ def scan_comprehensive(
             result["checks"].append(
                 {
                     "category": "differential_testing",
-                    "status": "completed",
-                    "detail": f"Differential tests completed (note: {type(exc).__name__}).",
+                    "status": "failed",
+                    "detail": f"Differential tests did not complete ({type(exc).__name__}).",
                 }
             )
     else:
@@ -2201,8 +2186,8 @@ def scan_comprehensive(
             result["checks"].append(
                 {
                     "category": "vulnerability_assessment",
-                    "status": "completed",
-                    "detail": f"Active vulnerability audit completed (note: {type(exc).__name__}).",
+                    "status": "failed",
+                    "detail": f"Active vulnerability audit did not complete ({type(exc).__name__}).",
                 }
             )
 
@@ -2322,8 +2307,8 @@ def scan_comprehensive(
             result["checks"].append(
                 {
                     "category": "authorization_matrix",
-                    "status": "completed",
-                    "detail": f"Authorization matrix probe note: {type(exc).__name__}.",
+                    "status": "failed",
+                    "detail": f"Authorization matrix probe did not complete ({type(exc).__name__}).",
                 }
             )
 
@@ -2440,8 +2425,8 @@ def scan_comprehensive(
             result["checks"].append(
                 {
                     "category": "payload_forge",
-                    "status": "completed",
-                    "detail": f"Payload grammar note: {type(exc).__name__}.",
+                    "status": "failed",
+                    "detail": f"Payload grammar stage did not complete ({type(exc).__name__}).",
                 }
             )
 
@@ -2468,8 +2453,8 @@ def scan_comprehensive(
         result["checks"].append(
             {
                 "category": "known_cve",
-                "status": "completed",
-                "detail": f"Known-CVE matching note: {type(exc).__name__}.",
+                "status": "failed",
+                "detail": f"Known-CVE matching did not complete ({type(exc).__name__}).",
             }
         )
 
@@ -2611,8 +2596,8 @@ def scan_comprehensive(
                 result["checks"].append(
                     {
                         "category": "oob_blind",
-                        "status": "completed",
-                        "detail": f"OOB blind probing note: {type(exc).__name__}.",
+                        "status": "failed",
+                        "detail": f"OOB blind probing did not complete ({type(exc).__name__}).",
                     }
                 )
 
@@ -2651,8 +2636,8 @@ def scan_comprehensive(
                 result["checks"].append(
                     {
                         "category": "zero_day_research",
-                        "status": "completed",
-                        "detail": f"Anomaly fuzzing note: {type(exc).__name__}.",
+                        "status": "failed",
+                        "detail": f"Anomaly fuzzing did not complete ({type(exc).__name__}).",
                     }
                 )
 
@@ -2725,8 +2710,8 @@ def scan_comprehensive(
             result["checks"].append(
                 {
                     "category": "toolbelt",
-                    "status": "completed",
-                    "detail": f"Tool belt note: {type(exc).__name__}.",
+                    "status": "failed",
+                    "detail": f"Tool belt stage did not complete ({type(exc).__name__}).",
                 }
             )
     elif toolbelt_tools:

@@ -8,6 +8,7 @@ from services.ai_analysis_worker.reasoning import (
     AttackEdge,
     AttackGraph,
     AttackNode,
+    generate_defensive_root_cause_analysis,
     score_finding_adversarially,
     synthesize_adversarial_hypotheses,
 )
@@ -117,6 +118,39 @@ class AIReasoningTests(unittest.TestCase):
         self.assertEqual(len(provider.calls), 1)
         self.assertIn("finding_title", provider.calls[0])
         self.assertIn("AI Adversarial verification", res_ai["explainability"])
+
+
+class CompletionDerivesFromExecutionTests(unittest.TestCase):
+    """E06/F07: posture and phase completion must derive from execution evidence."""
+
+    def test_empty_analysis_is_not_scored_pristine(self):
+        res = generate_defensive_root_cause_analysis(
+            graph=None, findings=[], observations=[], target_url="https://example.test/"
+        )
+        self.assertIsNone(res["posture_score"])  # not 100 "pristine"
+        self.assertFalse(res["assessed"])
+        self.assertEqual(res["coverage"], "none")
+        self.assertTrue(all(p["status"] == "not_executed" for p in res["red_team_kill_chain"]))
+        self.assertIn("UNKNOWN", res["ai_executive_summary"])
+
+    def test_assessed_target_with_no_findings_scores_clean(self):
+        obs = [{"type": "port", "port": 443, "service": "https", "target_url": "https://example.test/"}]
+        res = generate_defensive_root_cause_analysis(
+            graph=None, findings=[], observations=obs, target_url="https://example.test/"
+        )
+        self.assertEqual(res["posture_score"], 100)  # ran and found nothing == clean
+        self.assertTrue(res["assessed"])
+        upstream = res["red_team_kill_chain"][:4]
+        self.assertTrue(all(p["status"] == "completed" for p in upstream))
+
+    def test_high_finding_deducts_from_posture(self):
+        obs = [{"type": "port", "port": 443, "service": "https", "target_url": "https://example.test/"}]
+        findings = [{"severity": "high", "title": "XSS", "category": "xss", "description": "reflected"}]
+        res = generate_defensive_root_cause_analysis(
+            graph=None, findings=findings, observations=obs, target_url="https://example.test/"
+        )
+        self.assertEqual(res["posture_score"], 85)
+        self.assertTrue(res["assessed"])
 
 
 if __name__ == "__main__":

@@ -1213,60 +1213,88 @@ def generate_defensive_root_cause_analysis(
         },
     ]
 
-    # Calculate overall security posture score (out of 100)
-    score = 100
-    for f in effective_findings:
-        sev = f.get("severity", "medium").lower()
-        if sev == "critical":
-            score -= 25
-        elif sev == "high":
-            score -= 15
-        elif sev == "medium":
-            score -= 6
-        elif sev == "low":
-            score -= 2
-    score = max(10, min(100, score))
+    # Posture and phase completion derive from execution evidence. An analysis that produced no
+    # attack-graph nodes, no observations and no findings never ran a real assessment, so its
+    # posture is UNKNOWN (not pristine) and its phases are not "completed" -- "no findings" must
+    # never be reported as "clean coverage" (E06/F07).
+    has_coverage = bool(effective_graph.nodes) or bool(effective_obs) or bool(effective_findings)
+    score: int | None
+    if not has_coverage:
+        score = None
+    else:
+        score = 100
+        for f in effective_findings:
+            sev = f.get("severity", "medium").lower()
+            if sev == "critical":
+                score -= 25
+            elif sev == "high":
+                score -= 15
+            elif sev == "medium":
+                score -= 6
+            elif sev == "low":
+                score -= 2
+        score = max(10, min(100, score))
 
-    # Red Team Kill Chain Breakdown
+    # Upstream scanner stages are "completed" only when the assessment produced evidence they ran;
+    # exploit-path modeling (performed here) is "completed" only when there is a graph to model.
+    upstream_status = "completed" if has_coverage else "not_executed"
+    modeling_status = "completed" if effective_graph.nodes else "not_executed"
+    _not_run = "No execution evidence was recorded for this phase."
+
+    def _phase(phase: str, tools: list[str], summary: str, status: str) -> dict[str, Any]:
+        return {
+            "phase": phase,
+            "tools": tools,
+            "summary": summary if status == "completed" else _not_run,
+            "status": status,
+        }
+
     red_team_kill_chain = [
-        {
-            "phase": "1. Passive Recon & Perimeter Mapping",
-            "tools": ["Certificate Transparency (crt.sh)", "Passive Asset Inventory", "DNS Resolver"],
-            "summary": "Mapped public domain, DNS records (A/AAAA/CDN), and perimeter subdomains.",
-            "status": "completed",
-        },
-        {
-            "phase": "2. Network & Service Discovery",
-            "tools": ["Concurrent Port Scanner", "Nmap Service Probes"],
-            "summary": "Probed TCP ports. Verified open web services and TLS cipher negotiation.",
-            "status": "completed",
-        },
-        {
-            "phase": "3. Crawling & Surface Mapping",
-            "tools": ["In-Scope Web Crawler", "DOM Parser"],
-            "summary": "Traversed hyperlinked endpoints, client-side routes, and discovered input parameters.",
-            "status": "completed",
-        },
-        {
-            "phase": "4. Active Vulnerability & Parameter Fuzzing",
-            "tools": ["Vulnerability Engine", "Differential Tester", "Nuclei Adapted Engine"],
-            "summary": f"Executed active checks for SQLi, XSS, sensitive files, and missing security controls ({len(effective_findings)} findings).",
-            "status": "completed",
-        },
-        {
-            "phase": "5. Exploit Path Modeling",
-            "tools": ["Adversarial Attack Graph Engine"],
-            "summary": f"Constructed directed attack graph with {len(effective_graph.nodes)} nodes and {len(effective_graph.edges)} edges; traced {len(attack_paths)} attack paths.",
-            "status": "completed",
-        },
+        _phase(
+            "1. Passive Recon & Perimeter Mapping",
+            ["Certificate Transparency (crt.sh)", "Passive Asset Inventory", "DNS Resolver"],
+            "Mapped public domain, DNS records (A/AAAA/CDN), and perimeter subdomains.",
+            upstream_status,
+        ),
+        _phase(
+            "2. Network & Service Discovery",
+            ["Concurrent Port Scanner", "Nmap Service Probes"],
+            "Probed TCP ports. Verified open web services and TLS cipher negotiation.",
+            upstream_status,
+        ),
+        _phase(
+            "3. Crawling & Surface Mapping",
+            ["In-Scope Web Crawler", "DOM Parser"],
+            "Traversed hyperlinked endpoints, client-side routes, and discovered input parameters.",
+            upstream_status,
+        ),
+        _phase(
+            "4. Active Vulnerability & Parameter Fuzzing",
+            ["Vulnerability Engine", "Differential Tester", "Nuclei Adapted Engine"],
+            f"Executed active checks for SQLi, XSS, sensitive files, and missing security controls ({len(effective_findings)} findings).",
+            upstream_status,
+        ),
+        _phase(
+            "5. Exploit Path Modeling",
+            ["Adversarial Attack Graph Engine"],
+            f"Constructed directed attack graph with {len(effective_graph.nodes)} nodes and {len(effective_graph.edges)} edges; traced {len(attack_paths)} attack paths.",
+            modeling_status,
+        ),
     ]
 
-    ai_executive_summary = (
-        f"Automated security assessment of {target_url or 'target'} evaluated {len(effective_graph.nodes)} attack graph nodes "
-        f"and {len(effective_graph.edges)} transitions. Found {len(effective_findings)} security finding(s) with an overall security posture "
-        f"rating of {score}/100. Systemic root cause analysis highlights {len(root_causes)} primary remediation categories. "
-        "Implementing the provided configuration and code-level diffs will mitigate the identified attack paths."
-    )
+    if score is None:
+        ai_executive_summary = (
+            f"No assessment activity was recorded for {target_url or 'target'}: zero attack-graph nodes, "
+            "observations and findings. Posture is UNKNOWN (not assessed) -- this is not a clean result. "
+            "Re-run the assessment against an authorized, reachable target to produce coverage."
+        )
+    else:
+        ai_executive_summary = (
+            f"Automated security assessment of {target_url or 'target'} evaluated {len(effective_graph.nodes)} attack graph nodes "
+            f"and {len(effective_graph.edges)} transitions. Found {len(effective_findings)} security finding(s) with an overall security posture "
+            f"rating of {score}/100. Systemic root cause analysis highlights {len(root_causes)} primary remediation categories. "
+            "Implementing the provided configuration and code-level diffs will mitigate the identified attack paths."
+        )
 
     corpus = GroundingCorpusIndex(
         findings=effective_findings, observations=effective_obs, target_url=target_url
@@ -1289,7 +1317,7 @@ def generate_defensive_root_cause_analysis(
                 ),
                 "evidence": [
                     f"Target: {target_url}",
-                    f"Overall Posture Score: {score}/100",
+                    f"Overall Posture Score: {'not assessed (no coverage)' if score is None else f'{score}/100'}",
                     f"Total Nodes: {len(effective_graph.nodes)}, Total Edges: {len(effective_graph.edges)}",
                     f"Findings:\n{finding_bullets}",
                 ],
@@ -1314,6 +1342,8 @@ def generate_defensive_root_cause_analysis(
     return {
         "target_url": target_url,
         "posture_score": score,
+        "assessed": has_coverage,
+        "coverage": "none" if not has_coverage else "present",
         "graph": effective_graph.to_dict(),
         "attack_paths": attack_paths,
         "hypotheses": hypotheses,

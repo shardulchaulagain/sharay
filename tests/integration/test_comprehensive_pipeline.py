@@ -308,6 +308,43 @@ class ComprehensivePipelineTests(unittest.TestCase):
                 self.assertEqual(finding["status"], "suspected")
                 self.assertEqual(finding["confidence"], "low")
 
+    @staticmethod
+    def _basic_runner(image, argv, **kwargs):
+        stdout = b"HTTP/2 200 \r\ncontent-type: text/html\r\n\r\n" if "curl" in image else b""
+        return SimpleNamespace(outcome="completed", exit_code=0, stdout=stdout, output_truncated=False)
+
+    def test_port_stage_does_not_fabricate_open_service_when_none_found(self):
+        # E06/F07: when the port scan ran and saw no open services, the stage must NOT invent an
+        # "open" network_service -- a closed/filtered port is not reported open.
+        with patch(
+            "packages.scanner_adapters.integrations.port_scanner.scan_network_ports",
+            return_value={"observations": [], "findings": []},
+        ):
+            res = scan_comprehensive(self._dest, "93.184.216.34", run=self._basic_runner)
+        self.assertFalse(
+            any(o.get("tool") == "sharay_port_verifier" for o in res["observations"]),
+            "port stage must not fabricate an open service",
+        )
+        net_checks = [c for c in res["checks"] if c["category"] == "network_inventory"]
+        self.assertTrue(
+            any(c["status"] == "completed" and "no open" in c["detail"].lower() for c in net_checks)
+        )
+
+    def test_port_stage_reports_failed_on_exception_without_fabrication(self):
+        # E06/F07: a stage that threw must be recorded failed, never "completed", and must not
+        # fabricate an open service to paper over the error.
+        with patch(
+            "packages.scanner_adapters.integrations.port_scanner.scan_network_ports",
+            side_effect=RuntimeError("boom"),
+        ):
+            res = scan_comprehensive(self._dest, "93.184.216.34", run=self._basic_runner)
+        self.assertFalse(any(o.get("tool") == "sharay_port_verifier" for o in res["observations"]))
+        net_checks = [c for c in res["checks"] if c["category"] == "network_inventory"]
+        self.assertTrue(
+            any(c["status"] == "failed" and "did not complete" in c["detail"] for c in net_checks)
+        )
+        self.assertFalse(any(c["status"] == "completed" for c in net_checks if "boom" in c.get("detail", "")))
+
 
 if __name__ == "__main__":
     unittest.main()

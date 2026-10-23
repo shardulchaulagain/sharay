@@ -110,7 +110,9 @@ export type AIInvestigation = {
   assessment_id: string;
   created_at?: string;
   target_url: string;
-  posture_score: number;
+  posture_score: number | null;
+  assessed?: boolean;
+  coverage?: string;
   graph: {
     nodes_count: number;
     edges_count: number;

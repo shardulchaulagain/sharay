@@ -93,9 +93,22 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   regressions in `tests/evaluation/test_evaluation_lab.py` (10 pass). `packages/evaluation_lab.py`.
 - [ ] **E2 · Sound benchmark scorer (F19/E08).** No empty-CWE matches; duplicates do not inflate
   TPs; recall ∈ [0,1]; FPR well-defined. Anchor S19.
-- [ ] **E3 · Completion derives from execution (F07/E06).** Empty AI analysis cannot report
-  `posture_score=100` + completed phases; port fallback cannot fabricate an open service; stage
-  exceptions are not `completed`. "No findings" ≠ "clean coverage". Anchor S30, S06, S04.
+- [x] **E3 · Completion derives from execution (F07/E06).** Three fabrications removed: (1) an AI
+  analysis with no graph nodes, observations or findings reported `posture_score=100` + all five
+  kill-chain phases `completed` — now posture is `None` with `assessed=False`/`coverage="none"`,
+  phases are `not_executed`, and the executive summary states posture is UNKNOWN; an assessed target
+  with no findings still scores 100 (ran-and-clean), a HIGH finding 85. (2) The port stage fabricated
+  an `open` `network_service` when the scan found none (and in its `except` handler) — it now records
+  "no open TCP services observed" honestly and never invents one. (3) Eighteen stage `except`
+  handlers recorded `status="completed"` while naming the caught exception — all now `failed` with
+  truthful detail (the reporting layer already excludes `failed` from coverage). UI: `posture_score`
+  renders "Not assessed" instead of "null / 100"; kill-chain cards color/label by real status.
+  Evidence: empty analysis ⇒ `posture_score=None`, phases `not_executed`; port scan returning no obs
+  ⇒ no `sharay_port_verifier` observation; port scan raising ⇒ `network_inventory` check `failed`.
+  Regressions `tests/integration/test_ai_reasoning.py::CompletionDerivesFromExecutionTests` (3) +
+  `test_comprehensive_pipeline.py` port-stage tests (2). Full suite 1032 pass / 1301 subtests; mypy +
+  ruff clean; web `tsc --noEmit` clean. `services/ai_analysis_worker/reasoning.py`,
+  `packages/scanner_adapters/__init__.py`, `apps/web/app/{assessments,workspace,api}.tsx`/`.ts`.
 - [x] **E4 · Remediation validator honesty (F08/E04).** `validate_patch` is now suggestion-only:
   `deployable` is never True from heuristics; a hunk-less diff, nonsensical config and unknown
   languages are rejected (`is_valid=False`); valid python/json/config/diff are `is_valid` but
