@@ -139,8 +139,21 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   `deployable=True`; after, all `is_valid=False`; real diff/python `is_valid=True, deployable=False`;
   regressions `tests/integration/test_remediation_validation.py` (3/11) + corrected
   `tests/evaluation/test_ai_eval_harness.py`. `services/ai_analysis_worker/remediation.py`.
-- [ ] **E5 · Test gate runs the intended tests (F20).** The active gate discovers the pytest-style
-  tests currently omitted; non-existent generated test paths removed. Anchor S38–S40.
+- [x] **E5 · Test gate runs the intended tests (F20).** The gate's runner used
+  `unittest.defaultTestLoader.discover("tests")`, which collects only `unittest.TestCase` subclasses
+  and silently skipped 80 pytest-style tests (48 module-level `def test_*` functions + non-TestCase
+  classes): discovery counted 957 while pytest collects 1037. `engineering/run_tests.py` now also
+  runs the whole tree under pytest in its own process (clean per-process state, so a TestCase run by
+  both runners does not trip caches like onboarding-session isolation), and the gate fails if either
+  runner fails; the redacted unittest diagnostics sidecar is unchanged. Gate timeout raised 360→600s
+  for the double run; `AGENTS.md` now documents pytest as the complete runner. Evidence: a
+  module-level pytest-style failing test (invisible to `discover`) now fails the gate (exit 1) and a
+  passing one passes (exit 0); the authoritative `engineering/run_tests.py` exits 0 with "Ran 957 …
+  OK" and "1037 passed / 1301 subtests". Regression
+  `tests/test_engineering.py::EvidenceTests::test_pytest_style_tests_are_not_skipped_by_the_gate`;
+  32 engineering-contract tests still pass. (Active `gates.json` paths all exist; the "generated"
+  coverage/mutation jobs the audit flagged live only in unwired drafts.) `engineering/run_tests.py`,
+  `engineering/gates.json`, `AGENTS.md`.
 
 ---
 
@@ -188,8 +201,12 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   RHOSTS/RHOST/RPORT pinned to the authorized target, execution gated on a vulnerable precheck, the
   driven session provably correlated to this run. _(Remaining for full X3: end-to-end console
   walk-through under X1/X2.)_
-- [ ] **X4 · Full suite + gates green** (unit/integration/product + web lint/typecheck/build + mypy +
-  ruff), with the previously-omitted tests included.
+- [◐] **X4 · Full suite + gates green** (unit/integration/product + web lint/typecheck/build + mypy +
+  ruff), with the previously-omitted tests included. _Python side green and now complete:_ the
+  authoritative `engineering/run_tests.py` exits 0 running all 1037 tests (957 via unittest + 1037
+  via pytest; the 80 pytest-style tests no longer skipped — E5), ruff + mypy clean per touched file.
+  Web `tsc --noEmit` clean. _(Remaining: a single `check.py --run-gates` run recording all four
+  Python gates + web lint/build as one evidence bundle.)_
 - [ ] **X5 · No reproduced counterexample remains** — every E01–E11 is a permanent passing regression.
 
 ---

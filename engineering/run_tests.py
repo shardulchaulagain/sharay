@@ -4,6 +4,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -146,7 +147,9 @@ def main():
     # Nested runners belong to their own gate, never this runner's sidecar.
     path = os.environ.pop(RESULT_ENV, None)
     suite = unittest.defaultTestLoader.discover("tests")
-    if suite.countTestCases() == 0:
+    unittest_count = suite.countTestCases()
+    if unittest_count == 0:
+        # No TestCase diagnostics to collect; still let pytest find pytest-style tests below.
         write_metadata(
             {
                 "schema_version": 1,
@@ -157,11 +160,27 @@ def main():
             },
             path,
         )
+        unittest_ok = True
+    else:
+        result = cast(
+            MetadataResult, unittest.TextTestRunner(verbosity=2, resultclass=MetadataResult).run(suite)
+        )
+        write_metadata(result.metadata(), path)
+        unittest_ok = result.wasSuccessful()
+    # unittest discovery silently omits pytest-style tests (module-level `def test_*` functions and
+    # non-TestCase classes). Run the whole tree under pytest too so the gate cannot skip them; the
+    # redacted diagnostics sidecar stays unittest-derived. pytest runs in its OWN process so a
+    # TestCase executed by both runners starts from clean module/global state (an in-process re-run
+    # breaks tests that cache per-process state, e.g. onboarding-session isolation). The gate fails
+    # if either runner fails. shortcut: TestCase tests run under both runners; collapse to a single
+    # pytest gate if the double run ever strains the gate timeout.
+    code = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests"], check=False
+    ).returncode
+    if unittest_count == 0 and code == 5:  # pytest ExitCode.NO_TESTS_COLLECTED
         print("No tests discovered", file=sys.stderr)
         return 2
-    result = cast(MetadataResult, unittest.TextTestRunner(verbosity=2, resultclass=MetadataResult).run(suite))
-    write_metadata(result.metadata(), path)
-    return 0 if result.wasSuccessful() else 1
+    return 0 if (unittest_ok and code == 0) else 1
 
 
 if __name__ == "__main__":

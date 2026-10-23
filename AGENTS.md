@@ -72,10 +72,13 @@ Requested by the human on October 12 and promoted to senior technical lead on Oc
 From this directory:
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 -m pytest tests          # full suite (unittest + pytest-style tests)
+python3 engineering/run_tests.py # the gate's test runner (unittest diagnostics + pytest coverage)
 python3 engineering/check.py
 python3 engineering/check.py --run-gates
 ```
+
+`unittest discover` alone omits module-level `def test_*` functions and non-TestCase classes, so use pytest (or `run_tests.py`, which runs both) for a complete pass.
 
 The first collector command only inventories metadata. `--run-gates` executes reviewed `engineering/gates.json` commands. It is not a security sandbox. Untrusted scripts require a separately isolated execution environment with minimal access. Never treat a collected inventory as a vulnerability scan, dependency graph, or architecture audit.
 

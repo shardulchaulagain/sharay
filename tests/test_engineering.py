@@ -129,6 +129,15 @@ Fixture = type('Fixture', (unittest.TestCase,), {
         self.assertEqual(result["test_diagnostics"]["tests_run"], 0)
         self.assertEqual(result["test_diagnostics"]["status"], "available")
 
+    def test_pytest_style_tests_are_not_skipped_by_the_gate(self):
+        # A module-level pytest-style function is invisible to unittest discovery (F20/E05). The
+        # gate runs the tree under pytest too, so such a failure still fails the gate and a pass
+        # still passes -- it is never silently skipped.
+        failing = self.run_fixture("def test_pytest_style():\n    assert False, 'boom'\n")
+        self.assertEqual((failing["status"], failing["exit_code"]), ("failed", 1))
+        passing = self.run_fixture("def test_pytest_style():\n    assert True\n")
+        self.assertEqual((passing["status"], passing["exit_code"]), ("passed", 0))
+
     def test_nested_empty_runner_cannot_write_outer_sidecar(self):
         result = self.run_fixture(f"""import os
 from pathlib import Path

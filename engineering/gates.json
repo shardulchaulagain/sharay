@@ -6,7 +6,7 @@
         "{python}",
         "engineering/run_tests.py"
       ],
-      "timeout_seconds": 360
+      "timeout_seconds": 600
     },
     {
       "name": "python-lint",
