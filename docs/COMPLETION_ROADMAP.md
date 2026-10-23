@@ -37,7 +37,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   `tests/product/test_authorization_contract.py::WorkspaceDestinationParityTests`. Full suite 1037
   pass / 1301 subtests; mypy + ruff clean. `packages/scanner_adapters/workspace.py`, `aegis/cli.py`,
   `aegis/__main__.py`, `aegis/api.py`.
-- [◐] **A3 · Scope + cancellation survive dispatch (F03).** `scan_comprehensive` received only the
+- [x] **A3 · Scope + cancellation survive dispatch (F03).** `scan_comprehensive` received only the
   `Destination` + options — no `ScopePolicy` and no cancel callback — so it could neither enforce the
   excluded-path contract nor stop mid-run. It now takes `scope` and `cancelled` (wired from the
   worker, which already holds both, and from the CLI). (1) Every crawler-discovered endpoint, URL and
@@ -50,9 +50,12 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   discovered `/app/ok` + `/admin/secret` ⇒ only `/app/ok` kept, `scope_enforcement` check emitted.
   Regressions in `tests/integration/test_comprehensive_pipeline.py` (2). Full suite 1045 pass / 1301
   subtests; mypy + ruff clean. `packages/scanner_adapters/__init__.py`, `aegis/worker.py`,
-  `aegis/cli.py`. _(Residual: cancellation granularity on the minor opt-in audits; the in-crawler
-  sensitive-file probe runs inside `crawler.crawl` before scope filtering — gate it at the crawler
-  itself next.)_
+  `aegis/cli.py`. Follow-up (done): cancellation now guards every active stage (crawler, differential,
+  7b/7f/7c/7d native+fuzzing+authz+payload, OOB, anomaly, nuclei, toolbelt, ZAP, metasploit, opt-in
+  audits, reproducer loop); `crawler.crawl` takes `probe_sensitive` so the active sensitive-file
+  probe is NOT dispatched unless the `sensitive` tool is enabled (was always probing /.git, /.env,
+  backups regardless), and exposed-file results are scope-filtered. Regressions
+  `tests/integration/test_crawler.py::CrawlerSensitiveProbeGatingTests` (2). Full suite 1047 pass.
 - [x] **A4 · CLI approval provenance (F04).** `cmd_scan` scanned first, then auto-provisioned an
   owner with a baked-in password (`admin-cli-owner-pass-123`), auto-marked every new target
   `operator_authorized`, persisted finding status as a flat `"suspected"`, and swallowed any

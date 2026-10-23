@@ -398,6 +398,7 @@ def crawl(
     timeout: float = 5.0,
     cookies: dict[str, str] | None = None,
     auth_headers: dict[str, str] | None = None,
+    probe_sensitive: bool = True,
 ) -> dict[str, Any]:
     """Recursively crawl the authorized target within strict depth and page boundaries,
     maintaining session cookies and extracting CSRF tokens (Sector 2.4)."""
@@ -508,8 +509,10 @@ def crawl(
         except Exception:
             pass
 
-    # 3. Sensitive File Probing
-    exposed_files = probe_sensitive_files(destination, allow_ip, timeout=timeout)
+    # 3. Sensitive File Probing -- only dispatched when the caller enabled it. Probing is itself an
+    # active request to sensitive paths (/.git, /.env, backups), so when the "sensitive" option is
+    # off the probes must not run at all, not merely have their results suppressed downstream (F03).
+    exposed_files = probe_sensitive_files(destination, allow_ip, timeout=timeout) if probe_sensitive else []
     for exp in exposed_files:
         discovered_endpoints.add(exp["path"])
         discovered_urls.add(exp["url"])

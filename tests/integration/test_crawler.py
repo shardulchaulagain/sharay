@@ -1,12 +1,14 @@
 """Unit tests for the in-scope web crawler and HTML extractor."""
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from packages.scanner_adapters import Destination, scan_live_nuclei
+from packages.scanner_adapters.integrations import crawler as crawler_mod
 from packages.scanner_adapters.integrations.crawler import (
     _HTMLStructureExtractor,
     _is_in_scope,
+    crawl,
     parse_robots_txt,
     parse_sitemap_xml,
 )
@@ -112,6 +114,29 @@ class CrawlerStructureTests(unittest.TestCase):
         # Confirm subpages are passed as -u arguments
         self.assertIn("https://example.com/subpage", argv)
         self.assertIn("https://example.com/admin", argv)
+
+
+class CrawlerSensitiveProbeGatingTests(unittest.TestCase):
+    """F03: the sensitive-file probe is an active request and must not run when not enabled."""
+
+    _dest = Destination(
+        "https://example.com/", "https", "example.com", 443, "/", "https://example.com", "example.com"
+    )
+
+    def _run(self, probe_sensitive):
+        # Keep the spider itself offline: every page fetch returns empty.
+        with (
+            patch.object(crawler_mod, "_fetch_page", return_value=(404, {}, "")),
+            patch.object(crawler_mod, "probe_sensitive_files", return_value=[]) as probe,
+        ):
+            crawl(self._dest, "93.184.216.34", max_depth=1, max_pages=1, probe_sensitive=probe_sensitive)
+        return probe
+
+    def test_probe_not_dispatched_when_disabled(self):
+        self._run(probe_sensitive=False).assert_not_called()
+
+    def test_probe_dispatched_when_enabled(self):
+        self._run(probe_sensitive=True).assert_called_once()
 
 
 if __name__ == "__main__":

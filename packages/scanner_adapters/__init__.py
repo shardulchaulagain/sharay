@@ -1865,6 +1865,7 @@ def scan_comprehensive(
                 max_depth=depth,
                 max_pages=100 if mode == "aggressive" else 20,
                 timeout=3.0,
+                probe_sensitive="sensitive" in enabled_tools,
             )
             discovered_endpoints = crawl_res.get("endpoints", [])
             discovered_parameters = crawl_res.get("parameters", [])
@@ -1908,6 +1909,8 @@ def scan_comprehensive(
             exposed_files = (
                 crawl_res.get("exposed_sensitive_files", []) if "sensitive" in enabled_tools else []
             )
+            # Only report sensitive files at in-scope, non-excluded paths.
+            exposed_files = [e for e in exposed_files if _in_scope(e.get("url", destination.url))]
 
             for exp in exposed_files:
                 p_type = exp.get("probe_type", "sensitive_file")
@@ -2228,7 +2231,7 @@ def scan_comprehensive(
         )
 
     # Stage 7b: Native Active Deep Vulnerability & Parameter Fuzzing Audit
-    if mode != "passive":
+    if mode != "passive" and not _stop():
         try:
             from packages.scanner_adapters.integrations import vuln_scanner
 
@@ -2253,7 +2256,7 @@ def scan_comprehensive(
             )
 
     # Stage 7f: Multi-Method Body/JSON Fuzzing over crawler-discovered forms (active POST/PUT/etc.)
-    if mode != "passive" and "body_fuzzer" in enabled_tools and discovered_forms:
+    if mode != "passive" and "body_fuzzer" in enabled_tools and discovered_forms and not _stop():
         try:
             from packages.scanner_adapters.integrations.body_fuzzer import BodyFuzzer
 
@@ -2284,7 +2287,7 @@ def scan_comprehensive(
             )
 
     # Stage 7c: Business-Logic & Dual-Identity IDOR Authorization Matrix
-    if mode != "passive" and ("auth_matrix" in enabled_tools or mode in ("adaptive", "aggressive")):
+    if mode != "passive" and ("auth_matrix" in enabled_tools or mode in ("adaptive", "aggressive")) and not _stop():
         try:
             from packages.scanner_adapters.integrations.authorization import (
                 AuthConfig,
@@ -2374,7 +2377,7 @@ def scan_comprehensive(
             )
 
     # Stage 7d: Compositional payload grammar + fire-and-confirm (offensive engine, Sectors O3/2B)
-    if mode != "passive" and ("payload_forge" in enabled_tools or mode in ("adaptive", "aggressive")):
+    if mode != "passive" and ("payload_forge" in enabled_tools or mode in ("adaptive", "aggressive")) and not _stop():
         try:
             from packages.payload_engine import CFGGrammarEngine, VulnClass
 
@@ -2616,7 +2619,7 @@ def scan_comprehensive(
     # Stage 7h: Live out-of-band blind-SSRF confirmation (Sector O6). Runs after the reproducer so
     # its OOB-confirmed findings are not re-processed. Loopback lab only: the per-run callback
     # listener binds loopback, so only a target that can reach loopback can call back.
-    if mode != "passive" and allow_ip in ("127.0.0.1", "::1", "localhost"):
+    if mode != "passive" and allow_ip in ("127.0.0.1", "::1", "localhost") and not _stop():
         serving_oob = False
         try:
             with socket.create_connection((allow_ip, destination.port), timeout=0.5):
@@ -2674,7 +2677,7 @@ def scan_comprehensive(
                 serving_fuzz = True
         except OSError:
             serving_fuzz = False
-        if serving_fuzz and (time.monotonic() - started) < max_seconds - 15:
+        if serving_fuzz and not _stop() and (time.monotonic() - started) < max_seconds - 15:
             try:
                 from packages.offensive_capability import TargetAnomalyFuzzer
 
@@ -2751,6 +2754,7 @@ def scan_comprehensive(
     toolbelt_tools = [t for t in ("ffuf", "dalfox", "katana") if t in enabled_tools]
     if (
         mode != "passive"
+        and not _stop()
         and toolbelt_tools
         and allow_ip not in ("127.0.0.1", "::1", "localhost")
         and runner is not None
@@ -2787,7 +2791,7 @@ def scan_comprehensive(
         )
 
     # Stage 9: OWASP ZAP Web Security Scanner
-    if mode != "passive" and "zap" in enabled_tools:
+    if mode != "passive" and "zap" in enabled_tools and not _stop():
         if allow_ip in ("127.0.0.1", "::1", "localhost"):
             result["checks"].append(
                 {
@@ -2850,7 +2854,7 @@ def scan_comprehensive(
 
     # Stages 11-13: opt-in protocol audits (GraphQL, WebSocket, wordlist discovery). Non-destructive
     # and off by default; they run only when explicitly selected so the default scan is unchanged.
-    if mode != "passive" and enabled_tools & {"graphql", "websocket", "wordlist"}:
+    if mode != "passive" and enabled_tools & {"graphql", "websocket", "wordlist"} and not _stop():
         from packages.scanner_adapters.integrations import (
             graphql_scanner,
             websocket_scanner,
