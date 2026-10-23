@@ -14,7 +14,7 @@ from sqlalchemy import func, select, text
 from aegis.config import Settings
 from aegis.database import create_database
 from aegis.models import Assessment, Finding, FindingEvidence, Observation, Project, Target, User
-from aegis.worker import evidence_hash
+from aegis.worker import _finding_status, evidence_hash
 from packages.reporting import redact
 from packages.scanner_adapters import preflight, scan_comprehensive, scan_live, scan_live_nuclei
 from packages.scanner_adapters.workspace import InteractiveWorkspace
@@ -22,6 +22,7 @@ from packages.security_policies import (
     Destination,
     PolicyError,
     ScopePolicy,
+    check_execution_url,
     normalize_url,
     resolve_pinned,
 )
@@ -193,6 +194,7 @@ def cmd_scan(
     rate: int = 150,
     depth: int = 2,
     as_json: bool = False,
+    authorized: bool = False,
 ) -> int:
     """Run an automated assessment pipeline directly from the command line."""
     try:
@@ -214,58 +216,34 @@ def cmd_scan(
         print(f"DNS/SSRF Error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"[*] Target       : {norm_url}")
-    print(f"[*] Resolved IP  : {pinned_ip} (DNS-pinned & firewall-locked)")
-    print(f"[*] Profile      : {profile.upper()}")
-    print(f"[*] Mode         : {mode.upper()} (Context-aware adaptive synthesis)")
-    print(f"[*] Severities   : {severities}")
-    if tags:
-        print(f"[*] Custom Tags  : {tags}")
-    print("[*] Launching multi-stage automated assessment pipeline...\n")
+    loopback_cidr = {"127.0.0.1": "127.0.0.1/32", "::1": "::1/128"}.get(dest.host)
+    scope_dict = {
+        "hosts": [dest.host],
+        "allowed_origins": [dest.origin],
+        "allowed_paths": ["/"],
+        "allowed_cidrs": [loopback_cidr] if loopback_cidr else [],
+        "categories": ["http_headers"],
+        "starts_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(hours=23)).isoformat(),
+    }
 
-    started_mono = time.monotonic()
-    started_epoch = time.time()
-    if profile == "safe_http":
-        print("[+] Stage: Executing HTTP security header & cookie inspection...")
-        res = scan_live(dest, pinned_ip)
-    elif profile == "approved_templates":
-        print("[+] Stage: Executing Nuclei active vulnerability scanning...")
-        res = scan_live_nuclei(dest, pinned_ip, severities=severities, tags=tags, rate=rate)
-    else:
-        print("[1/6] Passive Recon & TLS Inspection...")
-        print("[2/6] Target Port & Service Verification...")
-        print("[3/6] HTTP Security Headers & Cookie Hardening...")
-        print("[4/6] In-Scope Web Crawler & Endpoint Discovery...")
-        print("[5/6] Target Intelligence & Adaptive Strategy Synthesis...")
-        print("[6/6] Active Behavioral Differential Testing & Nuclei Scanning...")
-        all_tools = ["nmap", "crawler", "sensitive", "diff", "nuclei", "zap", "metasploit"]
-        res = scan_comprehensive(
-            dest,
-            pinned_ip,
-            severities=severities,
-            tags=tags,
-            rate=rate,
-            mode=mode,
-            depth=depth,
-            tools=all_tools,
-        )
-
-    elapsed = round(time.monotonic() - started_mono, 2)
-    print(f"\n[+] Assessment completed in {elapsed}s (Outcome: {res.get('outcome', 'unknown')})")
-
-    # Persist results to SQLite if database is initialized
     engine, sessions = create_database(settings)
     try:
+        # Authorization MUST precede offensive execution (F04): record the owner, the target
+        # authorization and the assessment (binding the exact scope version) and validate the
+        # destination with the execution contract BEFORE any probe is sent. A live target is scanned
+        # only when the operator asserts verified ownership (--authorized); a loopback target is a
+        # verified lab. No owner is auto-provisioned with a baked-in credential.
         with sessions() as db:
             db.execute(text("BEGIN IMMEDIATE"))
             owner = db.scalar(select(User).where(User.role == "owner")) or db.scalar(select(User))
             if not owner:
-                from aegis.auth import provision_owner
-
-                owner = provision_owner(db, "admin", "admin-cli-owner-pass-123", "Default Organization")
-                db.flush()
-            org_id = owner.organization_id
-            owner_id = owner.id
+                print(
+                    "Error: no owner account exists. Create one through onboarding before scanning.",
+                    file=sys.stderr,
+                )
+                return 1
+            org_id, owner_id = owner.organization_id, owner.id
             proj = db.scalar(
                 select(Project).where(Project.name == project_name, Project.organization_id == org_id)
             )
@@ -280,105 +258,182 @@ def cmd_scan(
                 db.flush()
 
             tgt = db.scalar(select(Target).where(Target.project_id == proj.id, Target.url == norm_url))
-            scope_dict = {
-                "hosts": [dest.host],
-                "allowed_origins": [dest.origin],
-                "allowed_paths": ["/"],
-                "allowed_cidrs": [],
-                "categories": ["http_headers"],
-                "starts_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
-                "expires_at": (datetime.now(UTC) + timedelta(hours=23)).isoformat(),
-            }
-            if not tgt:
+            if tgt is None:
+                if loopback_cidr:
+                    v_status, authorized_by, approved_at = "verified_lab", None, None
+                elif authorized:
+                    v_status, authorized_by, approved_at = "operator_authorized", owner_id, time.time()
+                else:
+                    print(
+                        "Error: a live (non-loopback) target requires --authorized to assert verified "
+                        "ownership before scanning.",
+                        file=sys.stderr,
+                    )
+                    return 1
                 tgt = Target(
-                    organization_id=proj.organization_id,
+                    organization_id=org_id,
                     project_id=proj.id,
                     url=norm_url,
                     scope=ScopePolicy.model_validate(scope_dict).model_dump(mode="json"),
-                    verification_status="operator_authorized",
-                    authorized_by=owner_id,
-                    approved_at=time.time(),
+                    verification_status=v_status,
+                    authorized_by=authorized_by,
+                    approved_at=approved_at,
                 )
                 db.add(tgt)
                 db.flush()
 
+            owned = tgt.verification_status == "operator_authorized"
+            try:
+                check_execution_url(tgt.scope, norm_url, owned=owned)
+            except PolicyError as exc:
+                print(f"Authorization Error: {exc}", file=sys.stderr)
+                return 1
+
             asmt = Assessment(
-                organization_id=proj.organization_id,
+                organization_id=org_id,
                 project_id=proj.id,
                 target_id=tgt.id,
                 created_by=owner_id,
-                idempotency_key=f"cli-{int(time.time())}",
+                idempotency_key=f"cli-{int(time.time() * 1000)}",
                 scope_version=tgt.scope_version,
                 scope_snapshot={
-                    **scope_dict,
+                    **tgt.scope,
                     "target_url": norm_url,
                     "authorized_by": owner.username,
                     "approved_at": time.time(),
                 },
                 profile=profile,
-                status=res.get("outcome", "completed"),
-                stage="Assessment complete",
-                checks=redact(res.get("checks", [])),
+                status="running",
+                stage="authorized; scanning",
                 created_at=time.time(),
-                started_at=started_epoch,
-                finished_at=time.time(),
+                started_at=time.time(),
             )
             db.add(asmt)
             db.flush()
-
-            for obs in res.get("observations", []):
-                clean_obs = redact(obs)
-                db.add(
-                    Observation(
-                        organization_id=proj.organization_id,
-                        assessment_id=asmt.id,
-                        data=clean_obs,
-                        evidence_hash=evidence_hash(clean_obs),
-                    )
-                )
-
-            for f in res.get("findings", []):
-                clean_f = redact(f)
-                fp = clean_f["fingerprint"]
-                existing = db.scalar(
-                    select(Finding).where(Finding.target_id == tgt.id, Finding.fingerprint == fp)
-                )
-                if existing:
-                    existing.last_seen = time.time()
-                    finding_id = existing.id
-                else:
-                    new_finding = Finding(
-                        organization_id=proj.organization_id,
-                        project_id=proj.id,
-                        target_id=tgt.id,
-                        fingerprint=fp,
-                        title=clean_f["title"],
-                        category=clean_f.get("category", "template_match"),
-                        severity=clean_f.get("severity", "medium"),
-                        confidence=clean_f.get("confidence", "medium"),
-                        status="suspected",
-                        description=clean_f.get("description", ""),
-                        remediation=clean_f.get("remediation", ""),
-                        affected_url=clean_f.get("affected_url", norm_url),
-                        first_seen=time.time(),
-                        last_seen=time.time(),
-                    )
-                    db.add(new_finding)
-                    db.flush()
-                    finding_id = new_finding.id
-
-                db.add(
-                    FindingEvidence(
-                        finding_id=finding_id,
-                        assessment_id=asmt.id,
-                        data=clean_f,
-                        evidence_hash=evidence_hash(clean_f),
-                    )
-                )
+            assessment_id, target_id, project_id = asmt.id, tgt.id, proj.id
             db.commit()
-            print(f"[+] Assessment persisted to database under Project '{project_name}' (ID: {asmt.id})")
-    except Exception as exc:
-        print(f"[*] Note: Local database recording skipped ({exc})")
+
+        print(f"[*] Target       : {norm_url}")
+        print(f"[*] Resolved IP  : {pinned_ip} (DNS-pinned & firewall-locked)")
+        print(f"[*] Profile      : {profile.upper()}")
+        print(f"[*] Mode         : {mode.upper()} (Context-aware adaptive synthesis)")
+        print(f"[*] Severities   : {severities}")
+        if tags:
+            print(f"[*] Custom Tags  : {tags}")
+        print(f"[*] Assessment   : {assessment_id} (authorization recorded before execution)")
+        print("[*] Launching multi-stage automated assessment pipeline...\n")
+
+        started_mono = time.monotonic()
+        if profile == "safe_http":
+            print("[+] Stage: Executing HTTP security header & cookie inspection...")
+            res = scan_live(dest, pinned_ip)
+        elif profile == "approved_templates":
+            print("[+] Stage: Executing Nuclei active vulnerability scanning...")
+            res = scan_live_nuclei(dest, pinned_ip, severities=severities, tags=tags, rate=rate)
+        else:
+            print("[1/6] Passive Recon & TLS Inspection...")
+            print("[2/6] Target Port & Service Verification...")
+            print("[3/6] HTTP Security Headers & Cookie Hardening...")
+            print("[4/6] In-Scope Web Crawler & Endpoint Discovery...")
+            print("[5/6] Target Intelligence & Adaptive Strategy Synthesis...")
+            print("[6/6] Active Behavioral Differential Testing & Nuclei Scanning...")
+            all_tools = ["nmap", "crawler", "sensitive", "diff", "nuclei", "zap", "metasploit"]
+            res = scan_comprehensive(
+                dest,
+                pinned_ip,
+                severities=severities,
+                tags=tags,
+                rate=rate,
+                mode=mode,
+                depth=depth,
+                tools=all_tools,
+            )
+
+        elapsed = round(time.monotonic() - started_mono, 2)
+        print(f"\n[+] Assessment completed in {elapsed}s (Outcome: {res.get('outcome', 'unknown')})")
+
+        # Persist results into the pre-created assessment. A persistence failure is reported and
+        # fails the command -- it is never swallowed into a success-looking note. Finding status is
+        # derived exactly as the worker derives it (REPRODUCED/verified -> confirmed), never a flat
+        # "suspected".
+        try:
+            with sessions() as db:
+                db.execute(text("BEGIN IMMEDIATE"))
+                record = db.get(Assessment, assessment_id)
+                if record is None:
+                    raise RuntimeError(f"assessment {assessment_id} vanished before persistence")
+                record.status = res.get("outcome", "completed")
+                record.stage = "Assessment complete"
+                record.checks = redact(res.get("checks", []))
+                record.finished_at = time.time()
+                for obs in res.get("observations", []):
+                    clean_obs = redact(obs)
+                    db.add(
+                        Observation(
+                            organization_id=org_id,
+                            assessment_id=assessment_id,
+                            data=clean_obs,
+                            evidence_hash=evidence_hash(clean_obs),
+                        )
+                    )
+                for f in res.get("findings", []):
+                    clean_f = redact(f)
+                    fp = clean_f["fingerprint"]
+                    state = _finding_status(clean_f)
+                    existing = db.scalar(
+                        select(Finding).where(Finding.target_id == target_id, Finding.fingerprint == fp)
+                    )
+                    if existing:
+                        if state not in {"demoted", "false_positive"}:
+                            if existing.status in {
+                                "needs_triage",
+                                "inconclusive",
+                                "false_positive",
+                                "accepted_risk",
+                                "remediation_in_progress",
+                            }:
+                                state = existing.status
+                            elif state == "confirmed" and existing.status == "fixed":
+                                state = "reopened"
+                        existing.last_seen = time.time()
+                        existing.status = state
+                        finding_id = existing.id
+                    else:
+                        new_finding = Finding(
+                            organization_id=org_id,
+                            project_id=project_id,
+                            target_id=target_id,
+                            fingerprint=fp,
+                            title=clean_f["title"],
+                            category=clean_f.get("category", "template_match"),
+                            severity=clean_f.get("severity", "medium"),
+                            confidence=str(clean_f.get("confidence", "medium")),
+                            status=state,
+                            description=clean_f.get("description", ""),
+                            remediation=clean_f.get("remediation", ""),
+                            affected_url=clean_f.get("affected_url", norm_url),
+                            first_seen=time.time(),
+                            last_seen=time.time(),
+                        )
+                        db.add(new_finding)
+                        db.flush()
+                        finding_id = new_finding.id
+
+                    db.add(
+                        FindingEvidence(
+                            finding_id=finding_id,
+                            assessment_id=assessment_id,
+                            data=clean_f,
+                            evidence_hash=evidence_hash(clean_f),
+                        )
+                    )
+                db.commit()
+                print(
+                    f"[+] Assessment persisted to database under Project '{project_name}' (ID: {assessment_id})"
+                )
+        except Exception as exc:
+            print(f"[!] Assessment ran but results could not be persisted: {exc}", file=sys.stderr)
+            return 2
     finally:
         engine.dispose()
 

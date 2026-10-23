@@ -40,9 +40,22 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
 - [ ] **A3 · Scope + cancellation survive dispatch (F03).** Comprehensive scan receives the full
   `ScopePolicy` + cancel callback; excluded-path contract enforced for crawler/sensitive/browser/
   reproducer paths. Anchor S04, S06–S11.
-- [ ] **A4 · CLI approval provenance (F04).** CLI records target authorization + assessment BEFORE
-  scanning; no hardcoded owner in a normal path; finding-status persistence identical to the worker.
-  Anchor S05.
+- [x] **A4 · CLI approval provenance (F04).** `cmd_scan` scanned first, then auto-provisioned an
+  owner with a baked-in password (`admin-cli-owner-pass-123`), auto-marked every new target
+  `operator_authorized`, persisted finding status as a flat `"suspected"`, and swallowed any
+  persistence failure into a success-looking "[*] Note:". Rewritten so authorization precedes
+  execution: in one transaction it resolves a real owner (refuses with guidance if none — no
+  hardcoded provisioning), records the target authorization (loopback ⇒ `verified_lab`; a live
+  target only with the new `--authorized` flag, else refused) and the assessment (binding
+  `scope_version`), and validates the destination via `check_execution_url(owned=...)` — all before
+  any probe. Results persist into that pre-created assessment with finding status from the worker's
+  `_finding_status` (REPRODUCED/verified ⇒ `confirmed`, with the same no-downgrade rules), and a
+  persistence failure now returns exit 2 instead of a note. Evidence: no owner ⇒ exit 1, nothing
+  provisioned, scanner never called; live target without `--authorized` ⇒ exit 1, scanner never
+  called; authorized loopback-style run ⇒ assessment recorded (owner-bound, scope_version set) and a
+  REPRODUCED finding persisted as `confirmed`; a fingerprint-less finding ⇒ exit 2. Regressions
+  `tests/integration/test_cli.py::CliScanAuthorizationTests` (4). Full suite 1042 pass / 1301
+  subtests; mypy + ruff clean. `aegis/cli.py`, `aegis/__main__.py`.
 
 ### P0-B · Correct impact & session provenance  (F05, F13)
 - [x] **B1 · Class-specific confirmation (F05/E01).** A reflected canary no longer confirms when it

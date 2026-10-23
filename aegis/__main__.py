@@ -197,6 +197,11 @@ def main(argv=None):
         "--project", default="CLI Assessments", help="Project name to associate findings with"
     )
     scan_cmd.add_argument("--json", action="store_true", help="Output raw JSON results")
+    scan_cmd.add_argument(
+        "--authorized",
+        action="store_true",
+        help="Assert verified ownership/authorization of a live (non-loopback) target (required for it)",
+    )
 
     probe_cmd = sub.add_parser("probe", help="Execute an interactive takeover probe against a target")
     probe_cmd.add_argument("url", help="Target URL to probe")
@@ -308,6 +313,7 @@ def main(argv=None):
                 rate=args.rate,
                 depth=args.depth,
                 as_json=args.json,
+                authorized=args.authorized,
             )
         elif args.command == "findings":
             from aegis.cli import cmd_findings
