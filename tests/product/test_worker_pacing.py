@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import event, inspect, select, text
+from sqlalchemy import MetaData, Table, event, inspect, select, text
 from sqlalchemy.exc import OperationalError
 
 from aegis.config import ROOT, Settings
@@ -485,15 +485,20 @@ finally:
         tables = [table for table in Base.metadata.sorted_tables if table.name != "origin_cooldowns"]
 
         def snapshot(connection):
-            return {
-                table.name: [
+            # Reflect the columns actually present so the comparison is robust to columns added by
+            # later migrations (e.g. users.totp_* in 0004) against an older-schema database.
+            inspector = inspect(connection)
+            result = {}
+            for table in tables:
+                present = {c["name"] for c in inspector.get_columns(table.name)}
+                cols = [table.c[name] for name in table.columns.keys() if name in present]
+                result[table.name] = [
                     dict(row)
                     for row in connection.execute(
-                        select(table).order_by(*table.primary_key.columns)
+                        select(*cols).order_by(*table.primary_key.columns)
                     ).mappings()
                 ]
-                for table in tables
-            }
+            return result
 
         with tempfile.TemporaryDirectory(prefix="old-pacing-schema-") as folder:
             settings = Settings(Path(folder), start_worker=False)
@@ -505,11 +510,29 @@ finally:
                     config.attributes["connection"] = destination
                     command.upgrade(config, "0001_desktop")
                     expected = snapshot(source)
+                    present_0001 = {
+                        t.name: {c["name"] for c in inspect(destination).get_columns(t.name)}
+                        for t in tables
+                    }
+                    # Insert the old data through reflected (0001-schema) tables so columns added by
+                    # later migrations -- even ones with client-side defaults -- are not referenced.
                     for table in tables:
-                        if expected[table.name]:
-                            destination.execute(table.insert(), expected[table.name])
+                        rows = [
+                            {k: v for k, v in row.items() if k in present_0001[table.name]}
+                            for row in expected[table.name]
+                        ]
+                        if rows:
+                            reflected = Table(table.name, MetaData(), autoload_with=destination)
+                            destination.execute(reflected.insert(), rows)
                     self.assertNotIn("origin_cooldowns", inspect(destination).get_table_names())
-                    self.assertEqual(snapshot(destination), expected)
+                    expected_0001 = {
+                        t.name: [
+                            {k: v for k, v in row.items() if k in present_0001[t.name]}
+                            for row in expected[t.name]
+                        ]
+                        for t in tables
+                    }
+                    self.assertEqual(snapshot(destination), expected_0001)
             finally:
                 old_engine.dispose()
             for _ in range(2):
@@ -520,7 +543,7 @@ finally:
                         self.assertEqual(snapshot(connection), expected)
                         self.assertIn(
                             connection.scalar(text("SELECT version_num FROM alembic_version")),
-                            ("0002_origin_cooldowns", "0003_origin_pacing_leases"),
+                            ("0002_origin_cooldowns", "0003_origin_pacing_leases", "0004_user_totp"),
                         )
                 finally:
                     migrated.dispose()

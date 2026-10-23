@@ -30,6 +30,11 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(30))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Opt-in TOTP MFA. A stored secret is pending until totp_enabled; login is gated only for
+    # enrolled users, so accounts without MFA are unaffected.
+    totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    totp_backup_hashes: Mapped[Any | None] = mapped_column(JSON, nullable=True)
 
 
 class LoginAttempt(Base):

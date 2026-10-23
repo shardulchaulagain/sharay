@@ -569,7 +569,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/auth/login")
     def login(data: Login, request: Request, response: Response, db: DB):
         client = request.client.host if request.client else "local"
-        user, token, csrf = sign_in(db, data.username, data.password, client, settings.session_seconds)
+        user, token, csrf = sign_in(
+            db, data.username, data.password, client, settings.session_seconds, code=data.code
+        )
         response.set_cookie(
             COOKIE,
             token,
@@ -612,30 +614,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return user_view(row)
 
     @app.post("/api/v1/auth/totp/setup")
-    def totp_setup(user: Actor):
+    def totp_setup(db: DB, user: Actor):
         from aegis.auth import TOTPEngine
 
         secret = TOTPEngine.generate_secret()
         uri = TOTPEngine.generate_provisioning_uri(secret, username=user.username)
         plain_codes, hashed_codes = TOTPEngine.generate_backup_codes(count=8)
+        # Persist the pending secret and backup-code hashes; MFA stays disabled until verified.
+        row = db.get(User, user.id)
+        if row is None:
+            raise HTTPException(404, "User not found")
+        row.totp_secret = secret
+        row.totp_backup_hashes = hashed_codes
+        row.totp_enabled = False
+        db.commit()
         return {
             "secret": secret,
             "provisioning_uri": uri,
             "backup_codes": plain_codes,
-            "backup_hashes": hashed_codes,
         }
 
     @app.post("/api/v1/auth/totp/verify")
-    def totp_verify(data: dict[str, str], user: Actor):
+    def totp_verify(data: dict[str, str], db: DB, user: Actor):
         from aegis.auth import TOTPEngine
 
-        secret = data.get("secret", "")
         code = data.get("code", "")
-        if not secret or not code:
-            raise HTTPException(400, "Secret and code are required")
-        valid, counter = TOTPEngine.verify_otp(secret, code)
+        row = db.get(User, user.id)
+        if row is None or not row.totp_secret:
+            raise HTTPException(400, "Run TOTP setup before verifying")
+        if not code:
+            raise HTTPException(400, "A verification code is required")
+        valid, counter = TOTPEngine.verify_otp(row.totp_secret, code)
         if not valid:
             raise HTTPException(401, "Invalid TOTP verification code")
+        row.totp_enabled = True  # enrollment complete: subsequent logins require a code
+        audit(db, user.organization_id, user.id, "auth.mfa_enabled", user.id)
+        db.commit()
         return {"valid": True, "counter": counter}
 
     @app.get("/api/v1/openapi.json")

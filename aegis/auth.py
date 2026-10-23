@@ -64,7 +64,14 @@ def provision_owner(db: Session, username: str, password: str, name: str = "Loca
     return user
 
 
-def sign_in(db: Session, username: str, password: str, client: str, session_seconds: int):
+def sign_in(
+    db: Session,
+    username: str,
+    password: str,
+    client: str,
+    session_seconds: int,
+    code: str | None = None,
+):
     now = time.time()
     # ponytail: one local client throttle; distributed per-identity counters for server deployment.
     key = digest(client)
@@ -88,6 +95,27 @@ def sign_in(db: Session, username: str, password: str, client: str, session_seco
             audit(db, user.organization_id, user.id, "auth.login_rejected", user.id)
         db.commit()  # Persist denial counters even though the request raises.
         raise HTTPException(401, "Invalid credentials")
+    # MFA gate: an account with TOTP enabled must present a valid TOTP or backup code. A bad or
+    # missing code is a failed login (counts against the failure budget); it never issues a session.
+    if user.totp_enabled:
+        provided = (code or "").strip()
+        ok = False
+        if provided:
+            ok, _ = TOTPEngine.verify_otp(user.totp_secret or "", provided)
+            if not ok and isinstance(user.totp_backup_hashes, list):
+                remaining = list(user.totp_backup_hashes)
+                if TOTPEngine.redeem_backup_code(provided, remaining):
+                    user.totp_backup_hashes = remaining  # consume the used backup code
+                    ok = True
+        if not ok:
+            if not attempt:
+                attempt = LoginAttempt(key=key, failures=0, window_started=now)
+                db.add(attempt)
+            attempt.failures += 1
+            audit(db, user.organization_id, user.id, "auth.mfa_rejected", user.id)
+            db.commit()
+            raise HTTPException(401, "Invalid or missing MFA code")
+
     # A valid account must not reset the shared failure budget for guesses at other accounts.
     if HASHER.check_needs_rehash(user.password_hash):
         user.password_hash = HASHER.hash(password)

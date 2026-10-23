@@ -14,6 +14,8 @@ class Input(BaseModel):
 class Login(Input):
     username: str = Field(min_length=3, max_length=80)
     password: str = Field(min_length=1, max_length=256)
+    # TOTP code or a backup code, required only when the account has MFA enabled.
+    code: str | None = Field(default=None, max_length=16)
 
 
 class MemberInput(Input):

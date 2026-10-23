@@ -25,7 +25,8 @@ export default function Login({ onLogin }: { onLogin: (session: Session) => void
     const form = new FormData(event.currentTarget);
     setBusy(true); setError(undefined);
     try {
-      const session = await post<Session>("/auth/login", { username: form.get("username"), password: form.get("password") });
+      const code = (form.get("code") as string | null)?.trim() || undefined;
+      const session = await post<Session>("/auth/login", { username: form.get("username"), password: form.get("password"), code });
       onLogin(session);
     } catch (error) { setError(error instanceof Error ? error : new Error("Sign-in failed.")); }
     finally { setBusy(false); }
@@ -43,6 +44,7 @@ export default function Login({ onLogin }: { onLogin: (session: Session) => void
       {showForm ? <form className="login-form" onSubmit={login}>
         <label>Username<input name="username" autoComplete="username" required maxLength={100}/></label>
         <label>Password<input name="password" type="password" autoComplete="current-password" required/></label>
+        <label>MFA code <small>(if enabled)</small><input name="code" inputMode="numeric" autoComplete="one-time-code" maxLength={16} placeholder="6-digit or backup code"/></label>
         <ErrorNotice error={error}/>
         <button className="primary" disabled={busy}>{busy ? "Authenticating…" : "Unlock workspace"}<Icon name="arrow"/></button>
         <button type="button" className="text-button" onClick={() => setShowForm(false)}>Back</button>

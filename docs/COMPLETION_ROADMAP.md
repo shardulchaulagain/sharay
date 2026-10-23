@@ -240,8 +240,19 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   observation PII-redaction write-back — the endpoint passes records without their `data`, so the
   age-gated redaction is a no-op; and ticketing-to-a-real-provider or labelled-local, notary trust
   root configured.)_ Anchor S36, S37, S24.
-- [ ] **P1-8 · MFA / project RBAC enforced.** TOTP persists + gates login; project membership
-  enforced on normal API access. Anchor S22–S23, S31, S49.
+- [◐] **P1-8 · MFA / project RBAC enforced.** _MFA now persists and gates login:_ TOTP was cosmetic
+  — `totp_setup` never stored the secret, `totp_verify` checked a secret passed in the request, and
+  `sign_in` had no MFA check. Now the `User` model carries `totp_secret`/`totp_enabled`/
+  `totp_backup_hashes` (Alembic `0004_user_totp`); `totp_setup` persists a pending secret +
+  backup-code hashes, `totp_verify` enables MFA against the stored secret, and `sign_in` requires a
+  valid TOTP or single-use backup code for enrolled accounts (a bad/missing code is a failed login
+  against the lockout budget; non-enrolled accounts are unaffected). The UI login form gained an
+  optional MFA code field. Evidence: non-enrolled login needs no code; enrolled login rejects
+  missing/`000000`, accepts the live TOTP, accepts a backup code and consumes it (2→1, no reuse).
+  Regression `tests/product/test_mfa_login_gate.py` (3). Full suite 1056 pass; mypy + ruff + web tsc
+  clean. `aegis/{models,auth,api,schemas}.py`, `migrations/versions/0004_user_totp.py`,
+  `apps/web/app/login.tsx`. _(Remaining: project-level RBAC — no `ProjectMember` model exists yet, so
+  `owned()` enforces org scope but not per-project membership.)_ Anchor S22–S23, S31, S49.
 
 ---
 
