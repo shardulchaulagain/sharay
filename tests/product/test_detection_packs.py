@@ -52,6 +52,35 @@ class TestDetectionPacks(unittest.TestCase):
         tpl.path = "/api/hacked/path"
         self.assertFalse(tpl.verify_ed25519(), "Tampered template path must fail signature check")
 
+    def test_matcher_tampering_invalidates_signature(self):
+        """F10/E09: the matchers are the detection behaviour and must be covered by the signature."""
+        tpl = DetectionTemplate(
+            id="cve-match",
+            name="Matcher Coverage",
+            author="sharay-sec",
+            version="1.0.0",
+            severity="high",
+            category="rce",
+            cwe_id="CWE-78",
+            method="GET",
+            path="/",
+            matchers=[PackMatcher(MatcherType.WORD, words=["uid=0(root)"], part="body")],
+        )
+        tpl.sign_ed25519(self.priv_key)
+        self.assertTrue(tpl.verify_ed25519())
+
+        # Swap the matcher so it fires on anything -- without re-signing.
+        tpl.matchers[0].matcher_type = MatcherType.REGEX
+        tpl.matchers[0].regexes = [".*"]
+        self.assertFalse(tpl.verify_ed25519(), "Tampered matcher must fail signature check")
+
+        # Re-signing with the tampered matcher is required for it to verify again.
+        tpl.sign_ed25519(self.priv_key)
+        self.assertTrue(tpl.verify_ed25519())
+        # A changed matcher condition also breaks the signature.
+        tpl.matchers[0].condition = "and" if tpl.matchers[0].condition == "or" else "or"
+        self.assertFalse(tpl.verify_ed25519())
+
     def test_nuclei_template_importer(self):
         """Ensure NucleiTemplateImporter parses standard Nuclei definitions."""
         nuclei_def = {

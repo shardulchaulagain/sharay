@@ -103,8 +103,16 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   wrong-sig⇒reject, correct-sig⇒apply; API `/system/update/apply` rejects a tampered signature with
   400. Regressions in `tests/integration/test_turnkey_onboarding_and_autoupdate.py` and
   `tests/product/test_onboarding_api.py`. `services/update_worker/updater.py`.
-- [ ] **D2 · Signed detection packs cover behavior (F10/E09).** Matcher/behavioral fields are in the
-  signed canonical bytes; altering a matcher invalidates the signature. Anchor S34.
+- [x] **D2 · Signed detection packs cover behavior (F10/E09).** `DetectionTemplate.canonical_bytes`
+  signed only the request metadata (id/name/method/path/headers/body) — not the `matchers`, which
+  ARE the detection behavior — so a matcher could be swapped (e.g. a precise word matcher turned
+  into regex `.*`) while the Ed25519 signature stayed valid. The matchers (type, words, regexes,
+  status codes, part, condition, and their order) are now part of the signed canonical bytes.
+  Evidence: before, tampering a matcher ⇒ `verify_ed25519()` still True; after, matcher/condition
+  tamper ⇒ False, and re-signing is required to verify again. Regression
+  `tests/product/test_detection_packs.py::test_matcher_tampering_invalidates_signature`; the 3 prior
+  pack tests still pass. Full suite 1043 pass / 1301 subtests; mypy + ruff clean.
+  `packages/detection_packs.py`.
 - [ ] **D3 · Fail-closed isolation (F11/F12).** No silent host fallback when the sandbox/VM is
   unavailable; cosign verify needs a real verifier; attestation records controls actually applied.
   Anchor S08, S10, S35.

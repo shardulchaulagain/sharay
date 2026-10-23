@@ -79,7 +79,13 @@ class DetectionTemplate:
     public_key_hex: str = ""
 
     def canonical_bytes(self) -> bytes:
-        """Produce deterministic canonical representation for cryptographic signing."""
+        """Produce deterministic canonical representation for cryptographic signing.
+
+        The matchers ARE the detection behaviour, so they are part of the signed bytes: altering a
+        matcher (its type, words, regexes, status codes, part or condition, or their order)
+        invalidates the signature (F10/E09). Signing only the request metadata would let a tampered
+        matcher keep a valid signature.
+        """
         data = {
             "id": self.id,
             "name": self.name,
@@ -92,6 +98,17 @@ class DetectionTemplate:
             "path": self.path,
             "headers": sorted(self.headers.items()),
             "body": self.body,
+            "matchers": [
+                {
+                    "type": m.matcher_type.value,
+                    "words": m.words,
+                    "regexes": m.regexes,
+                    "status_codes": m.status_codes,
+                    "part": m.part,
+                    "condition": m.condition,
+                }
+                for m in self.matchers
+            ],
         }
         return json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
