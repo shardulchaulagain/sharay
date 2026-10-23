@@ -2102,6 +2102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 body=data.body,
                 output_prefix=data.output_prefix,
                 output_suffix=data.output_suffix,
+                owned=target.verification_status == "operator_authorized",
             )
         except PolicyError as exc:
             raise HTTPException(422, str(exc)) from None

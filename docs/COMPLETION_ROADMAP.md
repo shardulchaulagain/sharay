@@ -23,9 +23,20 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   before; after fix requested 150⇒1.0, None⇒approved, 2@approved5⇒2.0; regression
   `tests/product/test_authorization_contract.py::RateCeilingTests` (4 pass); 45 pacing/policy tests
   still green. `aegis/schemas.py:111`. _(Still open: port/Nuclei concurrency vs ceiling — tracked in A3.)_
-- [ ] **A2 · Private-destination parity (F01/E07).** UI workspace, CLI, worker, browser, RPC and
-  verifier all reject the same denied destination/path/expiry the execution validator rejects.
-  Anchor S01, S09 `workspace.py:96`, S03.
+- [x] **A2 · Private-destination parity (F01/E07).** The workspace probe (`workspace.py`) used
+  registration validation (`validate_scope`/`check_url`) plus an ordinary connection, so it accepted
+  a private non-loopback destination the scan worker's `check_execution_url` rejects. `execute_probe`
+  now applies `check_execution_url(owned=...)` — the identical execution contract (approved loopback
+  lab, or an owned public target; never a private/internal address) — for the target URL and the
+  merged-query URL. `owned` is threaded from the API (`verification_status == "operator_authorized"`)
+  and the CLI (new `--authorized` flag; loopback probes supply their `/32`·`/128` CIDR). Worker and
+  interactive console already enforced `check_execution_url`; the browser and reproducer run inside
+  the scan on the already-validated `destination.url`, so no independent entrypoint stays weaker.
+  Evidence: for `http://10.0.0.5/`, `check_url` ACCEPTS but `check_execution_url` and `execute_probe`
+  both REJECT (owned True and False); the loopback console-TLS probe still succeeds. Regression
+  `tests/product/test_authorization_contract.py::WorkspaceDestinationParityTests`. Full suite 1037
+  pass / 1301 subtests; mypy + ruff clean. `packages/scanner_adapters/workspace.py`, `aegis/cli.py`,
+  `aegis/__main__.py`, `aegis/api.py`.
 - [ ] **A3 · Scope + cancellation survive dispatch (F03).** Comprehensive scan receives the full
   `ScopePolicy` + cancel callback; excluded-path contract enforced for crawler/sensitive/browser/
   reproducer paths. Anchor S04, S06–S11.

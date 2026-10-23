@@ -20,8 +20,7 @@ from packages.security_policies import (
     Destination,
     PolicyError,
     ScopePolicy,
-    check_url,
-    validate_scope,
+    check_execution_url,
 )
 
 ALLOWED_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -103,8 +102,14 @@ class InteractiveWorkspace:
         output_suffix: str | None = None,
         cancelled: Callable[[], bool] | None = None,
         pacing: dict[str, tuple[float, float]] | None = None,
+        owned: bool = False,
     ) -> WorkspaceResult:
-        """Execute a live interactive probe against an approved target endpoint within scope."""
+        """Execute a live interactive probe against an approved target endpoint within scope.
+
+        The workspace is a live-execution path, so it enforces the SAME destination policy as the
+        scan worker (`check_execution_url`): an approved loopback lab, or an owned public target --
+        never a private/internal address. `owned` mirrors the target's operator-authorization, so a
+        destination the worker would reject is rejected here too (F01/E07)."""
         if cancelled and cancelled():
             raise PolicyError("Operator cancellation requested.")
 
@@ -113,8 +118,9 @@ class InteractiveWorkspace:
         if norm_method not in ALLOWED_METHODS:
             raise PolicyError(f"HTTP method '{method}' is not in approved methods: {sorted(ALLOWED_METHODS)}")
 
-        # Scope and destination validation
-        policy = validate_scope(scope, target_url)
+        # Scope and destination validation -- identical contract to execution (no weaker path).
+        policy = scope if isinstance(scope, ScopePolicy) else ScopePolicy.model_validate(scope)
+        check_execution_url(policy, target_url, owned=owned)
         if not policy.intrusive:
             if norm_method in {"POST", "PUT", "DELETE", "PATCH"}:
                 raise PolicyError(
@@ -122,7 +128,7 @@ class InteractiveWorkspace:
                 )
             if headers and any(k.lower() in {"authorization", "proxy-authorization"} for k in headers):
                 raise PolicyError("Authentication headers require intrusive=True in scope policy.")
-        destination: Destination = check_url(policy, target_url)
+        destination: Destination = check_execution_url(policy, target_url, owned=owned)
 
         # Merge or format query parameters while preserving path scope
         final_url = destination.url
@@ -135,8 +141,8 @@ class InteractiveWorkspace:
             final_url = urlunsplit(
                 (parsed.scheme, parsed.netloc, parsed.path or "/", new_query_str, parsed.fragment)
             )
-            # Revalidate with merged query
-            destination = check_url(policy, final_url)
+            # Revalidate with merged query (same execution contract).
+            destination = check_execution_url(policy, final_url, owned=owned)
 
         if cancelled and cancelled():
             raise PolicyError("Operator cancellation requested.")

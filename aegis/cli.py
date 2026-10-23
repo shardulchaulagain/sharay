@@ -118,6 +118,7 @@ def cmd_probe(
     body: str | None = None,
     timeout: float = 10.0,
     as_json: bool = False,
+    authorized: bool = False,
 ) -> int:
     """Execute an interactive operator takeover probe against a target URL."""
     try:
@@ -132,11 +133,16 @@ def cmd_probe(
     dest_host = parsed.hostname or ""
     dest_origin = f"{parsed.scheme}://{parsed.netloc}"
 
+    # Parity with execution: a loopback lab needs its CIDR approved; a live target needs asserted
+    # ownership (--authorized). The workspace applies check_execution_url, so a private/internal
+    # host is refused here exactly as the scan worker refuses it (F01/E07).
+    loopback_cidr = {"127.0.0.1": "127.0.0.1/32", "::1": "::1/128"}.get(dest_host)
     scope = ScopePolicy.model_validate(
         {
             "hosts": [dest_host],
             "allowed_origins": [dest_origin],
             "allowed_paths": ["/"],
+            "allowed_cidrs": [loopback_cidr] if loopback_cidr else [],
             "categories": ["http_headers"],
             "starts_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
             "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
@@ -152,6 +158,7 @@ def cmd_probe(
             method=method,
             headers=headers or {},
             body=body,
+            owned=authorized,
         )
     except Exception as exc:
         print(f"[!] Probe failed: {exc}", file=sys.stderr)

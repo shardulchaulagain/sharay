@@ -207,6 +207,11 @@ def main(argv=None):
     probe_cmd.add_argument("-d", "--data", default=None, help="HTTP request body")
     probe_cmd.add_argument("--timeout", type=float, default=10.0, help="Timeout in seconds")
     probe_cmd.add_argument("--json", action="store_true", help="Output raw JSON results")
+    probe_cmd.add_argument(
+        "--authorized",
+        action="store_true",
+        help="Assert verified ownership/authorization of a live (non-loopback) target (required for it)",
+    )
 
     status_cmd = sub.add_parser("status", help="Show platform status, scanner integrations, and inventory")
     status_cmd.add_argument("--json", action="store_true", help="Output raw JSON metrics")
@@ -287,6 +292,7 @@ def main(argv=None):
                 body=args.data,
                 timeout=args.timeout,
                 as_json=args.json,
+                authorized=args.authorized,
             )
         elif args.command == "scan":
             from aegis.cli import cmd_scan
