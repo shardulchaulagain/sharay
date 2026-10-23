@@ -110,9 +110,7 @@ class BenchmarkScorerSoundnessTests(unittest.TestCase):
         cat = self._catalog(
             {"vulnerabilities": [{"id": "GT-X", "cwe": "CWE-79", "endpoint": "/e", "parameter": None}]}
         )
-        m = BenchmarkEvaluator.evaluate(
-            [{"cwe_id": "CWE-7", "affected_url": "http://t/e", "poc": {}}], cat
-        )
+        m = BenchmarkEvaluator.evaluate([{"cwe_id": "CWE-7", "affected_url": "http://t/e", "poc": {}}], cat)
         self.assertEqual(m.true_positives, 0)  # CWE-7 is not CWE-79
         self.assertEqual(m.false_positives, 1)
 

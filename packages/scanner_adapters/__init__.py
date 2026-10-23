@@ -2287,7 +2287,11 @@ def scan_comprehensive(
             )
 
     # Stage 7c: Business-Logic & Dual-Identity IDOR Authorization Matrix
-    if mode != "passive" and ("auth_matrix" in enabled_tools or mode in ("adaptive", "aggressive")) and not _stop():
+    if (
+        mode != "passive"
+        and ("auth_matrix" in enabled_tools or mode in ("adaptive", "aggressive"))
+        and not _stop()
+    ):
         try:
             from packages.scanner_adapters.integrations.authorization import (
                 AuthConfig,
@@ -2377,7 +2381,11 @@ def scan_comprehensive(
             )
 
     # Stage 7d: Compositional payload grammar + fire-and-confirm (offensive engine, Sectors O3/2B)
-    if mode != "passive" and ("payload_forge" in enabled_tools or mode in ("adaptive", "aggressive")) and not _stop():
+    if (
+        mode != "passive"
+        and ("payload_forge" in enabled_tools or mode in ("adaptive", "aggressive"))
+        and not _stop()
+    ):
         try:
             from packages.payload_engine import CFGGrammarEngine, VulnClass
 

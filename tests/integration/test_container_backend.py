@@ -271,7 +271,9 @@ class ContainerBackendTests(unittest.TestCase):
             cb.ImagePinningEngine.verify_cosign_signature(pinned, "cosign-pub-key-123", lambda ref, key: True)
         )
         self.assertFalse(
-            cb.ImagePinningEngine.verify_cosign_signature(pinned, "cosign-pub-key-123", lambda ref, key: False)
+            cb.ImagePinningEngine.verify_cosign_signature(
+                pinned, "cosign-pub-key-123", lambda ref, key: False
+            )
         )
         with self.assertRaisesRegex(IsolationError, "No cosign verifier is configured"):
             cb.ImagePinningEngine.verify_cosign_signature(pinned, "cosign-pub-key-123")
