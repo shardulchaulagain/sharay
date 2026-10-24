@@ -1801,16 +1801,88 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except SourceAnalysisError as exc:
             raise HTTPException(400, str(exc)) from None
         result = analyze_source_tree(root)
+
+        assessment_id = None
+        if payload.target_id:
+            # Persist the source findings into the normal lifecycle under the given target, so they
+            # appear in the Findings list, reports and retests rather than only as an ad-hoc result.
+            from aegis.worker import _finding_status, evidence_hash
+            from packages.reporting import redact
+
+            target = owned(db, Target, payload.target_id, user)
+            asmt = Assessment(
+                organization_id=user.organization_id,
+                project_id=target.project_id,
+                target_id=target.id,
+                created_by=user.id,
+                idempotency_key=f"source-{int(time.time() * 1000)}",
+                scope_version=target.scope_version,
+                scope_snapshot={**target.scope, "target_url": target.url, "source_root": str(root)},
+                profile="source_analysis",
+                status="completed",
+                stage="Source analysis complete",
+                checks=result.get("checks", []),
+                created_at=time.time(),
+                started_at=time.time(),
+                finished_at=time.time(),
+            )
+            db.add(asmt)
+            db.flush()
+            for raw in result["findings"]:
+                clean = redact(raw)
+                fp = clean["fingerprint"]
+                existing = db.scalar(
+                    select(Finding).where(Finding.target_id == target.id, Finding.fingerprint == fp)
+                )
+                state = _finding_status(clean)
+                if existing:
+                    existing.last_seen = time.time()
+                    existing.status = state if existing.status not in {"confirmed", "fixed"} else existing.status
+                    finding_id = existing.id
+                else:
+                    new = Finding(
+                        organization_id=user.organization_id,
+                        project_id=target.project_id,
+                        target_id=target.id,
+                        fingerprint=fp,
+                        title=clean["title"],
+                        category=clean.get("category", "secret_exposure"),
+                        severity=clean.get("severity", "medium"),
+                        confidence=str(clean.get("confidence", "medium")),
+                        status=state,
+                        description=clean.get("description", ""),
+                        remediation=clean.get("remediation", ""),
+                        affected_url=clean.get("affected_url", f"file://{root}"),
+                        first_seen=time.time(),
+                        last_seen=time.time(),
+                    )
+                    db.add(new)
+                    db.flush()
+                    finding_id = new.id
+                db.add(
+                    FindingEvidence(
+                        finding_id=finding_id,
+                        assessment_id=asmt.id,
+                        data=clean,
+                        evidence_hash=evidence_hash(clean),
+                    )
+                )
+            assessment_id = asmt.id
+
         audit(
             db,
             user.organization_id,
             user.id,
             "source_analysis.run",
             str(root),
-            {"findings": len(result["findings"]), "packages": len(result["packages"])},
+            {
+                "findings": len(result["findings"]),
+                "packages": len(result["packages"]),
+                "assessment_id": assessment_id,
+            },
         )
         db.commit()
-        return {**result, "root": str(root)}
+        return {**result, "root": str(root), "assessment_id": assessment_id}
 
     @app.get("/api/v1/audit")
     def events(db: DB, user: Actor, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):

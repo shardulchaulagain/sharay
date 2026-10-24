@@ -215,10 +215,21 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   selection validate, and an unknown tool is still rejected. Regression
   `tests/product/test_authorization_contract.py::UiToolOptionParityTests`. Full suite 1052 pass /
   1316 subtests; mypy + ruff clean. `aegis/schemas.py`.
-- [ ] **P1-2 · Source analysis joins the normal lifecycle.** Source findings persist as
-  assessment/findings/evidence and appear in reports & retests (not returned ad hoc). Anchor S21.
+- [◐] **P1-2 · Source analysis joins the normal lifecycle.** `/source-analysis` returned findings
+  ad hoc and only recorded an audit event — they never reached the Findings list, reports or retests.
+  `SourceAnalysisInput` now takes an optional `target_id`; when given, the endpoint creates a
+  `source_analysis`-profile `Assessment` under that target and persists the source findings as
+  `Finding` + `FindingEvidence` (worker-parity status via `_finding_status`, secret values redacted),
+  so they appear in the normal lifecycle. Omitting `target_id` keeps the ad-hoc result. Evidence:
+  POST with `target_id` ⇒ a source-profile assessment + a persisted `secret_exposure` finding under
+  the target; without it ⇒ no assessment created. Regression
+  `tests/product/test_source_analysis_lifecycle.py` (2). Full suite 1059 pass. `aegis/api.py`,
+  `aegis/schemas.py`. _(Remaining: a target picker in the standalone Source-analysis UI page.)_ Anchor S21.
 - [ ] **P1-3 · SAST/SCA/SBOM assembled workflow.** Semgrep dispatch, OSV advisory source + freshness,
-  CycloneDX SBOM analysis wired with tool/version/feed identity recorded. Anchor S21, S53–S54.
+  CycloneDX SBOM analysis wired with tool/version/feed identity recorded. _(Parser/normalizers exist
+  (`packages/source_scanners.py`) but the Semgrep binary is not installed here and OSV needs an
+  advisory feed, so real SAST/SCA output cannot be verified in this environment — deferred to an
+  environment with the binaries/feeds rather than wiring unverifiable fallbacks.)_ Anchor S21, S53–S54.
 - [ ] **P1-4 · Authenticated testing.** Approved credential refs → identity-specific jobs with
   stored redacted evidence. Anchor S06, S12.
 - [◐] **P1-5 · AI investigations persist.** `run_ai_investigation` computed the analysis (optionally

@@ -220,6 +220,9 @@ class OnboardingAdvanceInput(Input):
 
 class SourceAnalysisInput(Input):
     path: str = Field(min_length=1, max_length=4096)
+    # When given, source findings are persisted under this target as a source-profile assessment so
+    # they join the normal lifecycle (Findings list, reports, retests). Omitted = ad-hoc result only.
+    target_id: str | None = None
 
 
 class UpdateCheckInput(Input):
