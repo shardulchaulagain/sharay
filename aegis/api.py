@@ -19,7 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -2022,6 +2022,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "assessment_id": o.assessment_id,
                 "observed_at": o.observed_at,
                 "evidence_hash": o.evidence_hash,
+                "data": o.data,  # required for the age-gated PII redaction to have content to redact
             }
             for o in obs_rows
         ]
@@ -2051,6 +2052,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     Assessment.organization_id == user.organization_id,
                 )
             )
+        # Write back the age-gated PII-redacted observation payloads (data minimization on old raw
+        # evidence that is kept) so the redaction actually lands in the DB, not just the report.
+        redacted = [o for o in updated["observations"] if o.get("pii_redacted")]
+        for o in redacted:
+            db.execute(update(Observation).where(Observation.id == o["id"]).values(data=o["data"]))
+        if purged_ids or redacted:
             db.commit()
         return report.to_dict()
 

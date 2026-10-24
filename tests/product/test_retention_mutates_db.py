@@ -99,6 +99,66 @@ class RetentionMutatesDbTests(unittest.TestCase):
         self.assertEqual(asmt_ids, {"fresh-asmt"})
         self.assertEqual(obs_asmt_ids, {"fresh-asmt"})
 
+    def test_old_observation_pii_is_redacted_in_db(self):
+        folder = tempfile.TemporaryDirectory(prefix="retention-pii-")
+        self.addCleanup(folder.cleanup)
+        settings = Settings(Path(folder.name), start_worker=False)
+        app = create_app(settings)
+        now = time.time()
+        with app.state.sessions() as db:
+            org = Organization(name="Fixture")
+            db.add(org)
+            db.flush()
+            user = User(organization_id=org.id, username="control", password_hash="x", role="owner")
+            db.add(user)
+            db.flush()
+            db.add(SessionRecord(token_hash=digest("tok"), user_id=user.id, csrf="csrf", expires_at=now + 600))
+            project = Project(organization_id=org.id, owner_id=user.id, name="P")
+            db.add(project)
+            db.flush()
+            target = Target(organization_id=org.id, project_id=project.id, url="http://127.0.0.1:8766/", scope={}, verification_status="pending")
+            db.add(target)
+            db.flush()
+            # A fresh assessment (not purged) with an OLD observation (older than the 14d evidence
+            # cutoff) that contains PII in its raw payload.
+            db.add(
+                Assessment(
+                    id="keep-asmt",
+                    organization_id=org.id,
+                    project_id=project.id,
+                    target_id=target.id,
+                    created_by=user.id,
+                    idempotency_key="key-keep",
+                    scope_version=1,
+                    scope_snapshot={"target_url": target.url},
+                    status="completed",
+                    created_at=now,
+                )
+            )
+            db.add(
+                Observation(
+                    organization_id=org.id,
+                    assessment_id="keep-asmt",
+                    data={"note": "reporter alice@example.com filed this"},
+                    evidence_hash="h-pii",
+                    observed_at=now - 20 * 86400,
+                )
+            )
+            db.commit()
+
+        client = self.enterContext(TestClient(app, base_url=settings.origin))
+        client.cookies.set(COOKIE, "tok")
+        client.headers.update({"origin": settings.origin, "x-csrf-token": "csrf"})
+
+        resp = client.post("/api/v1/lifecycle/retention?assessment_days=90&evidence_days=14")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertGreaterEqual(resp.json()["redacted_records_count"], 1)
+
+        with app.state.sessions() as db:
+            obs = db.scalar(select(Observation).where(Observation.assessment_id == "keep-asmt"))
+            self.assertNotIn("alice@example.com", str(obs.data))  # PII scrubbed from the DB row
+            self.assertIn("REDACTED", str(obs.data))
+
 
 if __name__ == "__main__":
     unittest.main()

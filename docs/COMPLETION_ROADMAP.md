@@ -255,10 +255,13 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   deletes each expired assessment with its observations and finding-evidence rows (org-scoped) in the
   request transaction. Evidence: a 120-day-old assessment + its observation are gone after the call
   (`purged_assessments_count=1`), a fresh one remains. Regression
-  `tests/product/test_retention_mutates_db.py`. Full suite 1053 pass. `aegis/api.py`. _(Remaining:
-  observation PII-redaction write-back — the endpoint passes records without their `data`, so the
-  age-gated redaction is a no-op; and ticketing-to-a-real-provider or labelled-local, notary trust
-  root configured.)_ Anchor S36, S37, S24.
+  `tests/product/test_retention_mutates_db.py`. _PII redaction now also lands:_ the endpoint passed
+  observations without their `data`, so the age-gated redaction was a no-op; it now passes `data` and
+  writes the redacted payload back to each kept observation older than the evidence cutoff. Evidence:
+  an observation containing `alice@example.com` observed 20 days ago ⇒ the DB row's data holds
+  `[REDACTED_EMAIL]`, not the address (`redacted_records_count ≥ 1`). Full suite 1062 pass.
+  `aegis/api.py`. _(Remaining: ticketing-to-a-real-provider or labelled-local, and notary trust
+  root — both need an external provider/key.)_ Anchor S36, S37, S24.
 - [x] **P1-8 · MFA / project RBAC enforced.** _MFA now persists and gates login:_ TOTP was cosmetic
   — `totp_setup` never stored the secret, `totp_verify` checked a secret passed in the request, and
   `sign_in` had no MFA check. Now the `User` model carries `totp_secret`/`totp_enabled`/
