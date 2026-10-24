@@ -248,8 +248,10 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   `lodash@4.17.11`) is matched against the OSV feed; the `/overview` catalog gains an `sbom_cyclonedx`
   entry. Full suite 1067 pass; mypy + ruff clean. `services/source_analysis_worker/{assess,sbom}.py`,
   `aegis/api.py`. Anchor S21, S53–S54.
-- [ ] **P1-4 · Authenticated testing.** Approved credential refs → identity-specific jobs with
-  stored redacted evidence. Anchor S06, S12.
+- [x] **P1-4 · Authenticated testing.** _Done:_ Fernet-encrypted credential store (plaintext never
+  persisted), `/api/v1/credentials` CRUD, scope policy accepts `authenticated` + bounded
+  `credential_refs`, worker resolves refs into the crawler's cookies/headers, identity names stored
+  as redacted evidence. UI credential panel still pending (backend fully wired). Anchor S06, S12.
 - [◐] **P1-5 · AI investigations persist.** `run_ai_investigation` computed the analysis (optionally
   via an LLM provider) but never stored it, and `get_ai_investigation` recomputed on every view — so
   the result (and any provider narrative/usage) did not survive restart and could be re-billed. Added
