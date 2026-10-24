@@ -2225,6 +2225,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/ai/investigations/{assessment_id}")
     def get_ai_investigation(assessment_id: str, db: DB, user: Actor):
         row = owned(db, Assessment, assessment_id, user)
+        # A persisted investigation (including any provider narrative/usage) survives restart and is
+        # returned as-is rather than recomputed or re-billed.
+        if row.ai_investigation:
+            return {**row.ai_investigation, "persisted": True}
         asmt_data = assessment(assessment_id, db, user)
         observations = asmt_data.get("observations", [])
         findings = verified_ai_findings(asmt_data.get("findings", []))
@@ -2335,7 +2339,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
-        return {
+        payload = {
             "assessment_id": assessment_id,
             "created_at": timestamp(row.created_at),
             "excluded_unverified_findings": len(asmt_data.get("findings", [])) - len(findings),
@@ -2343,6 +2347,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "provider_reason": provider_state["reason"],
             **analysis,
         }
+        # Persist so the investigation (and any provider output) survives restart.
+        row.ai_investigation = payload
+        db.commit()
+        return payload
 
     @app.get("/api/v1/onboarding/state")
     def get_onboarding_state(user: Actor):

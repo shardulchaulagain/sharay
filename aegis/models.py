@@ -107,6 +107,9 @@ class Assessment(Base):
     finished_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     checks: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    # Persisted AI investigation result (provider narrative/usage included) so it survives restart
+    # and is not recomputed or re-billed on every view.
+    ai_investigation: Mapped[Any | None] = mapped_column(JSON, nullable=True)
 
 
 class OriginCooldown(Base):

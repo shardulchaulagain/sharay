@@ -543,7 +543,12 @@ finally:
                         self.assertEqual(snapshot(connection), expected)
                         self.assertIn(
                             connection.scalar(text("SELECT version_num FROM alembic_version")),
-                            ("0002_origin_cooldowns", "0003_origin_pacing_leases", "0004_user_totp"),
+                            (
+                                "0002_origin_cooldowns",
+                                "0003_origin_pacing_leases",
+                                "0004_user_totp",
+                                "0005_assessment_ai_investigation",
+                            ),
                         )
                 finally:
                     migrated.dispose()

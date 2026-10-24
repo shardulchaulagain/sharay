@@ -221,8 +221,16 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   CycloneDX SBOM analysis wired with tool/version/feed identity recorded. Anchor S21, S53–S54.
 - [ ] **P1-4 · Authenticated testing.** Approved credential refs → identity-specific jobs with
   stored redacted evidence. Anchor S06, S12.
-- [ ] **P1-5 · AI investigations persist.** Typed plan → policy → operator approval → execution →
-  usage/outcome survive restart. Anchor S29.
+- [◐] **P1-5 · AI investigations persist.** `run_ai_investigation` computed the analysis (optionally
+  via an LLM provider) but never stored it, and `get_ai_investigation` recomputed on every view — so
+  the result (and any provider narrative/usage) did not survive restart and could be re-billed. Added
+  `Assessment.ai_investigation` (JSON; Alembic `0005_assessment_ai_investigation`); `run` now persists
+  the full payload and `get` returns the stored one (`persisted: true`) when present, recomputing a
+  deterministic view only when none was ever run. Evidence: POST investigate ⇒ row.ai_investigation
+  set; a fresh app instance (restart, new engine/same DB) ⇒ GET returns the persisted result.
+  Regression `tests/product/test_ai_investigation_persists.py`. Full suite 1057 pass; mypy + ruff
+  clean. `aegis/api.py`, `aegis/models.py`. _(Remaining: a typed plan → policy → operator-approval
+  gate before execution, and provider token/cost accounting in the stored payload.)_ Anchor S29.
 - [◐] **P1-6 · Working deployment.** One supported deployment from clean env: login → authorized
   scan → report → restart → recovery. _Done:_ the container command now matches the real CLI —
   `serve --port … --host …` (rejected by argparse, exit 2, so the container never started — E10) is
