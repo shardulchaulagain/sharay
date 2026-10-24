@@ -518,8 +518,7 @@ finally:
                     command.upgrade(config, "0001_desktop")
                     expected = snapshot(source)
                     present_0001 = {
-                        t.name: {c["name"] for c in inspect(destination).get_columns(t.name)}
-                        for t in tables
+                        t.name: {c["name"] for c in inspect(destination).get_columns(t.name)} for t in tables
                     }
                     # Insert the old data through reflected (0001-schema) tables so columns added by
                     # later migrations -- even ones with client-side defaults -- are not referenced.

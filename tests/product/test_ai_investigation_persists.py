@@ -32,7 +32,11 @@ class AiInvestigationPersistenceTests(unittest.TestCase):
             user = User(organization_id=org.id, username="operator", password_hash="x", role="owner")
             db.add(user)
             db.flush()
-            db.add(SessionRecord(token_hash=digest("tok"), user_id=user.id, csrf="csrf", expires_at=time.time() + 600))
+            db.add(
+                SessionRecord(
+                    token_hash=digest("tok"), user_id=user.id, csrf="csrf", expires_at=time.time() + 600
+                )
+            )
             project = Project(organization_id=org.id, owner_id=user.id, name="P")
             db.add(project)
             db.flush()

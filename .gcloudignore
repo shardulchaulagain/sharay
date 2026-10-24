@@ -1,0 +1,12 @@
+# Cloud Code & Google Cloud exclusion list
+.git/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+SHARAY.app/
+*.pdf
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db

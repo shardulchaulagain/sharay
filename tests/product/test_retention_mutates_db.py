@@ -42,9 +42,7 @@ class RetentionMutatesDbTests(unittest.TestCase):
             db.add(user)
             db.flush()
             db.add(
-                SessionRecord(
-                    token_hash=digest("tok"), user_id=user.id, csrf="csrf", expires_at=now + 600
-                )
+                SessionRecord(token_hash=digest("tok"), user_id=user.id, csrf="csrf", expires_at=now + 600)
             )
             project = Project(organization_id=org.id, owner_id=user.id, name="P")
             db.add(project)
@@ -112,11 +110,19 @@ class RetentionMutatesDbTests(unittest.TestCase):
             user = User(organization_id=org.id, username="control", password_hash="x", role="owner")
             db.add(user)
             db.flush()
-            db.add(SessionRecord(token_hash=digest("tok"), user_id=user.id, csrf="csrf", expires_at=now + 600))
+            db.add(
+                SessionRecord(token_hash=digest("tok"), user_id=user.id, csrf="csrf", expires_at=now + 600)
+            )
             project = Project(organization_id=org.id, owner_id=user.id, name="P")
             db.add(project)
             db.flush()
-            target = Target(organization_id=org.id, project_id=project.id, url="http://127.0.0.1:8766/", scope={}, verification_status="pending")
+            target = Target(
+                organization_id=org.id,
+                project_id=project.id,
+                url="http://127.0.0.1:8766/",
+                scope={},
+                verification_status="pending",
+            )
             db.add(target)
             db.flush()
             # A fresh assessment (not purged) with an OLD observation (older than the 14d evidence

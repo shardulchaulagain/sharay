@@ -28,7 +28,11 @@ class SourceAnalysisLifecycleTests(unittest.TestCase):
         # A source tree with a secret-shaped value under the configured source root.
         src = base / "source" / "app"
         src.mkdir(parents=True)
-        (src / "config.py").write_text('-----BEGIN RSA PRIVATE KEY-----\n' + 'MIIEpAIBAAKCAQEA' * 20 + '\n-----END RSA PRIVATE KEY-----\n')
+        (src / "config.py").write_text(
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            + "MIIEpAIBAAKCAQEA" * 20
+            + "\n-----END RSA PRIVATE KEY-----\n"
+        )
 
         settings = Settings(base, start_worker=False)
         app = create_app(settings)
@@ -39,7 +43,11 @@ class SourceAnalysisLifecycleTests(unittest.TestCase):
             user = User(organization_id=org.id, username="operator", password_hash="x", role="owner")
             db.add(user)
             db.flush()
-            db.add(SessionRecord(token_hash=digest("tok"), user_id=user.id, csrf="csrf", expires_at=time.time() + 600))
+            db.add(
+                SessionRecord(
+                    token_hash=digest("tok"), user_id=user.id, csrf="csrf", expires_at=time.time() + 600
+                )
+            )
             project = Project(organization_id=org.id, owner_id=user.id, name="P")
             db.add(project)
             db.flush()
@@ -47,7 +55,11 @@ class SourceAnalysisLifecycleTests(unittest.TestCase):
                 organization_id=org.id,
                 project_id=project.id,
                 url="http://127.0.0.1:8766/",
-                scope={"hosts": ["127.0.0.1"], "allowed_origins": ["http://127.0.0.1:8766"], "allowed_paths": ["/"]},
+                scope={
+                    "hosts": ["127.0.0.1"],
+                    "allowed_origins": ["http://127.0.0.1:8766"],
+                    "allowed_paths": ["/"],
+                },
                 verification_status="verified_lab",
             )
             db.add(target)
@@ -77,7 +89,11 @@ class SourceAnalysisLifecycleTests(unittest.TestCase):
         self.addCleanup(folder.cleanup)
         base = Path(folder.name)
         (base / "source" / "app").mkdir(parents=True)
-        (base / "source" / "app" / "config.py").write_text('-----BEGIN RSA PRIVATE KEY-----\n' + 'MIIEpAIBAAKCAQEA' * 20 + '\n-----END RSA PRIVATE KEY-----\n')
+        (base / "source" / "app" / "config.py").write_text(
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            + "MIIEpAIBAAKCAQEA" * 20
+            + "\n-----END RSA PRIVATE KEY-----\n"
+        )
         settings = Settings(base, start_worker=False)
         app = create_app(settings)
         with app.state.sessions() as db:
@@ -87,7 +103,11 @@ class SourceAnalysisLifecycleTests(unittest.TestCase):
             user = User(organization_id=org.id, username="operator", password_hash="x", role="owner")
             db.add(user)
             db.flush()
-            db.add(SessionRecord(token_hash=digest("tok"), user_id=user.id, csrf="csrf", expires_at=time.time() + 600))
+            db.add(
+                SessionRecord(
+                    token_hash=digest("tok"), user_id=user.id, csrf="csrf", expires_at=time.time() + 600
+                )
+            )
             db.commit()
         client = self.enterContext(TestClient(app, base_url=settings.origin))
         client.cookies.set(COOKIE, "tok")

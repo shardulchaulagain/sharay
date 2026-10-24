@@ -760,7 +760,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def project_members(project_id: str, db: DB, user: Actor):
         owned(db, Project, project_id, user)  # access-gated like the project itself
         rows = db.scalars(select(ProjectMember).where(ProjectMember.project_id == project_id)).all()
-        by_id = {u.id: u for u in db.scalars(select(User).where(User.organization_id == user.organization_id))}
+        by_id = {
+            u.id: u for u in db.scalars(select(User).where(User.organization_id == user.organization_id))
+        }
         return {
             "items": [
                 {"user_id": m.user_id, "username": by_id[m.user_id].username if m.user_id in by_id else None}
@@ -775,7 +777,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         member = owned(db, User, data.get("user_id", ""), user)  # same-org user
         if not is_project_member(db, project.id, member.id):
             db.add(ProjectMember(project_id=project.id, user_id=member.id))
-            audit(db, user.organization_id, user.id, "project.member_added", project.id, {"user_id": member.id})
+            audit(
+                db, user.organization_id, user.id, "project.member_added", project.id, {"user_id": member.id}
+            )
         return {"project_id": project.id, "user_id": member.id}
 
     @app.delete("/api/v1/projects/{project_id}/members/{user_id}")
@@ -1898,7 +1902,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 state = _finding_status(clean)
                 if existing:
                     existing.last_seen = time.time()
-                    existing.status = state if existing.status not in {"confirmed", "fixed"} else existing.status
+                    existing.status = (
+                        state if existing.status not in {"confirmed", "fixed"} else existing.status
+                    )
                     finding_id = existing.id
                 else:
                     new = Finding(

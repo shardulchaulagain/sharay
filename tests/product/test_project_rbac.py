@@ -44,7 +44,11 @@ class ProjectRbacTests(unittest.TestCase):
         user = User(organization_id=org_id, username=username, password_hash="x", role=role)
         db.add(user)
         db.flush()
-        db.add(SessionRecord(token_hash=digest(token), user_id=user.id, csrf="csrf", expires_at=time.time() + 600))
+        db.add(
+            SessionRecord(
+                token_hash=digest(token), user_id=user.id, csrf="csrf", expires_at=time.time() + 600
+            )
+        )
         return user.id
 
     def _client(self, token):
