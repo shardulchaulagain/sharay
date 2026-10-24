@@ -484,11 +484,12 @@ finally:
         self.enqueue()
         run_one(self.sessions)
         # origin_cooldowns is populated by the worker; project_members is created and backfilled by a
-        # migration (with random ids), so neither represents "old records being preserved" here.
+        # migration (with random ids); credentials is a new empty table added by a later migration -- none
+        # of these represents "old records being preserved" here.
         tables = [
             table
             for table in Base.metadata.sorted_tables
-            if table.name not in ("origin_cooldowns", "project_members")
+            if table.name not in ("origin_cooldowns", "project_members", "credentials")
         ]
 
         def snapshot(connection):

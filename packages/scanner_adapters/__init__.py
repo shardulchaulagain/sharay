@@ -1622,6 +1622,16 @@ def scan_comprehensive(
         except PolicyError:
             return False
 
+    # Record authenticated testing identity (names only; credential values are never evidence).
+    if isinstance(auth, dict) and auth.get("identity_names"):
+        result["checks"].append(
+            {
+                "category": "authenticated_session",
+                "status": "completed",
+                "detail": f"Authenticated testing as credential identity(ies): {', '.join(auth['identity_names'])} (values redacted).",
+            }
+        )
+
     # Stage 1: Passive Recon & TLS Inspection
     if destination.scheme == "https":
         tls_ctx = ssl.create_default_context()
@@ -1866,6 +1876,10 @@ def scan_comprehensive(
                 max_pages=100 if mode == "aggressive" else 20,
                 timeout=3.0,
                 probe_sensitive="sensitive" in enabled_tools,
+                cookies=dict(auth["cookies"]) if isinstance(auth, dict) and auth.get("cookies") else None,
+                auth_headers=dict(auth["headers"])
+                if isinstance(auth, dict) and auth.get("headers")
+                else None,
             )
             discovered_endpoints = crawl_res.get("endpoints", [])
             discovered_parameters = crawl_res.get("parameters", [])

@@ -125,8 +125,8 @@ class ScopePolicy(BaseModel):
     excluded_paths: list[StrictString] = Field(default_factory=list, max_length=32)
     allowed_cidrs: list[StrictString] = Field(default_factory=list, max_length=32)
     categories: list[TestCategory] = Field(default_factory=_default_categories, min_length=1, max_length=3)
-    authenticated: Literal[False] = False
-    credential_refs: list[StrictString] = Field(default_factory=list, max_length=0)
+    authenticated: bool = False
+    credential_refs: list[StrictString] = Field(default_factory=list, max_length=8)
     request_rate: Annotated[float, Field(strict=True, gt=0, le=5000)] = 1
     max_concurrency: Annotated[int, Field(strict=True, ge=1, le=5)] = 1
     starts_at: datetime
@@ -215,6 +215,14 @@ class ScopePolicy(BaseModel):
             raise ValueError("All fixed emergency stop conditions are required.")
         if len(self.categories) != len(set(self.categories)):
             raise ValueError("Duplicate test categories are not permitted.")
+        # Credential references and authenticated testing are inseparable: one is meaningless
+        # without the other, so neither may appear alone.
+        if self.credential_refs and not self.authenticated:
+            raise ValueError("Credential references require authenticated testing.")
+        if self.authenticated and not self.credential_refs:
+            raise ValueError("Authenticated testing requires at least one credential reference.")
+        if len(self.credential_refs) != len(set(self.credential_refs)):
+            raise ValueError("Duplicate credential references are not permitted.")
         for origin in self.allowed_origins:
             host = urlsplit(origin).hostname
             if host not in self.hosts:

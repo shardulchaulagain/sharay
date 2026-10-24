@@ -218,6 +218,20 @@ class OnboardingAdvanceInput(Input):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class CredentialInput(Input):
+    name: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9._-]+$")
+    kind: Literal["cookie", "header", "bearer", "basic"]
+    value: str = Field(min_length=1, max_length=8192)
+    # Required for kind="header"/"cookie": the header or cookie name to carry the value.
+    header_name: str | None = Field(default=None, max_length=80)
+
+    @model_validator(mode="after")
+    def header_name_required(self):
+        if self.kind in ("header", "cookie") and not (self.header_name and self.header_name.strip()):
+            raise ValueError("header_name is required for header/cookie credentials")
+        return self
+
+
 class SourceAnalysisInput(Input):
     path: str = Field(min_length=1, max_length=4096)
     # When given, source findings are persisted under this target as a source-profile assessment so

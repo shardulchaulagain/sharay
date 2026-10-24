@@ -142,6 +142,7 @@ def _execute_leased_assessment(
     stopping: Any = lambda: False,
     *,
     request_starts=None,
+    settings=None,
 ) -> tuple[str, str | None]:
     if isinstance(lease, str):
         assessment_id = lease
@@ -241,7 +242,25 @@ def _execute_leased_assessment(
                 if destination.host in ("127.0.0.1", "::1", "localhost")
                 else resolve_pinned(destination.host)
             )
-            auth = scan_cfg.get("auth")
+            auth = dict(scan_cfg.get("auth") or {})
+            # Authenticated testing: resolve approved credential refs into cookies/headers the scan
+            # sends. Plaintext lives only in `auth`; only the identity names are recorded as evidence.
+            cred_refs = scope.get("credential_refs") or []
+            if settings is not None and scope.get("authenticated") and cred_refs:
+                from aegis.credentials import resolve_auth
+                from aegis.models import Credential
+
+                with sessions() as cdb:
+                    creds = cdb.scalars(
+                        select(Credential).where(
+                            Credential.organization_id == organization_id,
+                            Credential.name.in_(cred_refs),
+                        )
+                    ).all()
+                    resolved = resolve_auth(settings, creds)
+                auth["cookies"] = {**auth.get("cookies", {}), **resolved["cookies"]}
+                auth["headers"] = {**auth.get("headers", {}), **resolved["headers"]}
+                auth["identity_names"] = resolved["identity_names"]
             result = scan_comprehensive(
                 destination,
                 pinned_ip,
@@ -848,7 +867,7 @@ def _execute_leased_assessment(
         return outcome, current.error
 
 
-def run_one(sessions, stopping=lambda: False, *, request_starts=None) -> bool:
+def run_one(sessions, stopping=lambda: False, *, request_starts=None, settings=None) -> bool:
     with sessions() as db:
         db.execute(text("BEGIN IMMEDIATE"))
         row = db.scalar(
@@ -863,7 +882,7 @@ def run_one(sessions, stopping=lambda: False, *, request_starts=None) -> bool:
         db.commit()
 
     outcome, _err = _execute_leased_assessment(
-        sessions, assessment_id, stopping=stopping, request_starts=request_starts
+        sessions, assessment_id, stopping=stopping, request_starts=request_starts, settings=settings
     )
     return True
 
@@ -971,7 +990,7 @@ def main():
                         from aegis.queue import ConcurrentJobQueue, ConcurrentWorkerPool
 
                         queue = ConcurrentJobQueue(sessions)
-                        pool = ConcurrentWorkerPool(queue, worker_count=args.workers)
+                        pool = ConcurrentWorkerPool(queue, worker_count=args.workers, settings=settings)
                         pool.start()
                         while not stop[0]:
                             queue.reap_expired_leases(requeue=True)
@@ -979,7 +998,9 @@ def main():
                         pool.stop()
                     else:
                         while not stop[0]:
-                            if not run_one(sessions, lambda: stop[0], request_starts=request_starts):
+                            if not run_one(
+                                sessions, lambda: stop[0], request_starts=request_starts, settings=settings
+                            ):
                                 time.sleep(0.25)
                 finally:
                     mark_interrupted(sessions)

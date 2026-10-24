@@ -442,9 +442,11 @@ class ConcurrentWorkerPool:
         worker_count: int = 4,
         job_handler: Callable[[JobLease], tuple[str, str | None]] | None = None,
         poll_interval: float = 0.05,
+        settings=None,
     ):
         self.queue = queue
         self.worker_count = worker_count
+        self.settings = settings
         if job_handler is not None:
             self.job_handler = job_handler
         else:
@@ -459,7 +461,9 @@ class ConcurrentWorkerPool:
         try:
             from aegis.worker import _execute_leased_assessment
 
-            return lambda lease: _execute_leased_assessment(self.queue.sessions, lease)
+            return lambda lease: _execute_leased_assessment(
+                self.queue.sessions, lease, settings=self.settings
+            )
         except Exception:
             return self._default_handler
 

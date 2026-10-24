@@ -36,6 +36,7 @@ from aegis.interactive import (
 from aegis.models import (
     Assessment,
     AuditEvent,
+    Credential,
     Finding,
     FindingEvidence,
     Observation,
@@ -49,6 +50,7 @@ from aegis.schemas import (
     AssessmentInput,
     BulkTriageInput,
     CreateSessionInput,
+    CredentialInput,
     ExploitGateConfirmation,
     FindingUpdate,
     Login,
@@ -843,6 +845,65 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         audit(db, user.organization_id, user.id, "project.member_removed", project.id, {"user_id": user_id})
         return {"status": "removed"}
+
+    def _credential_view(row: Credential) -> dict[str, Any]:
+        # Never returns the secret value, only its identity and shape.
+        return {
+            "id": row.id,
+            "name": row.name,
+            "kind": row.kind,
+            "header_name": row.header_name,
+            "created_at": timestamp(row.created_at),
+        }
+
+    @app.get("/api/v1/credentials")
+    def credentials(db: DB, user: Actor):
+        require_role(user, *CONTROL_ROLES)
+        rows = db.scalars(
+            select(Credential)
+            .where(Credential.organization_id == user.organization_id)
+            .order_by(Credential.created_at.desc())
+        )
+        return {"items": [_credential_view(r) for r in rows]}
+
+    @app.post("/api/v1/credentials", status_code=201)
+    def create_credential(data: CredentialInput, db: DB, user: Actor):
+        require_role(user, *CONTROL_ROLES)
+        from aegis.credentials import encrypt
+
+        if db.scalar(
+            select(Credential.id).where(
+                Credential.organization_id == user.organization_id, Credential.name == data.name
+            )
+        ):
+            raise HTTPException(409, "A credential with that name already exists")
+        row = Credential(
+            organization_id=user.organization_id,
+            name=data.name,
+            kind=data.kind,
+            header_name=data.header_name,
+            encrypted_value=encrypt(settings, data.value),  # plaintext never persisted
+            created_by=user.id,
+        )
+        db.add(row)
+        db.flush()
+        audit(
+            db,
+            user.organization_id,
+            user.id,
+            "credential.created",
+            row.id,
+            {"name": data.name, "kind": data.kind},
+        )
+        return _credential_view(row)
+
+    @app.delete("/api/v1/credentials/{credential_id}")
+    def delete_credential(credential_id: str, db: DB, user: Actor):
+        require_role(user, *CONTROL_ROLES)
+        row = owned(db, Credential, credential_id, user)
+        db.delete(row)
+        audit(db, user.organization_id, user.id, "credential.deleted", credential_id, {"name": row.name})
+        return {"status": "deleted"}
 
     @app.get("/api/v1/projects/{project_id}")
     def project(project_id: str, db: DB, user: Actor):

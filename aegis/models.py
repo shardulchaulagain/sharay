@@ -72,6 +72,22 @@ class Project(Base):
     created_at: Mapped[float] = mapped_column(Float, default=time.time)
 
 
+class Credential(Base):
+    """An approved test credential, encrypted at rest. The plaintext value is never stored or
+    returned; a scope references it by name via credential_refs for authenticated testing."""
+
+    __tablename__ = "credentials"
+    __table_args__ = (UniqueConstraint("organization_id", "name"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    kind: Mapped[str] = mapped_column(String(20))  # cookie | header | bearer | basic
+    header_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    encrypted_value: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
 class ProjectMember(Base):
     """A user's membership in a project. Non-admin roles (analyst, viewer) only access projects they
     belong to; org admins (owner, security_administrator) see every project without a row here."""

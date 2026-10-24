@@ -114,13 +114,14 @@ class PolicyTests(unittest.TestCase):
                 with self.subTest(field=field, path=path), self.assertRaises(ValidationError):
                     ScopePolicy.model_validate(self.scope | {field: [path]})
 
-    def test_permission_schema_rejects_intrusive_authenticated_credentials_and_unknown_fields(
+    def test_permission_schema_rejects_intrusive_incoherent_auth_and_unknown_fields(
         self,
     ):
         changes = [
             {"intrusive": True},
-            {"authenticated": True},
-            {"credential_refs": ["secret"]},
+            {"authenticated": True},  # authenticated alone, with no credential refs, is incoherent
+            {"credential_refs": ["secret"]},  # credential refs alone, unauthenticated, is incoherent
+            {"authenticated": True, "credential_refs": ["a", "a"]},  # duplicate refs
             {"request_rate": 5001},
             {"max_concurrency": 6},
             {"approval_required": False},
@@ -134,6 +135,14 @@ class PolicyTests(unittest.TestCase):
         for changeset in changes:
             with self.subTest(changes=changeset), self.assertRaises(ValidationError):
                 ScopePolicy.model_validate(self.scope | changeset)
+
+    def test_authenticated_testing_allowed_with_credential_refs(self):
+        # Authenticated testing is permitted only when paired with at least one credential reference.
+        policy = ScopePolicy.model_validate(
+            self.scope | {"authenticated": True, "credential_refs": ["session_cookie"]}
+        )
+        self.assertTrue(policy.authenticated)
+        self.assertEqual(policy.credential_refs, ["session_cookie"])
 
     def test_expiry_and_unstarted_scope_denied(self):
         now = datetime.now(UTC)
