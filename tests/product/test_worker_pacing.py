@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import MetaData, Table, event, inspect, select, text
 from sqlalchemy.exc import OperationalError
 
@@ -541,14 +542,10 @@ finally:
                     with migrated.connect() as connection:
                         self.assertIn("origin_cooldowns", inspect(connection).get_table_names())
                         self.assertEqual(snapshot(connection), expected)
-                        self.assertIn(
-                            connection.scalar(text("SELECT version_num FROM alembic_version")),
-                            (
-                                "0002_origin_cooldowns",
-                                "0003_origin_pacing_leases",
-                                "0004_user_totp",
-                                "0005_assessment_ai_investigation",
-                            ),
+                        # Reaches the current Alembic head (robust to new migrations being added).
+                        head = ScriptDirectory.from_config(config).get_current_head()
+                        self.assertEqual(
+                            connection.scalar(text("SELECT version_num FROM alembic_version")), head
                         )
                 finally:
                     migrated.dispose()
