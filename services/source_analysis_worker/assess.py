@@ -212,6 +212,59 @@ def _run_semgrep(root: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         }
 
 
+def _osv_advisories() -> tuple[bytes, str] | None:
+    """Load the OSV advisory feed from SHARAY_OSV_ADVISORIES (a JSON file of OSV records).
+
+    SCA is an offline match against an operator-supplied feed; its path and freshness (file mtime)
+    are recorded. Absent or unreadable ⇒ SCA is skipped honestly, never run against stale/no data."""
+    import datetime
+
+    source = os.environ.get("SHARAY_OSV_ADVISORIES")
+    if not source:
+        return None
+    path = Path(source)
+    if not path.is_file():
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    mtime = datetime.datetime.fromtimestamp(path.stat().st_mtime, datetime.timezone.utc).isoformat()
+    return data, f"{path.name} (updated {mtime})"
+
+
+def _run_sca(packages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Match declared dependencies against the configured OSV feed; return (findings, check)."""
+    feed = _osv_advisories()
+    if feed is None:
+        return [], {
+            "category": "sca_osv",
+            "status": "skipped",
+            "detail": "No OSV advisory feed configured (SHARAY_OSV_ADVISORIES); SCA was not run.",
+        }
+    advisory_bytes, source_id = feed
+    try:
+        from packages.source_scanners import SourceScannerPipeline
+
+        tuples = [
+            (p["ecosystem"], p["name"], p["version"])
+            for p in packages
+            if p.get("ecosystem") and p.get("name") and p.get("version")
+        ]
+        findings = SourceScannerPipeline.normalize_osv(advisory_bytes, tuples)
+        return findings, {
+            "category": "sca_osv",
+            "status": "completed",
+            "detail": f"OSV SCA matched {len(tuples)} declared package(s) against feed {source_id}: {len(findings)} vulnerable.",
+        }
+    except Exception as exc:
+        return [], {
+            "category": "sca_osv",
+            "status": "completed_with_errors",
+            "detail": f"OSV SCA error ({type(exc).__name__}); dependency vulnerability results are unavailable.",
+        }
+
+
 _OPENAPI_NAMES = {"openapi.json", "swagger.json"}
 
 
@@ -313,10 +366,16 @@ def analyze_source_tree(root: Path) -> dict[str, Any]:
     findings = findings + semgrep_findings
     checks.append(semgrep_check)
 
+    # SCA (OSV) matches declared dependencies against the configured advisory feed, when present.
+    sca_findings, sca_check = _run_sca(dependency_report["packages"])
+    findings = findings + sca_findings
+    checks.append(sca_check)
+
     checks.append(_ingest_openapi(root))
     sast_basis = "SAST via Semgrep" if semgrep_check["status"] == "completed" else "SAST skipped"
+    sca_basis = "SCA via OSV" if sca_check["status"] == "completed" else "SCA skipped"
     return {
-        "basis": f"source analysis: secrets via {secret_tool}, {sast_basis}, declared dependencies in-process",
+        "basis": f"source analysis: secrets via {secret_tool}, {sast_basis}, {sca_basis}, declared dependencies in-process",
         "findings": findings,
         "packages": dependency_report["packages"],
         "manifests": dependency_report["manifests"],

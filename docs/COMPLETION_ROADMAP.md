@@ -236,8 +236,14 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   an `eval()` + `subprocess(shell=True)` tree ⇒ findings with CWE-95 and CWE-78; a clean tree ⇒ no
   SAST findings; check `completed`. Regression `tests/integration/test_semgrep_sast.py` (skips when
   semgrep is absent). Full suite 1064 pass. `services/source_analysis_worker/assess.py`,
-  `.../semgrep_rules.yml`, `aegis/api.py`. _(Remaining: SCA via OSV advisory source + freshness, and
-  CycloneDX SBOM analysis — both need an advisory feed / SBOM tooling.)_ Anchor S21, S53–S54.
+  `.../semgrep_rules.yml`, `aegis/api.py`. _SCA (OSV) now wired too:_ `analyze_source_tree` matches
+  the declared dependencies against an operator-supplied OSV feed (`SHARAY_OSV_ADVISORIES`, a JSON
+  file of OSV records) offline via `SourceScannerPipeline.normalize_osv`, recording the feed identity
+  and freshness (file mtime) in the check; absent feed ⇒ SCA skipped honestly; the `/overview`
+  catalog gains an `osv_sca` entry gated on the feed. Evidence: `requests==2.19.0` + an advisory
+  fixing it in 2.20.0 ⇒ one `vulnerable_dependency` finding; no feed ⇒ skipped, no findings.
+  Regression `tests/integration/test_source_sca_osv.py` (2). Full suite 1066 pass. _(Remaining:
+  CycloneDX SBOM generation/analysis.)_ Anchor S21, S53–S54.
 - [ ] **P1-4 · Authenticated testing.** Approved credential refs → identity-specific jobs with
   stored redacted evidence. Anchor S06, S12.
 - [◐] **P1-5 · AI investigations persist.** `run_ai_investigation` computed the analysis (optionally

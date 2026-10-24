@@ -221,9 +221,13 @@ def active_integrations() -> list[dict]:
 
         has_gitleaks = _gitleaks_binary() is not None  # cheap glob/env check, no sandbox probe
         has_semgrep = _semgrep_binary() is not None
+        from services.source_analysis_worker.assess import _osv_advisories
+
+        has_osv_feed = _osv_advisories() is not None
     except Exception:
         has_gitleaks = False
         has_semgrep = False
+        has_osv_feed = False
 
     return [
         {
@@ -373,6 +377,22 @@ def active_integrations() -> list[dict]:
                 else "Semgrep is not installed; SAST is skipped. Install semgrep (pip) or set SHARAY_SEMGREP_BIN to enable it."
             ),
             "limitations": "Covers the patterns in the pinned ruleset only, on a code tree (not an HTTP target).",
+        },
+        {
+            "id": "osv_sca",
+            "name": "OSV Dependency SCA",
+            "version": "1.0.0",
+            "available": has_osv_feed,
+            "runnable": has_osv_feed,
+            "status": "implemented" if has_osv_feed else "unavailable",
+            "supported_categories": ["sca", "vulnerable_dependency"],
+            "scope": "Offline match of declared dependencies against an operator-supplied OSV advisory feed",
+            "guidance": (
+                "Dispatched by Source analysis (POST /api/v1/source-analysis); the feed path and freshness are recorded."
+                if has_osv_feed
+                else "No OSV advisory feed configured; set SHARAY_OSV_ADVISORIES to a JSON file of OSV records to enable SCA."
+            ),
+            "limitations": "Matches PyPI/npm declared versions against the supplied feed only; no network fetch, no transitive resolution.",
         },
         {
             "id": "cve_intelligence",
