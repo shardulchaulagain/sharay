@@ -217,11 +217,13 @@ def active_integrations() -> list[dict]:
     runtime = attestation.get("runtime", "podman")
 
     try:
-        from services.source_analysis_worker.assess import _gitleaks_binary
+        from services.source_analysis_worker.assess import _gitleaks_binary, _semgrep_binary
 
         has_gitleaks = _gitleaks_binary() is not None  # cheap glob/env check, no sandbox probe
+        has_semgrep = _semgrep_binary() is not None
     except Exception:
         has_gitleaks = False
+        has_semgrep = False
 
     return [
         {
@@ -355,6 +357,22 @@ def active_integrations() -> list[dict]:
                 else "No pinned Gitleaks binary installed; Source analysis falls back to the built-in secret detector."
             ),
             "limitations": "Operates on a code tree, not an HTTP target. Secret values are redacted in the report.",
+        },
+        {
+            "id": "semgrep",
+            "name": "Semgrep SAST",
+            "version": "1.x",
+            "available": has_semgrep,
+            "runnable": has_semgrep,
+            "status": "implemented" if has_semgrep else "unavailable",
+            "supported_categories": ["sast", "static_analysis"],
+            "scope": "Semgrep run over an authorized code tree with the pinned SHARAY ruleset",
+            "guidance": (
+                "Dispatched by Source analysis (POST /api/v1/source-analysis); findings normalized like any other."
+                if has_semgrep
+                else "Semgrep is not installed; SAST is skipped. Install semgrep (pip) or set SHARAY_SEMGREP_BIN to enable it."
+            ),
+            "limitations": "Covers the patterns in the pinned ruleset only, on a code tree (not an HTTP target).",
         },
         {
             "id": "cve_intelligence",

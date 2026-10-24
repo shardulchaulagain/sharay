@@ -14,6 +14,7 @@ with a pinned configuration so the scanned tree cannot reconfigure or silence it
 """
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,8 @@ from services.source_analysis_worker.dependencies import inventory
 from services.source_analysis_worker.secrets import detect
 
 _GITLEAKS_MAX_SECONDS = 60
+_SEMGREP_MAX_SECONDS = 60
+_SEMGREP_RULES = Path(__file__).resolve().parent / "semgrep_rules.yml"
 
 
 class SourceAnalysisError(ValueError):
@@ -132,6 +135,83 @@ def _run_gitleaks(root: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         }
 
 
+def _semgrep_binary() -> str | None:
+    """Resolve the semgrep CLI, from SHARAY_SEMGREP_BIN, the venv's bin, or PATH. Absent = skipped."""
+    override = os.environ.get("SHARAY_SEMGREP_BIN")
+    if override:
+        return override if Path(override).is_file() else None
+    # semgrep is pip-installed alongside the running interpreter; prefer that over PATH.
+    import sys
+
+    beside = Path(sys.executable).parent / "semgrep"
+    if beside.is_file():
+        return str(beside)
+    return shutil.which("semgrep")
+
+
+def _run_semgrep(root: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run semgrep over the tree with the pinned SHARAY ruleset; return (findings, check).
+
+    Semgrep is an optional external tool (like Gitleaks/Nuclei): when it or the ruleset is absent,
+    SAST is skipped and recorded honestly rather than silently omitted."""
+    binary = _semgrep_binary()
+    if binary is None or not _SEMGREP_RULES.is_file():
+        return [], {
+            "category": "sast_semgrep",
+            "status": "skipped",
+            "detail": "Semgrep is not installed (or its ruleset is missing); SAST was not run.",
+        }
+    try:
+        import subprocess
+
+        from packages.source_scanners import SourceScannerPipeline
+
+        proc = subprocess.run(
+            [
+                binary,
+                "--config",
+                str(_SEMGREP_RULES),
+                "--json",
+                "--quiet",
+                "--disable-version-check",
+                "--no-git-ignore",
+                "--timeout",
+                str(_SEMGREP_MAX_SECONDS),
+                str(root),
+            ],
+            capture_output=True,
+            timeout=_SEMGREP_MAX_SECONDS + 15,
+        )
+        # semgrep exits 0 when clean, 1 when findings are present, >1 on an execution error.
+        if proc.returncode not in (0, 1) or not proc.stdout:
+            return [], {
+                "category": "sast_semgrep",
+                "status": "completed_with_errors",
+                "detail": f"Semgrep did not complete cleanly (exit {proc.returncode}).",
+            }
+        findings = SourceScannerPipeline.normalize_semgrep(proc.stdout, str(root))
+        import json
+
+        try:
+            version = json.loads(proc.stdout).get("version", "unknown")
+        except (ValueError, TypeError):
+            version = "unknown"
+        return findings, {
+            "category": "sast_semgrep",
+            "status": "completed",
+            "detail": (
+                f"Semgrep {version} scanned the tree with the pinned SHARAY ruleset "
+                f"({_SEMGREP_RULES.name}) and reported {len(findings)} SAST finding(s)."
+            ),
+        }
+    except Exception as exc:
+        return [], {
+            "category": "sast_semgrep",
+            "status": "completed_with_errors",
+            "detail": f"Semgrep run error ({type(exc).__name__}); SAST results are unavailable.",
+        }
+
+
 _OPENAPI_NAMES = {"openapi.json", "swagger.json"}
 
 
@@ -228,9 +308,15 @@ def analyze_source_tree(root: Path) -> dict[str, Any]:
             ),
         }
     )
+    # SAST (semgrep with the pinned SHARAY ruleset) runs when semgrep is available.
+    semgrep_findings, semgrep_check = _run_semgrep(root)
+    findings = findings + semgrep_findings
+    checks.append(semgrep_check)
+
     checks.append(_ingest_openapi(root))
+    sast_basis = "SAST via Semgrep" if semgrep_check["status"] == "completed" else "SAST skipped"
     return {
-        "basis": f"source analysis: secrets via {secret_tool}, declared dependencies in-process",
+        "basis": f"source analysis: secrets via {secret_tool}, {sast_basis}, declared dependencies in-process",
         "findings": findings,
         "packages": dependency_report["packages"],
         "manifests": dependency_report["manifests"],

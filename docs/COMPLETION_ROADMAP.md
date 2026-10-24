@@ -225,11 +225,19 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   the target; without it ⇒ no assessment created. Regression
   `tests/product/test_source_analysis_lifecycle.py` (2). Full suite 1059 pass. `aegis/api.py`,
   `aegis/schemas.py`. _(Remaining: a target picker in the standalone Source-analysis UI page.)_ Anchor S21.
-- [ ] **P1-3 · SAST/SCA/SBOM assembled workflow.** Semgrep dispatch, OSV advisory source + freshness,
-  CycloneDX SBOM analysis wired with tool/version/feed identity recorded. _(Parser/normalizers exist
-  (`packages/source_scanners.py`) but the Semgrep binary is not installed here and OSV needs an
-  advisory feed, so real SAST/SCA output cannot be verified in this environment — deferred to an
-  environment with the binaries/feeds rather than wiring unverifiable fallbacks.)_ Anchor S21, S53–S54.
+- [◐] **P1-3 · SAST/SCA/SBOM assembled workflow.** _SAST (Semgrep) is now wired and verified:_
+  `analyze_source_tree` runs Semgrep over the authorized tree with a pinned, committed SHARAY ruleset
+  (`services/source_analysis_worker/semgrep_rules.yml`), normalizes results through
+  `SourceScannerPipeline.normalize_semgrep`, and records tool + version + ruleset identity in the
+  check (e.g. "Semgrep 1.182.1 … reported N SAST finding(s)"). Semgrep is treated as an optional
+  external tool (resolved from `SHARAY_SEMGREP_BIN`, the venv, or PATH) — absent ⇒ SAST is skipped
+  honestly, never silently omitted — and the `/overview` tool catalog reports it available only when
+  present (like gitleaks). SAST findings join the lifecycle via P1-2's target persistence. Evidence:
+  an `eval()` + `subprocess(shell=True)` tree ⇒ findings with CWE-95 and CWE-78; a clean tree ⇒ no
+  SAST findings; check `completed`. Regression `tests/integration/test_semgrep_sast.py` (skips when
+  semgrep is absent). Full suite 1064 pass. `services/source_analysis_worker/assess.py`,
+  `.../semgrep_rules.yml`, `aegis/api.py`. _(Remaining: SCA via OSV advisory source + freshness, and
+  CycloneDX SBOM analysis — both need an advisory feed / SBOM tooling.)_ Anchor S21, S53–S54.
 - [ ] **P1-4 · Authenticated testing.** Approved credential refs → identity-specific jobs with
   stored redacted evidence. Anchor S06, S12.
 - [◐] **P1-5 · AI investigations persist.** `run_ai_investigation` computed the analysis (optionally
