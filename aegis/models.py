@@ -72,6 +72,18 @@ class Project(Base):
     created_at: Mapped[float] = mapped_column(Float, default=time.time)
 
 
+class ProjectMember(Base):
+    """A user's membership in a project. Non-admin roles (analyst, viewer) only access projects they
+    belong to; org admins (owner, security_administrator) see every project without a row here."""
+
+    __tablename__ = "project_members"
+    __table_args__ = (UniqueConstraint("project_id", "user_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    added_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
 class Target(Base):
     __tablename__ = "targets"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)

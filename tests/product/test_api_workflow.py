@@ -18,7 +18,7 @@ from aegis.api import create_app
 from aegis.audit import verify_audit
 from aegis.auth import add_user, check_csrf, consume_recovery, issue_recovery, provision_owner
 from aegis.config import Settings
-from aegis.models import AuditEvent, Organization, RecoveryToken, SessionRecord
+from aegis.models import AuditEvent, Organization, RecoveryToken, SessionRecord, User
 from aegis.worker import run_one
 from fixtures.safe_targets.server import create_server
 
@@ -365,6 +365,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(other.get("/api/v1/findings").json()["items"], [])
         viewer = TestClient(self.app, base_url=self.settings.origin, headers={"origin": self.settings.origin})
         self.login(viewer, "localviewer")
+        # Per-project RBAC: a viewer with no membership cannot read the project...
+        self.assertEqual(viewer.get(f"/api/v1/projects/{project['id']}").status_code, 404)
+        with self.sessions() as db:
+            viewer_id = db.scalar(select(User.id).where(User.username == "localviewer"))
+        # ...an admin grants membership, and then the viewer can read it.
+        self.assertEqual(
+            self.client.post(
+                f"/api/v1/projects/{project['id']}/members", json={"user_id": viewer_id}
+            ).status_code,
+            201,
+        )
         self.assertEqual(viewer.get(f"/api/v1/projects/{project['id']}").status_code, 200)
         self.assertEqual(viewer.post("/api/v1/projects", json={"name": "Denied"}).status_code, 403)
         self.assertEqual(

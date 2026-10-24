@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from aegis.auth import add_user
-from aegis.models import Assessment, AuditEvent, Organization
+from aegis.models import Assessment, AuditEvent, Organization, ProjectMember, Target, User
 from aegis.worker import run_one
 from packages.scanner_adapters import scan as controlled_scan
 from tests.product import test_api_workflow as workflow
@@ -415,6 +415,11 @@ class ScopeLifecycleTests(unittest.TestCase):
             db.flush()
             add_user(db, "otherowner", workflow.PASSWORD, other.id, "owner")
             add_user(db, "localanalyst", workflow.PASSWORD, self.org_id, "analyst")
+            # Grant the analyst project membership so RBAC allows reads; the scope edit is still
+            # denied by role (CONTROL_ROLES only), not by membership.
+            analyst_id = db.scalar(select(User.id).where(User.username == "localanalyst"))
+            proj_id = db.scalar(select(Target.project_id).where(Target.id == target["id"]))
+            db.add(ProjectMember(project_id=proj_id, user_id=analyst_id))
             db.commit()
         for username, expected in (("otherowner", 404), ("localanalyst", 403)):
             with TestClient(

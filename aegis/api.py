@@ -33,7 +33,17 @@ from aegis.interactive import (
     SessionError,
     terminal_manager,
 )
-from aegis.models import Assessment, AuditEvent, Finding, FindingEvidence, Observation, Project, Target, User
+from aegis.models import (
+    Assessment,
+    AuditEvent,
+    Finding,
+    FindingEvidence,
+    Observation,
+    Project,
+    ProjectMember,
+    Target,
+    User,
+)
 from aegis.schemas import (
     ApprovalInput,
     AssessmentInput,
@@ -143,12 +153,29 @@ def current_user(request: Request, db: DB) -> User:
 Actor = Annotated[User, Depends(current_user)]
 
 
+def is_project_member(db: Session, project_id: str, user_id: str) -> bool:
+    return (
+        db.scalar(
+            select(ProjectMember.id).where(
+                ProjectMember.project_id == project_id, ProjectMember.user_id == user_id
+            )
+        )
+        is not None
+    )
+
+
 def owned(db: Session, model, identifier: str, user: User):
     row = db.scalar(
         select(model).where(model.id == identifier, model.organization_id == user.organization_id)
     )
     if row is None:
         raise HTTPException(404, "Resource not found")
+    # Per-project RBAC: org admins see everything; other roles reach a project-scoped resource only
+    # when they belong to its project. Non-project resources are governed by org scope alone.
+    if user.role not in CONTROL_ROLES:
+        project_id = row.id if model is Project else getattr(row, "project_id", None)
+        if project_id is not None and not is_project_member(db, project_id, user.id):
+            raise HTTPException(404, "Resource not found")
     return row
 
 
@@ -703,15 +730,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/projects")
     def projects(db: DB, user: Actor, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
-        return page(
-            db,
-            select(Project)
-            .where(Project.organization_id == user.organization_id)
-            .order_by(Project.created_at.desc()),
-            project_view,
-            limit,
-            offset,
-        )
+        query = select(Project).where(Project.organization_id == user.organization_id)
+        # Non-admin roles only see projects they belong to.
+        if user.role not in CONTROL_ROLES:
+            query = query.join(ProjectMember, ProjectMember.project_id == Project.id).where(
+                ProjectMember.user_id == user.id
+            )
+        return page(db, query.order_by(Project.created_at.desc()), project_view, limit, offset)
 
     @app.post("/api/v1/projects", status_code=201)
     def create_project(data: ProjectInput, db: DB, user: Actor):
@@ -726,8 +751,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         db.add(row)
         db.flush()
+        # The creator is a member so they retain access even without an admin role.
+        db.add(ProjectMember(project_id=row.id, user_id=user.id))
         audit(db, user.organization_id, user.id, "project.created", row.id)
         return project_view(row)
+
+    @app.get("/api/v1/projects/{project_id}/members")
+    def project_members(project_id: str, db: DB, user: Actor):
+        owned(db, Project, project_id, user)  # access-gated like the project itself
+        rows = db.scalars(select(ProjectMember).where(ProjectMember.project_id == project_id)).all()
+        by_id = {u.id: u for u in db.scalars(select(User).where(User.organization_id == user.organization_id))}
+        return {
+            "items": [
+                {"user_id": m.user_id, "username": by_id[m.user_id].username if m.user_id in by_id else None}
+                for m in rows
+            ]
+        }
+
+    @app.post("/api/v1/projects/{project_id}/members", status_code=201)
+    def add_project_member(project_id: str, data: dict[str, str], db: DB, user: Actor):
+        require_role(user, *CONTROL_ROLES)
+        project = owned(db, Project, project_id, user)
+        member = owned(db, User, data.get("user_id", ""), user)  # same-org user
+        if not is_project_member(db, project.id, member.id):
+            db.add(ProjectMember(project_id=project.id, user_id=member.id))
+            audit(db, user.organization_id, user.id, "project.member_added", project.id, {"user_id": member.id})
+        return {"project_id": project.id, "user_id": member.id}
+
+    @app.delete("/api/v1/projects/{project_id}/members/{user_id}")
+    def remove_project_member(project_id: str, user_id: str, db: DB, user: Actor):
+        require_role(user, *CONTROL_ROLES)
+        project = owned(db, Project, project_id, user)
+        db.execute(
+            delete(ProjectMember).where(
+                ProjectMember.project_id == project.id, ProjectMember.user_id == user_id
+            )
+        )
+        audit(db, user.organization_id, user.id, "project.member_removed", project.id, {"user_id": user_id})
+        return {"status": "removed"}
 
     @app.get("/api/v1/projects/{project_id}")
     def project(project_id: str, db: DB, user: Actor):
