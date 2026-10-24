@@ -395,6 +395,18 @@ def active_integrations() -> list[dict]:
             "limitations": "Matches PyPI/npm declared versions against the supplied feed only; no network fetch, no transitive resolution.",
         },
         {
+            "id": "sbom_cyclonedx",
+            "name": "CycloneDX SBOM Analysis",
+            "version": "1.0.0",
+            "available": True,
+            "runnable": True,
+            "status": "implemented",
+            "supported_categories": ["sbom", "vulnerable_dependency"],
+            "scope": "Ingests a committed CycloneDX SBOM from the tree; its components feed the OSV SCA match",
+            "guidance": "Dispatched by Source analysis; a bom.json/sbom.json/*.cdx.json in the tree is parsed in-process.",
+            "limitations": "Reads an existing CycloneDX SBOM (PyPI/npm purls); it does not generate one, and SCA on its components needs the OSV feed.",
+        },
+        {
             "id": "cve_intelligence",
             "name": "Version-to-CVE Intelligence",
             "version": "1.0.0",

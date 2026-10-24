@@ -233,6 +233,42 @@ def _osv_advisories() -> tuple[bytes, str] | None:
     return data, f"{path.name} (updated {mtime})"
 
 
+_SBOM_NAMES = ("bom.json", "sbom.json", "cyclonedx.json")
+
+
+def _ingest_sbom(root: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Ingest a CycloneDX SBOM from the tree (if present); return (components, check).
+
+    The components (ecosystem, name, version) feed SCA alongside the manifest inventory, so a
+    committed SBOM's transitive dependencies are also matched against the advisory feed."""
+    from services.source_analysis_worker import sbom
+
+    candidates = [root / name for name in _SBOM_NAMES] + sorted(root.glob("*.cdx.json"))
+    sbom_file = next((p for p in candidates if p.is_file()), None)
+    if sbom_file is None:
+        return [], {
+            "category": "sbom_cyclonedx",
+            "status": "skipped",
+            "detail": "No CycloneDX SBOM (bom.json/sbom.json/cyclonedx.json/*.cdx.json) found in the tree.",
+        }
+    try:
+        parsed = sbom.parse_cyclonedx(sbom_file.read_bytes())
+        return parsed["components"], {
+            "category": "sbom_cyclonedx",
+            "status": "completed",
+            "detail": (
+                f"Parsed CycloneDX SBOM {sbom_file.name}: {len(parsed['components'])} component(s) "
+                f"ingested, {len(parsed['unresolved'])} unresolved."
+            ),
+        }
+    except Exception as exc:
+        return [], {
+            "category": "sbom_cyclonedx",
+            "status": "completed_with_errors",
+            "detail": f"CycloneDX SBOM {sbom_file.name} could not be parsed ({type(exc).__name__}).",
+        }
+
+
 def _run_sca(packages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Match declared dependencies against the configured OSV feed; return (findings, check)."""
     feed = _osv_advisories()
@@ -246,11 +282,13 @@ def _run_sca(packages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     try:
         from packages.source_scanners import SourceScannerPipeline
 
-        tuples = [
-            (p["ecosystem"], p["name"], p["version"])
-            for p in packages
-            if p.get("ecosystem") and p.get("name") and p.get("version")
-        ]
+        tuples = sorted(
+            {
+                (p["ecosystem"], p["name"], p["version"])
+                for p in packages
+                if p.get("ecosystem") and p.get("name") and p.get("version")
+            }
+        )
         findings = SourceScannerPipeline.normalize_osv(advisory_bytes, tuples)
         return findings, {
             "category": "sca_osv",
@@ -366,16 +404,21 @@ def analyze_source_tree(root: Path) -> dict[str, Any]:
     findings = findings + semgrep_findings
     checks.append(semgrep_check)
 
-    # SCA (OSV) matches declared dependencies against the configured advisory feed, when present.
-    sca_findings, sca_check = _run_sca(dependency_report["packages"])
+    # Ingest a CycloneDX SBOM if present; its components join the SCA match set.
+    sbom_components, sbom_check = _ingest_sbom(root)
+    checks.append(sbom_check)
+
+    # SCA (OSV) matches declared + SBOM dependencies against the configured advisory feed, when present.
+    sca_findings, sca_check = _run_sca(dependency_report["packages"] + sbom_components)
     findings = findings + sca_findings
     checks.append(sca_check)
 
     checks.append(_ingest_openapi(root))
     sast_basis = "SAST via Semgrep" if semgrep_check["status"] == "completed" else "SAST skipped"
     sca_basis = "SCA via OSV" if sca_check["status"] == "completed" else "SCA skipped"
+    sbom_basis = "CycloneDX SBOM ingested" if sbom_check["status"] == "completed" else "no SBOM"
     return {
-        "basis": f"source analysis: secrets via {secret_tool}, {sast_basis}, {sca_basis}, declared dependencies in-process",
+        "basis": f"source analysis: secrets via {secret_tool}, {sast_basis}, {sca_basis}, {sbom_basis}, declared dependencies in-process",
         "findings": findings,
         "packages": dependency_report["packages"],
         "manifests": dependency_report["manifests"],

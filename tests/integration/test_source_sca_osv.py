@@ -59,6 +59,56 @@ class OsvScaTests(unittest.TestCase):
         self.assertEqual(check["status"], "skipped")
         self.assertEqual([f for f in res["findings"] if f.get("category") == "vulnerable_dependency"], [])
 
+    def test_cyclonedx_sbom_components_are_ingested_and_matched(self):
+        # A transitive dependency present only in the committed SBOM, not any manifest.
+        feed = Path(tempfile.mktemp(suffix=".json"))
+        feed.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "OSV-TEST-LODASH",
+                        "affected": [
+                            {
+                                "package": {"ecosystem": "npm", "name": "lodash"},
+                                "ranges": [
+                                    {
+                                        "type": "ECOSYSTEM",
+                                        "events": [{"introduced": "0"}, {"fixed": "4.17.12"}],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            )
+        )
+        self.addCleanup(lambda: feed.unlink(missing_ok=True))
+        d = Path(tempfile.mkdtemp(prefix="sbom-"))
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        (d / "bom.json").write_text(
+            json.dumps(
+                {
+                    "bomFormat": "CycloneDX",
+                    "specVersion": "1.4",
+                    "components": [
+                        {
+                            "type": "library",
+                            "name": "lodash",
+                            "version": "4.17.11",
+                            "purl": "pkg:npm/lodash@4.17.11",
+                        }
+                    ],
+                }
+            )
+        )
+        with patch.dict("os.environ", {"SHARAY_OSV_ADVISORIES": str(feed)}):
+            res = analyze_source_tree(d)
+        sbom_check = next(c for c in res["checks"] if c["category"] == "sbom_cyclonedx")
+        self.assertEqual(sbom_check["status"], "completed")
+        sca = [f for f in res["findings"] if f.get("category") == "vulnerable_dependency"]
+        self.assertTrue(any("lodash" in f["title"] for f in sca))  # SBOM component matched by SCA
+        self.assertIn("CycloneDX SBOM ingested", res["basis"])
+
 
 if __name__ == "__main__":
     unittest.main()

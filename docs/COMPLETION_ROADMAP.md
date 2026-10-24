@@ -225,7 +225,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   the target; without it ⇒ no assessment created. Regression
   `tests/product/test_source_analysis_lifecycle.py` (2). Full suite 1059 pass. `aegis/api.py`,
   `aegis/schemas.py`. _(Remaining: a target picker in the standalone Source-analysis UI page.)_ Anchor S21.
-- [◐] **P1-3 · SAST/SCA/SBOM assembled workflow.** _SAST (Semgrep) is now wired and verified:_
+- [x] **P1-3 · SAST/SCA/SBOM assembled workflow.** _SAST (Semgrep) is now wired and verified:_
   `analyze_source_tree` runs Semgrep over the authorized tree with a pinned, committed SHARAY ruleset
   (`services/source_analysis_worker/semgrep_rules.yml`), normalizes results through
   `SourceScannerPipeline.normalize_semgrep`, and records tool + version + ruleset identity in the
@@ -242,8 +242,12 @@ Legend: ☐ todo · ◐ in progress · ☑ done (evidence recorded). Each item c
   and freshness (file mtime) in the check; absent feed ⇒ SCA skipped honestly; the `/overview`
   catalog gains an `osv_sca` entry gated on the feed. Evidence: `requests==2.19.0` + an advisory
   fixing it in 2.20.0 ⇒ one `vulnerable_dependency` finding; no feed ⇒ skipped, no findings.
-  Regression `tests/integration/test_source_sca_osv.py` (2). Full suite 1066 pass. _(Remaining:
-  CycloneDX SBOM generation/analysis.)_ Anchor S21, S53–S54.
+  Regression `tests/integration/test_source_sca_osv.py`. _SBOM (CycloneDX) now ingested too:_ a
+  committed `bom.json`/`sbom.json`/`*.cdx.json` is parsed in-process (`sbom.parse_cyclonedx`) and its
+  components join the SCA match set, so a transitive dependency present only in the SBOM (e.g.
+  `lodash@4.17.11`) is matched against the OSV feed; the `/overview` catalog gains an `sbom_cyclonedx`
+  entry. Full suite 1067 pass; mypy + ruff clean. `services/source_analysis_worker/{assess,sbom}.py`,
+  `aegis/api.py`. Anchor S21, S53–S54.
 - [ ] **P1-4 · Authenticated testing.** Approved credential refs → identity-specific jobs with
   stored redacted evidence. Anchor S06, S12.
 - [◐] **P1-5 · AI investigations persist.** `run_ai_investigation` computed the analysis (optionally
