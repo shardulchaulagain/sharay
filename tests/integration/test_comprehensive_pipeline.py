@@ -112,7 +112,7 @@ class ComprehensivePipelineTests(unittest.TestCase):
         self.assertTrue(any(obs.get("category") == "network_inventory" for obs in observations))
         self.assertTrue(any(obs.get("category") == "recon" for obs in observations))
 
-    def test_pipeline_executes_all_configured_tools_including_nmap_zap_metasploit(self):
+    def test_pipeline_executes_all_configured_tools_including_nmap_zap_verification(self):
         curl_raw = b"HTTP/2 200 \r\ncontent-type: text/html\r\nserver: nginx\r\n\r\n"
         nuclei_raw = (
             b"[INF] Templates loaded: 14036\n"
@@ -136,11 +136,6 @@ class ComprehensivePipelineTests(unittest.TestCase):
             b'"riskcode": "2", "confidence": "2", "cweid": "1021", "solution": "Ensure header is present.", '
             b'"instances": [{"uri": "https://example.com/", "method": "GET", "param": ""}]}]}]}'
         )
-        msf_json = (
-            b'{"results": [{"module": "auxiliary/scanner/http/title", "outcome": "confirmed_reproducible", '
-            b'"target_url": "https://example.com/", "session_established": false, "summary": "Example Domain Title"}]}'
-        )
-
         ran_images = []
 
         def mock_runner(image, argv, **kwargs):
@@ -157,10 +152,9 @@ class ComprehensivePipelineTests(unittest.TestCase):
                 return SimpleNamespace(
                     outcome="completed", exit_code=0, stdout=zap_json, output_truncated=False
                 )
-            if "metasploit" in image:
-                return SimpleNamespace(
-                    outcome="completed", exit_code=0, stdout=msf_json, output_truncated=False
-                )
+            # The verification stage is native nuclei now (no emulated metasploit image); if the
+            # image is ever requested, that is a regression.
+            assert "metasploit" not in image, "emulated Metasploit image must no longer run"
             return SimpleNamespace(
                 outcome="completed", exit_code=0, stdout=nuclei_raw, output_truncated=False
             )
@@ -169,42 +163,35 @@ class ComprehensivePipelineTests(unittest.TestCase):
             self._dest,
             "93.184.216.34",
             run=mock_runner,
-            tools=["nmap", "crawler", "sensitive", "diff", "nuclei", "zap", "metasploit"],
+            tools=["nmap", "crawler", "sensitive", "diff", "nuclei", "zap", "verification"],
         )
 
         # completed_with_errors is honest when an auxiliary stage (e.g. reproducer_canary) cannot run.
         self.assertIn(res["outcome"], ("completed", "completed_with_errors"))
-        # Ensure all 4 images were executed
+        # Native tools all executed; the emulated Metasploit image is never pulled.
         self.assertTrue(any("nmap" in img for img in ran_images))
         self.assertTrue(any("zap" in img for img in ran_images))
-        self.assertTrue(any("metasploit" in img for img in ran_images))
         self.assertTrue(any("nuclei" in img for img in ran_images))
+        self.assertFalse(any("metasploit" in img for img in ran_images))
 
-        # Check findings from all integrated tools
+        # Findings come from the native integrated tools (verification is nuclei-sourced).
         findings = res["findings"]
         self.assertTrue(any(f["fingerprint"].startswith("nuclei:") for f in findings))
         self.assertTrue(any(f["fingerprint"].startswith("zap:") for f in findings))
-        self.assertTrue(any(f["fingerprint"].startswith("metasploit:") for f in findings))
 
-        # Check checks
+        # Check checks: the former metasploit slot now reports as a verification stage.
         categories = {c["category"] for c in res["checks"]}
         self.assertIn("network_inventory", categories)
         self.assertIn("zap", categories)
-        self.assertIn("metasploit", categories)
+        self.assertIn("verification", categories)
+        self.assertNotIn("metasploit", categories)
         self.assertIn("nuclei", categories)
         self.assertIn("pipeline", categories)
 
-    def test_pipeline_handles_metasploit_and_zap_timeout_124(self):
+    def test_pipeline_handles_verification_and_zap_timeout_124(self):
         def timeout_runner(image, argv, **kwargs):
-            if "metasploit" in image:
-                return SimpleNamespace(
-                    outcome="failed",
-                    exit_code=124,
-                    stdout=b"",
-                    stderr=b"Command timed out before completion",
-                    output_truncated=False,
-                )
-            if "zap" in image:
+            # zap and the nuclei-based verification stage both hit their time budget.
+            if "zap" in image or "nuclei" in image:
                 return SimpleNamespace(
                     outcome="failed",
                     exit_code=124,
@@ -223,15 +210,18 @@ class ComprehensivePipelineTests(unittest.TestCase):
             self._dest,
             "93.184.216.34",
             run=timeout_runner,
-            tools=["metasploit", "zap"],
+            tools=["verification", "zap"],
             max_seconds=60,
         )
         # A stage that only hit its budget is honest (amber), never a green "completed".
         self.assertEqual(res["outcome"], "completed_with_errors")
         checks = {c["category"]: c for c in res["checks"]}
-        self.assertIn("metasploit", checks)
-        self.assertEqual(checks["metasploit"]["status"], "completed_with_errors")
-        self.assertIn("execution budget", checks["metasploit"]["detail"])
+        # The verification stage reports amber on timeout and keeps its diagnostic detail (never a
+        # success-sounding message).
+        self.assertIn("verification", checks)
+        self.assertEqual(checks["verification"]["status"], "completed_with_errors")
+        self.assertIn("execution budget", checks["verification"]["detail"])
+        self.assertNotIn("metasploit", checks)
         self.assertIn("zap", checks)
         self.assertEqual(checks["zap"]["status"], "completed_with_errors")
         self.assertIn("execution budget", checks["zap"]["detail"])

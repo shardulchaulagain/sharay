@@ -197,7 +197,7 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
       if (toolDiff) activeTools.push("diff");
       if (toolNuclei) activeTools.push("nuclei");
       if (toolZap) activeTools.push("zap");
-      if (toolMsf) activeTools.push("metasploit");
+      if (toolMsf) activeTools.push("verification");
       if (toolCve) activeTools.push("cve");
       if (toolGraphql) activeTools.push("graphql");
       if (toolWebsocket) activeTools.push("websocket");
@@ -380,7 +380,7 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
               </label>
               <label className="checkbox-label">
                 <input type="checkbox" checked={mode !== "passive" && toolMsf} onChange={e => { setToolMsf(e.target.checked); invalidateReview(); }} disabled={busy || mode === "passive"} />
-                Metasploit Auxiliary Verifier
+                Vulnerability Verifier (native nuclei)
               </label>
             </div>
           </div>

@@ -91,8 +91,10 @@ class ScanConfig(Input):
             "graphql",
             "websocket",
             "wordlist",
+            # Native-arm64 nuclei verification stage; replaces the emulated Metasploit slot.
+            "verification",
         ]
-    ] = Field(default_factory=list, max_length=19)
+    ] = Field(default_factory=list, max_length=20)
 
     @field_validator("severities")
     @classmethod

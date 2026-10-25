@@ -1564,6 +1564,62 @@ def scan_live_metasploit_auxiliary(
     return result
 
 
+# Native-arm64 verification tags that recover the breadth the emulated Metasploit auxiliary stage
+# used to provide (service CVEs, exposed network services, default credentials, exposed panels,
+# misconfigurations) without qemu emulation. Intrusive/dos/fuzzing templates stay excluded upstream.
+_VERIFICATION_TAGS = "cve,network,default-login,exposure,misconfig,panel"
+
+
+def scan_live_verification(
+    destination: Destination,
+    allow_ip: str,
+    *,
+    run: Callable[..., Any] | None = None,
+    rate: int = 150,
+    max_seconds: float = 180,
+    templates_volume: str | None = None,
+    target_urls: list[str] | None = None,
+) -> dict[str, Any]:
+    """Active vulnerability-verification stage built on nuclei (native arm64), replacing the emulated
+    amd64 Metasploit auxiliary stage. Runs the verification template families at every severity so it
+    adds the info/low service-detection, default-credential and exposure matches the severity-gated
+    main nuclei stage skips. Findings dedupe by fingerprint, so overlap with that stage is collapsed."""
+    res = scan_live_nuclei(
+        destination,
+        allow_ip,
+        run=run,
+        severities="info,low,medium,high,critical",
+        tags=_VERIFICATION_TAGS,
+        rate=rate,
+        max_seconds=max_seconds,
+        templates_volume=templates_volume,
+        target_urls=target_urls,
+    )
+    # Relabel so the stage reads as verification (its own slot), not a second generic nuclei pass.
+    # A budget-limited run is honest (amber) and keeps a diagnostic detail; only a clean run reads as
+    # a completed verification pass. Keyed on the adapter outcome, not the nuclei check status (which
+    # nuclei reports "completed" even on a 124 timeout).
+    res["adapter"] = "verification_live"
+    clean = res.get("outcome") == "completed"
+    match_count = len(res.get("findings", []))
+    for check in res.get("checks", []):
+        if check.get("category") == "nuclei":
+            check["category"] = "verification"
+            if clean:
+                check["status"] = "completed"
+                check["detail"] = (
+                    f"Native nuclei verification pass (replaces emulated Metasploit): "
+                    f"{match_count} template match(es) across {_VERIFICATION_TAGS.replace(',', ', ')}."
+                )
+            else:
+                check["status"] = "completed_with_errors"
+                check["detail"] = (
+                    f"Native nuclei verification reached its execution budget (partial coverage); "
+                    f"{match_count} match(es) so far across {_VERIFICATION_TAGS.replace(',', ', ')}."
+                )
+    return res
+
+
 def scan_comprehensive(
     destination: Destination,
     allow_ip: str,
@@ -1773,7 +1829,8 @@ def scan_comprehensive(
         "dalfox": 45,
         "katana": 45,
         "zap": 150,
-        "metasploit": 120,
+        "metasploit": 150,
+        "verification": 150,
         "body_fuzzer": 60,
         "diff": 30,
         "graphql": 30,
@@ -2844,33 +2901,39 @@ def scan_comprehensive(
         )
 
     # Stage 10: Metasploit Auxiliary Non-Destructive Verification
-    if mode != "passive" and "metasploit" in enabled_tools and not _stop():
+    # Vulnerability-verification stage. "metasploit" is kept as a backward-compatible selector (old
+    # scope configs still work) but now drives a native-arm64 nuclei verification pass instead of the
+    # emulated amd64 Metasploit container, which could not finish within budget on Apple Silicon.
+    if mode != "passive" and enabled_tools & {"verification", "metasploit"} and not _stop():
         if allow_ip in ("127.0.0.1", "::1", "localhost"):
             result["checks"].append(
                 {
-                    "category": "metasploit",
+                    "category": "verification",
                     "status": "completed",
-                    "detail": "Metasploit auxiliary verification skipped for local loopback target.",
+                    "detail": "Vulnerability verification skipped for local loopback target.",
                 }
             )
         else:
             elapsed = time.monotonic() - started
-            msf_timeout = min(max(20.0, max_seconds - elapsed - 5.0), 300.0)
-            msf_res = scan_live_metasploit_auxiliary(
+            verify_timeout = min(max(20.0, max_seconds - elapsed - 5.0), 300.0)
+            verify_res = scan_live_verification(
                 destination,
                 allow_ip,
                 run=runner,
-                max_seconds=msf_timeout,
+                rate=rate,
+                max_seconds=verify_timeout,
+                templates_volume=templates_volume,
+                target_urls=discovered_urls,
             )
-            result["observations"].extend(msf_res.get("observations", []))
-            result["findings"].extend(msf_res.get("findings", []))
-            result["checks"].extend(msf_res.get("checks", []))
+            result["observations"].extend(verify_res.get("observations", []))
+            result["findings"].extend(verify_res.get("findings", []))
+            result["checks"].extend(verify_res.get("checks", []))
     else:
         result["checks"].append(
             {
-                "category": "metasploit",
+                "category": "verification",
                 "status": "completed",
-                "detail": f"Metasploit auxiliary verification skipped per scan mode '{mode}' or tool selection.",
+                "detail": f"Vulnerability verification skipped per scan mode '{mode}' or tool selection.",
             }
         )
 
