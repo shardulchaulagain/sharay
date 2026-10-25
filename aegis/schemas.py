@@ -226,6 +226,10 @@ class CredentialInput(Input):
     value: str = Field(min_length=1, max_length=8192)
     # Required for kind="header"/"cookie": the header or cookie name to carry the value.
     header_name: str | None = Field(default=None, max_length=80)
+    # Optional: group credentials into a named operator identity for dual-identity IDOR/BOLA testing.
+    # subject_id is the resource id that identity owns (used for cross-tenant targeting).
+    identity: str | None = Field(default=None, max_length=80, pattern=r"^[A-Za-z0-9._-]+$")
+    subject_id: str | None = Field(default=None, max_length=128)
 
     @model_validator(mode="after")
     def header_name_required(self):

@@ -853,6 +853,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "name": row.name,
             "kind": row.kind,
             "header_name": row.header_name,
+            "identity": row.identity,
+            "subject_id": row.subject_id,
             "created_at": timestamp(row.created_at),
         }
 
@@ -882,6 +884,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name=data.name,
             kind=data.kind,
             header_name=data.header_name,
+            identity=data.identity,
+            subject_id=data.subject_id,
             encrypted_value=encrypt(settings, data.value),  # plaintext never persisted
             created_by=user.id,
         )

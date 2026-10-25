@@ -84,6 +84,11 @@ class Credential(Base):
     kind: Mapped[str] = mapped_column(String(20))  # cookie | header | bearer | basic
     header_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
     encrypted_value: Mapped[str] = mapped_column(Text)
+    # Optional grouping for dual-identity (IDOR/BOLA) testing: credentials sharing an `identity` form
+    # one authenticated operator; `subject_id` is the resource id that identity owns (for cross-tenant
+    # targeting). Credentials with no identity fold into the single default auth context.
+    identity: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    subject_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[float] = mapped_column(Float, default=time.time)
 

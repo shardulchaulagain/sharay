@@ -629,8 +629,16 @@ def crawl(
         "uncovered": sorted(uncovered_schema)[:50],
     }
 
+    # Honest coverage signal: if the page limit was reached while URLs remained queued, the crawl was
+    # truncated. frontier_remaining counts distinct not-yet-visited URLs still in the frontier, so a
+    # large-site under-crawl is reported rather than silently incomplete.
+    frontier_remaining = len({u for u, _ in queue if u not in visited})
+    coverage_truncated = len(visited) >= page_limit and frontier_remaining > 0
     return {
         "pages_visited": len(visited),
+        "page_limit": page_limit,
+        "frontier_remaining": frontier_remaining,
+        "coverage_truncated": coverage_truncated,
         "endpoints": sorted(discovered_endpoints),
         "urls": sorted(discovered_urls),
         "parameters": sorted(discovered_parameters),

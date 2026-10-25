@@ -122,6 +122,38 @@ class CredentialStoreTests(unittest.TestCase):
             403,
         )
 
+    def test_resolve_auth_groups_identities_for_matrix(self):
+        # Two credentials under distinct identities -> two operator identities the IDOR matrix needs.
+        rows = [
+            Credential(
+                kind="bearer", encrypted_value=encrypt(self.settings, "alice-tok"),
+                identity="alice", subject_id="101", name="alice_tok",
+            ),
+            Credential(
+                kind="cookie", header_name="sid", encrypted_value=encrypt(self.settings, "bob-sid"),
+                identity="bob", subject_id="102", name="bob_sid",
+            ),
+            # An ungrouped credential still folds into the default context.
+            Credential(kind="header", header_name="X-Api", encrypted_value=encrypt(self.settings, "k"), name="api"),
+        ]
+        resolved = resolve_auth(self.settings, rows)
+        self.assertEqual(set(resolved["identities"]), {"alice", "bob"})
+        self.assertEqual(resolved["identities"]["alice"]["headers"]["Authorization"], "Bearer alice-tok")
+        self.assertEqual(resolved["identities"]["alice"]["user_id"], "101")
+        self.assertEqual(resolved["identities"]["bob"]["cookies"], {"sid": "bob-sid"})
+        self.assertEqual(resolved["identities"]["bob"]["user_id"], "102")
+        self.assertEqual(resolved["headers"]["X-Api"], "k")  # ungrouped default context
+
+    def test_resolve_auth_skips_undecryptable_credential(self):
+        rows = [
+            Credential(kind="bearer", encrypted_value=encrypt(self.settings, "ok"), name="good"),
+            Credential(kind="bearer", encrypted_value="not-a-valid-token", name="broken"),
+        ]
+        resolved = resolve_auth(self.settings, rows)
+        self.assertEqual(resolved["errors"], ["broken"])  # reported, not raised
+        self.assertEqual(resolved["identity_names"], ["good"])
+        self.assertEqual(resolved["headers"]["Authorization"], "Bearer ok")
+
     def test_resolve_auth_maps_each_kind(self):
         rows = [
             Credential(kind="cookie", header_name="sid", encrypted_value=encrypt(self.settings, "cv")),

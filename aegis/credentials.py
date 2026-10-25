@@ -49,23 +49,54 @@ def decrypt(settings: Settings, token: str) -> str:
         raise ValueError("Credential could not be decrypted (wrong or rotated key).") from exc
 
 
-def resolve_auth(settings: Settings, credentials) -> dict:
-    """Decrypt approved credentials into an auth dict (cookies/headers) for an authenticated scan.
+def _apply_cred(cred, value: str, cookies: dict, headers: dict) -> None:
+    """Place one decrypted credential value into the right cookie/header slot."""
+    if cred.kind == "cookie" and cred.header_name:
+        cookies[cred.header_name] = value
+    elif cred.kind == "header" and cred.header_name:
+        headers[cred.header_name] = value
+    elif cred.kind == "bearer":
+        headers["Authorization"] = f"Bearer {value}"
+    elif cred.kind == "basic":
+        headers["Authorization"] = f"Basic {value}"
 
-    Only credential NAMES are surfaced for evidence; plaintext values live only in the returned auth
-    and are never stored. `credentials` is a sequence of Credential rows."""
+
+def resolve_auth(settings: Settings, credentials) -> dict:
+    """Decrypt approved credentials into an auth dict for an authenticated scan.
+
+    Credentials without an `identity` fold into the single default cookies/headers context (unchanged
+    behavior). Credentials sharing an `identity` are grouped into `identities[name] = {cookies, headers,
+    user_id, role}`, which the dual-identity (IDOR/BOLA) authorization matrix needs -- two or more real
+    operator identities, never synthetic tokens. A credential whose value cannot be decrypted (e.g. the
+    master key rotated) is skipped and reported in `errors`, so one stale credential never crashes a
+    scan. Only credential NAMES/identities are surfaced for evidence; plaintext lives only in the
+    returned auth and is never stored."""
     cookies: dict[str, str] = {}
     headers: dict[str, str] = {}
     names: list[str] = []
+    identities: dict[str, dict] = {}
+    errors: list[str] = []
     for cred in credentials:
-        value = decrypt(settings, cred.encrypted_value)
+        try:
+            value = decrypt(settings, cred.encrypted_value)
+        except ValueError:
+            errors.append(cred.name)
+            continue
         names.append(cred.name)
-        if cred.kind == "cookie" and cred.header_name:
-            cookies[cred.header_name] = value
-        elif cred.kind == "header" and cred.header_name:
-            headers[cred.header_name] = value
-        elif cred.kind == "bearer":
-            headers["Authorization"] = f"Bearer {value}"
-        elif cred.kind == "basic":
-            headers["Authorization"] = f"Basic {value}"
-    return {"cookies": cookies, "headers": headers, "identity_names": sorted(names)}
+        group = getattr(cred, "identity", None)
+        if group:
+            ident = identities.setdefault(
+                group, {"cookies": {}, "headers": {}, "role": group, "user_id": None}
+            )
+            _apply_cred(cred, value, ident["cookies"], ident["headers"])
+            if getattr(cred, "subject_id", None):
+                ident["user_id"] = cred.subject_id
+        else:
+            _apply_cred(cred, value, cookies, headers)
+    return {
+        "cookies": cookies,
+        "headers": headers,
+        "identities": identities,
+        "identity_names": sorted(names),
+        "errors": errors,
+    }

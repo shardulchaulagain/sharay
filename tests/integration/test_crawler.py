@@ -139,5 +139,37 @@ class CrawlerSensitiveProbeGatingTests(unittest.TestCase):
         self._run(probe_sensitive=True).assert_called_once()
 
 
+class CrawlCoverageTruncationTests(unittest.TestCase):
+    """Big-site honesty: a crawl that hits its page cap with URLs still queued reports truncation."""
+
+    _dest = Destination(
+        "https://example.com/", "https", "example.com", 443, "/", "https://example.com", "example.com"
+    )
+
+    def test_truncation_reported_when_page_cap_reached(self):
+        body = (
+            "<html><body>"
+            + "".join(f'<a href="https://example.com/p{i}">p{i}</a>' for i in range(8))
+            + "</body></html>"
+        )
+        with (
+            patch.object(crawler_mod, "_fetch_page", return_value=(200, {"content-type": "text/html"}, body)),
+            patch.object(crawler_mod, "probe_sensitive_files", return_value=[]),
+        ):
+            res = crawl(self._dest, "93.184.216.34", max_depth=2, max_pages=3, probe_sensitive=False)
+        self.assertTrue(res["coverage_truncated"])
+        self.assertEqual(res["pages_visited"], 3)
+        self.assertGreater(res["frontier_remaining"], 0)
+
+    def test_no_truncation_when_surface_fits(self):
+        with (
+            patch.object(crawler_mod, "_fetch_page", return_value=(200, {"content-type": "text/html"}, "<html></html>")),
+            patch.object(crawler_mod, "probe_sensitive_files", return_value=[]),
+        ):
+            res = crawl(self._dest, "93.184.216.34", max_depth=1, max_pages=50, probe_sensitive=False)
+        self.assertFalse(res["coverage_truncated"])
+        self.assertEqual(res["frontier_remaining"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -234,6 +234,7 @@ def _execute_leased_assessment(
             tags = scan_cfg.get("tags")
             rate = int(scan_cfg.get("rate") or 150)
             depth = int(scan_cfg.get("depth") or 2)
+            crawler_max_pages = int(scan_cfg.get("crawler_max_pages") or 0) or None
             tools = scan_cfg.get("tools")
             max_seconds = float(scan_cfg.get("max_seconds") or 600.0)
             # Unified multi-stage automated pipeline (Recon + Headers + Ports + Crawler + Nuclei).
@@ -261,6 +262,12 @@ def _execute_leased_assessment(
                 auth["cookies"] = {**auth.get("cookies", {}), **resolved["cookies"]}
                 auth["headers"] = {**auth.get("headers", {}), **resolved["headers"]}
                 auth["identity_names"] = resolved["identity_names"]
+                # Grouped identities enable the dual-identity IDOR/BOLA matrix (needs >=2).
+                if resolved.get("identities"):
+                    auth["identities"] = {**auth.get("identities", {}), **resolved["identities"]}
+                # Surface, but never hard-fail on, credentials that could not be decrypted.
+                if resolved.get("errors"):
+                    auth["credential_errors"] = resolved["errors"]
             result = scan_comprehensive(
                 destination,
                 pinned_ip,
@@ -268,6 +275,7 @@ def _execute_leased_assessment(
                 rate=rate,
                 mode=mode,
                 depth=depth,
+                crawler_max_pages=crawler_max_pages,
                 tools=tools,
                 max_seconds=max_seconds,
                 auth=auth,

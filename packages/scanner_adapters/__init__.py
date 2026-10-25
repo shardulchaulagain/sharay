@@ -1632,6 +1632,7 @@ def scan_comprehensive(
     templates_volume: str | None = None,
     mode: str = "adaptive",
     depth: int = 2,
+    crawler_max_pages: int | None = None,
     tools: list[str] | None = None,
     auth: dict[str, Any] | None = None,
     scope: ScopePolicy | dict[str, Any] | None = None,
@@ -1680,11 +1681,20 @@ def scan_comprehensive(
 
     # Record authenticated testing identity (names only; credential values are never evidence).
     if isinstance(auth, dict) and auth.get("identity_names"):
+        detail = f"Authenticated testing as credential identity(ies): {', '.join(auth['identity_names'])} (values redacted)."
+        if auth.get("identities"):
+            detail += f" Distinct operator identities for authorization testing: {', '.join(sorted(auth['identities']))}."
+        result["checks"].append(
+            {"category": "authenticated_session", "status": "completed", "detail": detail}
+        )
+    # Honest signal: credentials that could not be decrypted (e.g. rotated key) are skipped, not fatal.
+    if isinstance(auth, dict) and auth.get("credential_errors"):
         result["checks"].append(
             {
                 "category": "authenticated_session",
-                "status": "completed",
-                "detail": f"Authenticated testing as credential identity(ies): {', '.join(auth['identity_names'])} (values redacted).",
+                "status": "completed_with_errors",
+                "detail": f"{len(auth['credential_errors'])} credential(s) could not be decrypted and were skipped "
+                f"(key rotated or corrupted): {', '.join(auth['credential_errors'])}.",
             }
         )
 
@@ -1926,11 +1936,14 @@ def scan_comprehensive(
         try:
             from packages.scanner_adapters.integrations import crawler
 
+            # Honor the operator's crawler_max_pages when set; otherwise fall back to the mode default.
+            # Larger sites get fuller coverage by raising this (bounded by the crawler's own ceiling).
+            effective_max_pages = crawler_max_pages or (100 if mode == "aggressive" else 20)
             crawl_res = crawler.crawl(
                 destination,
                 allow_ip,
                 max_depth=depth,
-                max_pages=100 if mode == "aggressive" else 20,
+                max_pages=effective_max_pages,
                 timeout=3.0,
                 probe_sensitive="sensitive" in enabled_tools,
                 cookies=dict(auth["cookies"]) if isinstance(auth, dict) and auth.get("cookies") else None,
@@ -1942,6 +1955,22 @@ def scan_comprehensive(
             discovered_parameters = crawl_res.get("parameters", [])
             discovered_urls = crawl_res.get("urls", [])
             discovered_forms = crawl_res.get("forms", [])
+
+            # Big-site coverage honesty: if the crawl hit its page cap with URLs still queued, say so
+            # explicitly so partial coverage is never mistaken for a fully-explored surface.
+            if crawl_res.get("coverage_truncated"):
+                result["checks"].append(
+                    {
+                        "category": "crawl_coverage",
+                        "status": "completed_with_errors",
+                        "detail": (
+                            f"Crawl coverage capped at {crawl_res.get('pages_visited')} page(s) "
+                            f"(limit {crawl_res.get('page_limit')}); {crawl_res.get('frontier_remaining')} "
+                            f"more in-scope URL(s) were discovered but not visited. Raise crawler max pages "
+                            f"or depth for fuller coverage on large sites."
+                        ),
+                    }
+                )
 
             # Excluded-path contract (F03): drop any discovered endpoint/URL the scope does not allow
             # BEFORE the active stages iterate over them, so an out-of-scope or excluded path is never
