@@ -507,10 +507,11 @@ export default function OperatorTerminal({ target, finding, initialSession, init
                 <div className="focus-triage">
                   <span className="eyebrow">OPERATOR VERIFICATION DECISION</span>
                   <div className="triage-buttons">
-                    <button className="primary compact" disabled={triageBusy} onClick={() => void triageFinding("confirmed")}>Confirm Finding</button>
+                    <button className="primary compact" disabled={triageBusy || status !== "connected" || busy} onClick={() => insertCommand(`retest ${finding.id}`, true)}>Verify to Confirm (retest)</button>
                     <button className="secondary compact" disabled={triageBusy} onClick={() => void triageFinding("false_positive")}>Mark False Positive</button>
-                    <button className="secondary compact" disabled={triageBusy} onClick={() => void triageFinding("demoted")}>Demote</button>
+                    <button className="secondary compact" disabled={triageBusy} onClick={() => void triageFinding("inconclusive")}>Mark Inconclusive</button>
                   </div>
+                  <p className="triage-hint">Confirmation is earned by evidence: a retest re-runs the verification and the finding is confirmed automatically only if the reproducer reproduces it. It cannot be set by hand.</p>
                   {triageNotice && <p className="triage-notice">{triageNotice}</p>}
                 </div>
               </div>
