@@ -107,6 +107,7 @@ function TargetRegistration({ projectId, target, done, cancel }: { projectId: st
   function review(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(undefined);
     try {
+      if (draft.authenticated && draft.credentialRefs.length === 0) throw new Error("Authenticated testing needs at least one credential identity selected — add credentials under Settings → Test credentials, or turn authenticated testing off.");
       const starts = !target && draft.starts === localDateTime(draft.initialStarts) ? draft.initialStarts : draft.starts;
       const expires = !target && draft.expires === localDateTime(draft.initialExpires) ? draft.initialExpires : draft.expires;
       setPreview({ url: draft.url, scope: laboratoryScope(draft.url, draft.included, draft.excluded, expires, target?.scope, starts, draft.authenticated, draft.authenticated ? draft.credentialRefs : []) });
