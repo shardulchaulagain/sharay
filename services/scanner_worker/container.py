@@ -98,8 +98,10 @@ def build_run_argv(
         raise IsolationError("pids_limit must be an integer from 1 to 4096.")
     if type(cpus) not in (int, float) or not 0 < cpus <= 8:
         raise IsolationError("cpus must be a number in (0, 8].")
-    if type(max_seconds) not in (int, float) or not 0 < max_seconds <= 300:
-        raise IsolationError("max_seconds must be a number in (0, 300].")
+    # Ceiling raised to 30 min so a large-site stage can run to completion; it is a hard safety bound
+    # against a hung container (the operator cancels a stuck run), not an automatic coverage cap.
+    if type(max_seconds) not in (int, float) or not 0 < max_seconds <= 1800:
+        raise IsolationError("max_seconds must be a number in (0, 1800].")
     source = Path(input_dir).resolve()
     if not source.is_dir():
         raise IsolationError("input_dir must be an existing directory.")

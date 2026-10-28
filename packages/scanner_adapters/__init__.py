@@ -36,6 +36,11 @@ MAX_REQUESTS = 5
 MAX_SECONDS = 15
 REQUEST_TIMEOUT = 3
 MAX_HEADER_BYTES = 65536
+# Per-stage execution budget (seconds). Each containerized stage gets its own timeout, not a slice of
+# a shared pool, so stages never starve each other. _STAGE_TIMEOUT_CAP matches the container runtime's
+# hard ceiling; the operator sets a value up to it per scan (generous default for ordinary sites).
+_DEFAULT_STAGE_TIMEOUT = 300.0
+_STAGE_TIMEOUT_CAP = 1800.0
 
 
 class ScanStopped(Exception):
@@ -164,11 +169,18 @@ def _connect(destination: Destination, timeout: float) -> _DeadlineSocket:
         raise
 
 
-def _connection(destination: Destination, timeout: float) -> http.client.HTTPConnection:
+def _connection(
+    destination: Destination, timeout: float, verify: bool = True
+) -> http.client.HTTPConnection:
     deadline = time.monotonic() + timeout
     connection: http.client.HTTPConnection
     if destination.scheme == "https":
-        context = ssl.create_default_context()
+        # verify=True (safe_http lab): enforce real TLS trust, no insecure fallback. verify=False
+        # (interactive probe/http/curl against real targets): a scanner must still reach hosts with
+        # self-signed, expired or incomplete-chain certs -- the cert is a finding, not a trust
+        # decision, and the socket is pinned to the scope-verified peer IP below, so this is not an
+        # MITM risk. The TLS stage records certificate facts separately.
+        context = ssl.create_default_context() if verify else ssl._create_unverified_context()
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.sslsocket_class = _DeadlineTLS
         connection = http.client.HTTPSConnection(
@@ -1088,7 +1100,7 @@ def scan_live_nuclei(
     else:
         tpl_dir = Path(os.environ.get("SHARAY_NUCLEI_TEMPLATES", "/Users/shardul/nuclei-templates"))
         mount_vol = f"{tpl_dir}:/tpl:ro" if tpl_dir.is_dir() else "sharay-nuclei-templates:/tpl:ro"
-    bounded_seconds = min(max(5.0, float(max_seconds)), 300.0)
+    bounded_seconds = min(max(5.0, float(max_seconds)), _STAGE_TIMEOUT_CAP)
     try:
         res = runner(
             "docker.io/projectdiscovery/nuclei:latest",
@@ -1271,7 +1283,7 @@ def scan_live_zap(
         "if [ -f /zap/wrk/zap-report.json ]; then cat /zap/wrk/zap-report.json; else cat /tmp/zap-console.log; fi",
     ]
 
-    bounded_seconds = min(max(5.0, float(max_seconds)), 300.0)
+    bounded_seconds = min(max(5.0, float(max_seconds)), _STAGE_TIMEOUT_CAP)
     try:
         res = runner(
             "docker.io/zaproxy/zap-stable:latest",
@@ -1416,7 +1428,7 @@ def scan_live_metasploit_auxiliary(
     alias_host = destination.host[4:] if destination.host.startswith("www.") else f"www.{destination.host}"
     msf_hosts = [f"{destination.host}:{allow_ip}", f"{alias_host}:{allow_ip}"]
 
-    bounded_seconds = min(max(5.0, float(max_seconds)), 300.0)
+    bounded_seconds = min(max(5.0, float(max_seconds)), _STAGE_TIMEOUT_CAP)
     try:
         is_ssl = destination.scheme == "https" or destination.port == 443
         ssl_opt = "set SSL true; " if is_ssl else ""
@@ -1637,6 +1649,8 @@ def scan_comprehensive(
     auth: dict[str, Any] | None = None,
     scope: ScopePolicy | dict[str, Any] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    stage_timeout: float | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Execute the unified multi-stage assessment pipeline against an authorized target:
     1. Passive Recon & TLS metadata inspection.
@@ -1669,6 +1683,19 @@ def scan_comprehensive(
 
     def _stop() -> bool:
         return bool(cancelled and cancelled())
+
+    # Per-stage timeout the operator controls. Each stage gets its OWN budget (not a slice of a shared
+    # shrinking pool), so a long early stage never starves a later one. Default is generous; the
+    # operator raises it for large sites. It is a safety ceiling against a hung tool, not a coverage
+    # cap -- the operator cancels a stuck run; the budget never silently truncates a healthy one.
+    per_stage_timeout = min(max(5.0, float(stage_timeout or _DEFAULT_STAGE_TIMEOUT)), _STAGE_TIMEOUT_CAP)
+
+    def _report(stage_name: str) -> None:
+        if progress is not None:
+            try:
+                progress(stage_name)
+            except Exception:
+                pass  # progress reporting must never break the scan
 
     def _in_scope(candidate_url: str) -> bool:
         if policy is None:
@@ -1849,7 +1876,12 @@ def scan_comprehensive(
         "cve": 10,
     }
     needed_seconds = 60 + sum(_STAGE_FLOORS.get(tool, 0) for tool in enabled_tools)
-    max_seconds = min(1800.0, max(float(max_seconds), float(needed_seconds)))
+    # Overall budget scales with the real work (each enabled stage can use its full per-stage timeout),
+    # bounded only by a 2-hour sanity ceiling. It no longer squeezes individual stages.
+    max_seconds = min(
+        7200.0,
+        max(float(max_seconds), float(needed_seconds), len(enabled_tools) * per_stage_timeout),
+    )
     result["observations"].append(
         {
             "kind": "adaptive_budget",
@@ -1860,6 +1892,7 @@ def scan_comprehensive(
     )
 
     # Stage 3: Multi-Port and Service Discovery
+    _report("Port & service discovery")
     try:
         from packages.scanner_adapters.integrations import port_scanner
 
@@ -1933,6 +1966,7 @@ def scan_comprehensive(
     discovered_urls: list[str] = []
     discovered_forms: list[dict[str, Any]] = []
     if "crawler" in enabled_tools and not _stop():
+        _report("Web crawl & endpoint discovery")
         try:
             from packages.scanner_adapters.integrations import crawler
 
@@ -2300,6 +2334,7 @@ def scan_comprehensive(
 
     # Stage 7: Active Behavioral Differential Testing
     if mode != "passive" and "diff" in enabled_tools and not _stop():
+        _report("Differential testing")
         try:
             from packages.scanner_adapters.integrations import differential
 
@@ -2817,6 +2852,7 @@ def scan_comprehensive(
 
     # Stage 8: Active Nuclei Vulnerability & CVE Scanning (Context-Adapted & Multi-Endpoint)
     if mode != "passive" and "nuclei" in enabled_tools and not _stop():
+        _report("Nuclei vulnerability scan")
         if allow_ip in ("127.0.0.1", "::1", "localhost"):
             nuclei_res = {"outcome": "completed"}
             result["checks"].append(
@@ -2827,8 +2863,7 @@ def scan_comprehensive(
                 }
             )
         else:
-            elapsed = time.monotonic() - started
-            nuclei_timeout = min(max(30.0, max_seconds - elapsed - 5.0), 300.0)
+            nuclei_timeout = per_stage_timeout
             nuclei_targets = [destination.url]
             for u in discovered_urls or []:
                 if u not in nuclei_targets and len(nuclei_targets) < 4:
@@ -2870,8 +2905,7 @@ def scan_comprehensive(
         try:
             from packages.scanner_adapters.integrations import toolbelt
 
-            elapsed = time.monotonic() - started
-            tb_timeout = min(max(20.0, max_seconds - elapsed - 5.0), 300.0)
+            tb_timeout = per_stage_timeout
             tb = toolbelt.run_toolbelt(
                 destination, allow_ip, toolbelt_tools, run=runner, max_seconds=tb_timeout
             )
@@ -2900,6 +2934,7 @@ def scan_comprehensive(
 
     # Stage 9: OWASP ZAP Web Security Scanner
     if mode != "passive" and "zap" in enabled_tools and not _stop():
+        _report("OWASP ZAP web scan")
         if allow_ip in ("127.0.0.1", "::1", "localhost"):
             result["checks"].append(
                 {
@@ -2909,8 +2944,7 @@ def scan_comprehensive(
                 }
             )
         else:
-            elapsed = time.monotonic() - started
-            zap_timeout = min(max(20.0, max_seconds - elapsed - 5.0), 300.0)
+            zap_timeout = per_stage_timeout
             zap_res = scan_live_zap(
                 destination,
                 allow_ip,
@@ -2934,6 +2968,7 @@ def scan_comprehensive(
     # scope configs still work) but now drives a native-arm64 nuclei verification pass instead of the
     # emulated amd64 Metasploit container, which could not finish within budget on Apple Silicon.
     if mode != "passive" and enabled_tools & {"verification", "metasploit"} and not _stop():
+        _report("Vulnerability verification")
         if allow_ip in ("127.0.0.1", "::1", "localhost"):
             result["checks"].append(
                 {
@@ -2943,8 +2978,7 @@ def scan_comprehensive(
                 }
             )
         else:
-            elapsed = time.monotonic() - started
-            verify_timeout = min(max(20.0, max_seconds - elapsed - 5.0), 300.0)
+            verify_timeout = per_stage_timeout
             verify_res = scan_live_verification(
                 destination,
                 allow_ip,

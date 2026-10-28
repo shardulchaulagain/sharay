@@ -144,6 +144,8 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
   const [depth, setDepth] = useState<number>(2);
   const [rate, setRate] = useState<number>(target.scope.request_rate);
   const [tags, setTags] = useState<string>("");
+  const [crawlerMaxPages, setCrawlerMaxPages] = useState<number>(30);
+  const [stageTimeout, setStageTimeout] = useState<number>(300);
   const [toolNmap, setToolNmap] = useState(true);
   const [toolCrawler, setToolCrawler] = useState(true);
   const [toolSensitive, setToolSensitive] = useState(true);
@@ -213,6 +215,8 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
         depth: profile === "approved_templates" ? 2 : Number(depth),
         rate: Number(rate),
         tags: tags.trim() ? tags.trim() : undefined,
+        crawler_max_pages: Number(crawlerMaxPages),
+        stage_timeout_seconds: Number(stageTimeout),
         tools: profile === "approved_templates" ? ["nuclei"] : mode === "passive" ? [] : activeTools,
       } : undefined;
 
@@ -290,6 +294,24 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
                 </div>
                 <input type="number" min={0.1} max={5000} step="any" value={rate} onChange={e => { setRate(Number(e.target.value)); invalidateReview(); }} disabled={busy} />
                 <small>Scan throughput: {rate} req/s (Operator configurable up to 5000 req/s).</small>
+              </label>
+
+              <label>
+                <div className="slider-header">
+                  <span>Crawler Max Pages</span>
+                  <span className="slider-val">{crawlerMaxPages} pages</span>
+                </div>
+                <input type="number" min={5} max={100} step={5} value={crawlerMaxPages} onChange={e => { setCrawlerMaxPages(Number(e.target.value)); invalidateReview(); }} disabled={busy || mode === "passive"} />
+                <small>Page budget for the crawl. Raise it for large sites (partial coverage is reported, never silent).</small>
+              </label>
+
+              <label>
+                <div className="slider-header">
+                  <span>Per-Stage Timeout</span>
+                  <span className="slider-val">{stageTimeout}s</span>
+                </div>
+                <input type="number" min={30} max={1800} step={30} value={stageTimeout} onChange={e => { setStageTimeout(Number(e.target.value)); invalidateReview(); }} disabled={busy} />
+                <small>Each stage gets this long on its own (not a shared pool). Raise it for big sites (up to 1800s); cancel a stuck run from the assessment page.</small>
               </label>
 
               <label>

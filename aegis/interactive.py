@@ -1033,7 +1033,10 @@ class InteractiveSession:
             ]
             alias_host = target.host[4:] if target.host.startswith("www.") else f"www.{target.host}"
             msf_hosts = [f"{target.host}:{self.target_ip}", f"{alias_host}:{self.target_ip}"]
-            deadline_sec = min(45.0, (policy.expires_at - datetime.now(UTC)).total_seconds())
+            # Let the verification run to completion (emulated Metasploit on arm64 is slow): the
+            # container's own 1800s ceiling and the scope expiry bound it, not a 45s squeeze. Cancel
+            # a stuck run from the console instead of letting a budget truncate a healthy one.
+            deadline_sec = min(1800.0, (policy.expires_at - datetime.now(UTC)).total_seconds())
             res = runner(
                 "docker.io/metasploitframework/metasploit-framework:latest",
                 tool_argv,
@@ -1238,7 +1241,7 @@ class InteractiveSession:
         if name in {"http", "curl"}:
             destination, timeout = paced_destination(url)
             started = time.monotonic()
-            connection = _connection(destination, timeout)
+            connection = _connection(destination, timeout, verify=False)
             try:
                 self.use_transport(connection)
                 parsed = urlsplit(destination.url)
@@ -1294,7 +1297,7 @@ class InteractiveSession:
             if destination.url in visited:
                 raise PolicyError("Redirect loop detected.")
             visited.add(destination.url)
-            connection = _connection(destination, timeout)
+            connection = _connection(destination, timeout, verify=False)
             try:
                 self.use_transport(connection)
                 if name == "ssl":

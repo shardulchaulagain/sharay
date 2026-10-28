@@ -171,6 +171,16 @@ def _execute_leased_assessment(
             current = db.get(Assessment, assessment_id)
             return not current or current.cancel_requested
 
+    def progress(stage_name: str) -> None:
+        # Live per-stage status so the operator sees what is running now (e.g. "Nuclei vulnerability
+        # scan") instead of a single stage label for the whole run, and can cancel a stuck stage.
+        with sessions() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            current = db.get(Assessment, assessment_id)
+            if current and current.status == "running":
+                current.stage = f"Running: {stage_name}"
+                db.commit()
+
     def emit(event):
         with sessions() as db:
             db.execute(text("BEGIN IMMEDIATE"))
@@ -237,6 +247,7 @@ def _execute_leased_assessment(
             crawler_max_pages = int(scan_cfg.get("crawler_max_pages") or 0) or None
             tools = scan_cfg.get("tools")
             max_seconds = float(scan_cfg.get("max_seconds") or 600.0)
+            stage_timeout = float(scan_cfg.get("stage_timeout_seconds") or 0) or None
             # Unified multi-stage automated pipeline (Recon + Headers + Ports + Crawler + Nuclei).
             pinned_ip = (
                 destination.host
@@ -278,6 +289,8 @@ def _execute_leased_assessment(
                 crawler_max_pages=crawler_max_pages,
                 tools=tools,
                 max_seconds=max_seconds,
+                stage_timeout=stage_timeout,
+                progress=progress,
                 auth=auth,
                 scope=scope,
                 cancelled=cancelled,
