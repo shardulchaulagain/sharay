@@ -1,4 +1,5 @@
 export type User = { id: string; username: string; role: string; organization_id: string };
+export type Credential = { id: string; name: string; kind: string; header_name: string | null; identity: string | null; subject_id: string | null; created_at: string };
 export type Session = { user: User; csrf_token: string };
 export type Collection<T> = { items: T[]; total?: number };
 export type Scope = {
@@ -164,6 +165,10 @@ export function post<T>(path: string, data: unknown = {}) {
   return api<T>(path, { method: "POST", body: JSON.stringify(data) });
 }
 
+export function del<T>(path: string) {
+  return api<T>(path, { method: "DELETE" });
+}
+
 export function projectFields(name: string, description: string) {
   name = name.trim();
   if (!name || Array.from(name).length > 160) throw new Error("Enter a project name between 1 and 160 characters.");
@@ -202,7 +207,7 @@ function scopePath(value: string) {
   return encodeURI(decoded).replace(/[?#]/g, encodeURIComponent);
 }
 
-export function laboratoryScope(url: string, included: string, excluded: string, expires: string, existing?: Scope, starts = existing?.starts_at ?? new Date().toISOString()): Scope {
+export function laboratoryScope(url: string, included: string, excluded: string, expires: string, existing?: Scope, starts = existing?.starts_at ?? new Date().toISOString(), authenticated = false, credentialRefs: string[] = []): Scope {
   const raw = url.match(/^https?:\/\/(\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::([1-9]\d*))?(\/[^?#]*)?$/i);
   if (!raw || url.length > 2048 || url.includes("\\") || [...url].some(char => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127)) throw new Error("Use a canonical HTTP or HTTPS URL without whitespace, credentials, a query string or a fragment.");
   const parsed = new URL(url);
@@ -235,13 +240,14 @@ export function laboratoryScope(url: string, included: string, excluded: string,
       allowed_origins: sameOrigin ? existing.allowed_origins : [parsed.origin],
       allowed_cidrs: sameOrigin ? existing.allowed_cidrs : defaultCidrs,
       allowed_paths: allowed, excluded_paths: excludedPaths,
+      authenticated, credential_refs: credentialRefs,
       starts_at: savedStart ?? startsAt.toISOString(), expires_at: savedExpiry ?? expiresAt.toISOString(),
     };
   }
   return {
     hosts: [host], allowed_origins: [parsed.origin],
     allowed_paths: allowed, excluded_paths: excludedPaths, allowed_cidrs: defaultCidrs,
-    categories: ["http_headers", "tls", "dns"], authenticated: false, credential_refs: [], request_rate: 150,
+    categories: ["http_headers", "tls", "dns"], authenticated, credential_refs: credentialRefs, request_rate: 150,
     max_concurrency: 5, starts_at: startsAt.toISOString(), expires_at: expiresAt.toISOString(), intrusive: false,
     approval_required: true, emergency_stop_conditions: ["operator_cancel", "scope_expired", "policy_violation"],
   };

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, date, post, setCsrf, type Session, type Overview as OverviewData, type Collection, type Assessment, type Integration, type Event, type Target, type User, type AIStatus, type AIInvestigation } from "./api";
+import { api, date, post, del, setCsrf, type Session, type Overview as OverviewData, type Collection, type Assessment, type Integration, type Event, type Target, type User, type AIStatus, type AIInvestigation, type Credential } from "./api";
 import Login from "./login";
 import { Badge, Empty, ErrorNotice, Icon, Loading, Panel, SectionHead, Shield, useResource, Pagination, ReportLinks } from "./components";
 import Projects from "./projects";
@@ -451,6 +451,49 @@ function Audit({ revision }: { revision: number }) {
   return <><SectionHead eyebrow="SYSTEM / ACCOUNTABILITY" title="Audit log">Recorded authorization, execution and data-management decisions.</SectionHead>{resource.loading ? <Loading/> : resource.error ? <ErrorNotice error={resource.error}/> : <Panel title="Organization events" action={<Badge value={resource.data?.integrity_valid ? "integrity verified" : "integrity failure"}/>}>{resource.data?.items.length ? <><div className="table-scroll"><table><thead><tr><th>Event</th><th>Actor</th><th>Resource</th><th>Recorded</th></tr></thead><tbody>{resource.data.items.map(item => <tr key={item.id}><td>{item.action?.replaceAll("_", " ") ?? item.event}</td><td className="mono">{item.actor?.slice(0, 12) ?? item.actor_id?.slice(0, 12) ?? "System"}</td><td className="mono">{item.resource_id?.slice(0, 12) ?? "—"}</td><td>{date(item.created_at ?? item.timestamp)}</td></tr>)}</tbody></table></div><Pagination offset={offset} total={resource.data.total ?? resource.data.items.length} limit={50} setOffset={setOffset}/></> : <Empty title="No audit events">Activity will be recorded as you work.</Empty>}</Panel>}</>;
 }
 
+function CredentialsPanel({ revision }: { revision: number }) {
+  const [rev, setRev] = useState(0);
+  const resource = useResource<Collection<Credential>>("/credentials", revision + rev);
+  const [kind, setKind] = useState("cookie");
+  const [error, setError] = useState<Error>();
+  const [busy, setBusy] = useState(false);
+  async function create(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = event.currentTarget; const data = new FormData(form); setBusy(true); setError(undefined);
+    const headerName = String(data.get("header_name") || "").trim();
+    const identity = String(data.get("identity") || "").trim();
+    const subjectId = String(data.get("subject_id") || "").trim();
+    try {
+      await post("/credentials", {
+        name: data.get("name"), kind, value: data.get("value"),
+        header_name: headerName || undefined, identity: identity || undefined, subject_id: subjectId || undefined,
+      });
+      form.reset(); setKind("cookie"); setRev(r => r + 1);
+    } catch (error) { setError(error instanceof Error ? error : new Error("Credential creation failed.")); } finally { setBusy(false); }
+  }
+  async function remove(id: string) {
+    setError(undefined);
+    try { await del(`/credentials/${id}`); setRev(r => r + 1); }
+    catch (error) { setError(error instanceof Error ? error : new Error("Credential deletion failed.")); }
+  }
+  const needsHeader = kind === "cookie" || kind === "header";
+  return <Panel title="Test credentials (authenticated testing)">
+    <p className="panel-note">Encrypted at rest; the value is never shown again. Group two or more credentials under distinct <strong>identities</strong> to enable the dual-identity IDOR/BOLA authorization matrix.</p>
+    {resource.loading ? <Loading/> : resource.error ? <ErrorNotice error={resource.error}/> : (resource.data?.items.length ?
+      <div className="table-scroll"><table><thead><tr><th>Name</th><th>Kind</th><th>Carrier</th><th>Identity</th><th>Owns</th><th/></tr></thead><tbody>{resource.data.items.map(c => <tr key={c.id}><td className="mono">{c.name}</td><td><Badge value={c.kind}/></td><td className="mono">{c.header_name || "—"}</td><td className="mono">{c.identity || "—"}</td><td className="mono">{c.subject_id || "—"}</td><td><button className="secondary compact" onClick={() => remove(c.id)}>Delete</button></td></tr>)}</tbody></table></div>
+      : <Empty title="No credentials stored">Add a credential below to enable authenticated testing. Group two under distinct identities for the authorization matrix.</Empty>)}
+    <form onSubmit={create} className="member-form">
+      <label>Name<input name="name" required pattern="[A-Za-z0-9._-]+" maxLength={80} placeholder="alice_session"/></label>
+      <label>Kind<select name="kind" value={kind} onChange={e => setKind(e.target.value)}><option value="cookie">Cookie</option><option value="header">Header</option><option value="bearer">Bearer token</option><option value="basic">Basic auth</option></select></label>
+      {needsHeader && <label>{kind === "cookie" ? "Cookie name" : "Header name"}<input name="header_name" required maxLength={80} placeholder={kind === "cookie" ? "session_id" : "X-Api-Key"}/></label>}
+      <label>Value<input name="value" type="password" autoComplete="off" required maxLength={8192}/><small>Stored encrypted; never displayed or returned.</small></label>
+      <label>Identity (optional)<input name="identity" pattern="[A-Za-z0-9._-]*" maxLength={80} placeholder="alice"/><small>Group credentials into one operator identity for the authorization matrix.</small></label>
+      <label>Owns resource id (optional)<input name="subject_id" maxLength={128} placeholder="101"/><small>The resource this identity owns, for cross-tenant IDOR targeting.</small></label>
+      <button className="primary" disabled={busy}>{busy ? "Storing…" : "Store credential"}</button>
+      <ErrorNotice error={error}/>
+    </form>
+  </Panel>;
+}
+
 function Settings({ user, revision, refresh }: { user: User; revision: number; refresh: () => void }) {
   const resource = useResource<Collection<User>>("/auth/members", revision);
   const [error, setError] = useState<Error>();
@@ -460,5 +503,5 @@ function Settings({ user, revision, refresh }: { user: User; revision: number; r
     try { await post("/auth/members", { username: data.get("username"), password: data.get("password"), role: data.get("role") }); form.reset(); refresh(); }
     catch (error) { setError(error instanceof Error ? error : new Error("Account creation failed.")); } finally { setBusy(false); }
   }
-  return <><SectionHead eyebrow="SYSTEM / ORGANIZATION" title="Settings">Local accounts and the boundaries of this desktop installation.</SectionHead><Panel title="Organization members">{resource.loading ? <Loading/> : resource.error ? <ErrorNotice error={resource.error}/> : <div className="table-scroll"><table><thead><tr><th>Username</th><th>Role</th></tr></thead><tbody>{resource.data?.items.map(member => <tr key={member.id}><td>{member.username}{member.id === user.id && <small>Current account</small>}</td><td><Badge value={member.role}/></td></tr>)}</tbody></table></div>}</Panel>{user.role === "owner" && <Panel title="Create local account"><form onSubmit={create} className="member-form"><label>Username<input name="username" autoComplete="off" required minLength={3} maxLength={100}/></label><label>Initial password<input name="password" type="password" autoComplete="new-password" required minLength={12}/><small>At least 12 characters. Share through your approved private channel.</small></label><label>Role<select name="role" defaultValue="viewer"><option value="viewer">Viewer</option><option value="analyst">Analyst</option><option value="security_administrator">Security administrator</option></select></label><button className="primary" disabled={busy}>{busy ? "Creating…" : "Create account"}</button><ErrorNotice error={error}/></form></Panel>}<Panel title="Desktop configuration"><dl className="facts"><div><dt>Execution profile</dt><dd>Full Spectrum (Multi-Port · Vulnerability Fuzzing · In-Scope Crawler · DNS Intelligence)</dd></div><div><dt>AI providers</dt><dd>Active · Multi-model adversarial reasoning (Gemini · Claude · OpenAI)</dd></div><div><dt>Evidence retention</dt><dd>Indefinite local retention · automatic deletion unavailable</dd></div><div><dt>Session security</dt><dd>Opaque session cookie · server-side role checks · CSRF protection</dd></div></dl></Panel></>;
+  return <><SectionHead eyebrow="SYSTEM / ORGANIZATION" title="Settings">Local accounts and the boundaries of this desktop installation.</SectionHead><Panel title="Organization members">{resource.loading ? <Loading/> : resource.error ? <ErrorNotice error={resource.error}/> : <div className="table-scroll"><table><thead><tr><th>Username</th><th>Role</th></tr></thead><tbody>{resource.data?.items.map(member => <tr key={member.id}><td>{member.username}{member.id === user.id && <small>Current account</small>}</td><td><Badge value={member.role}/></td></tr>)}</tbody></table></div>}</Panel>{user.role === "owner" && <Panel title="Create local account"><form onSubmit={create} className="member-form"><label>Username<input name="username" autoComplete="off" required minLength={3} maxLength={100}/></label><label>Initial password<input name="password" type="password" autoComplete="new-password" required minLength={12}/><small>At least 12 characters. Share through your approved private channel.</small></label><label>Role<select name="role" defaultValue="viewer"><option value="viewer">Viewer</option><option value="analyst">Analyst</option><option value="security_administrator">Security administrator</option></select></label><button className="primary" disabled={busy}>{busy ? "Creating…" : "Create account"}</button><ErrorNotice error={error}/></form></Panel>}<CredentialsPanel revision={revision}/><Panel title="Desktop configuration"><dl className="facts"><div><dt>Execution profile</dt><dd>Full Spectrum (Multi-Port · Vulnerability Fuzzing · In-Scope Crawler · DNS Intelligence)</dd></div><div><dt>AI providers</dt><dd>Active · Multi-model adversarial reasoning (Gemini · Claude · OpenAI)</dd></div><div><dt>Evidence retention</dt><dd>Indefinite local retention · automatic deletion unavailable</dd></div><div><dt>Session security</dt><dd>Opaque session cookie · server-side role checks · CSRF protection</dd></div></dl></Panel></>;
 }
