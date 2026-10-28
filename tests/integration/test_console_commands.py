@@ -204,6 +204,18 @@ class ConsoleCommandsTests(unittest.TestCase):
         process.kill.assert_called_once()
         self.assertIsNone(self.session._process)
 
+    def test_verify_command_dispatches_to_callback(self):
+        verify = Mock(return_value="[+] REPRODUCED -> finding CONFIRMED")
+        out = self.session.execute(
+            "verify finding-123", scope=self.scope, owned=True, operator={}, retest=self.retest, verify=verify
+        )
+        verify.assert_called_once_with("finding-123")
+        self.assertIn("CONFIRMED", out)
+        # Without a verify callback wired, it reports the dispatch rather than erroring.
+        self.assertIn("re-verification", self.session.execute(
+            "verify finding-123", scope=self.scope, owned=True, operator={}, retest=self.retest
+        ))
+
     def test_tls_uses_pinned_destination_and_scope_hostname(self):
         self.session.target_url = "https://example.com/"
         self.session.target_ip = "93.184.216.34"

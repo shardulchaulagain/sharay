@@ -1531,6 +1531,73 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     poc=replay_poc,
                 )
 
+        def verify_single_finding(finding_id: str) -> str:
+            # Targeted re-check of ONE finding: replay exactly how it was detected (its stored PoC)
+            # against the live target with 3x byte-identical replays + a negative-control canary, and
+            # confirm it only if it reproduces -- no full re-scan. Native HTTP, so no container VM.
+            from packages.scanner_adapters.reproducer import DeterministicReproducer, FindingState
+
+            with sessions() as vdb:
+                vdb.execute(text("BEGIN IMMEDIATE"))
+                actor, _ = authenticate(vdb, request.cookies.get(COOKIE))
+                require_role(actor, *SCAN_ROLES)
+                finding = owned(vdb, Finding, finding_id, actor)
+                if finding.target_id != session.target_id:
+                    raise SessionError("Finding belongs to a different session target.")
+                poc: dict = {}
+                for ev in finding.evidence or []:
+                    if isinstance(ev.data, dict) and isinstance(ev.data.get("poc"), dict):
+                        poc = ev.data["poc"]
+                        break
+                if not poc:
+                    raise SessionError(
+                        "This finding has no replayable proof-of-concept (it is an observational "
+                        "finding such as a header or TLS check). Use 'retest' for a full re-scan, or "
+                        "triage it as inconclusive."
+                    )
+                param = poc.get("parameter") or "id"
+                payload = poc.get("payload") or "1"
+                method = (poc.get("method") or "GET").upper()
+                canary = poc.get("canary")
+                headers = dict(poc.get("headers") or {})
+                extra = dict(poc.get("extra_params") or {})
+                aff_url = finding.affected_url or poc.get("url") or session.target_url
+                res = DeterministicReproducer().verify_finding(
+                    base_url=aff_url, fuzz_param=param, active_payload=payload, canary=canary,
+                    method=method, headers=headers, extra_params=extra,
+                )
+                lines = [
+                    f"Targeted re-verification of finding {finding_id[:8]} ({finding.category}) at {aff_url}",
+                    f"Method {method} | parameter '{param}' | payload '{payload}'"
+                    + (f" | canary '{canary}'" if canary else ""),
+                    f"Replays matched: {res.replays_passed}/{res.total_replays} | negative control held: "
+                    f"{res.negative_control_passed} | differential {res.differential_score:.2f} | "
+                    f"reproducibility {res.reproducibility_score:.2f}",
+                ]
+                for a in res.replay_attempts:
+                    lines.append(
+                        f"  replay#{a.index}: HTTP {a.status_code}, {a.content_length}B, "
+                        f"{a.elapsed_ms:.0f}ms, oracle={'match' if a.matched_oracle else 'no-match'}"
+                    )
+                from aegis.models import FindingHistory
+
+                if res.state == FindingState.REPRODUCED:
+                    finding.status, finding.confidence, finding.last_seen = "confirmed", "high", time.time()
+                    vdb.add(FindingHistory(
+                        finding_id=finding.id, status="confirmed", actor=actor.id,
+                        reason="Operator targeted re-verification: 3x replay + negative control reproduced",
+                    ))
+                    audit(vdb, actor.organization_id, actor.id, "finding.verified", finding.id, {"state": "REPRODUCED"})
+                    vdb.commit()
+                    lines += ["", "[+] REPRODUCED → finding CONFIRMED (byte-identical replays held, negative control clean)."]
+                else:
+                    audit(vdb, actor.organization_id, actor.id, "finding.verify_failed", finding.id,
+                          {"reason": res.demotion_reason or "not reproduced"})
+                    vdb.commit()
+                    lines += ["", f"[-] Not reproduced; finding stays '{finding.status}'. "
+                              f"Reason: {res.demotion_reason or 'no significant differential vs baseline'}."]
+                return "\n".join(lines)
+
         try:
             session.write(
                 payload.data.encode("utf-8"),
@@ -1544,6 +1611,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     playbook=get_playbook,
                     poc=replay_poc,
                     exploit=run_exploit,
+                    verify=verify_single_finding,
                 ),
             )
         except SessionError as exc:

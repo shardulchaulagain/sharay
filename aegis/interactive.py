@@ -741,10 +741,11 @@ class InteractiveSession:
     def local_command(self, command: str) -> str:
         if command == "help":
             return (
-                "Commands: probe <url>, dns <domain>, ssl <host>, beacon, retest <id>, poc <id>, msf <mod>, exploit <id>, http, curl, whoami, clear, help\n"
+                "Commands: probe <url>, dns <domain>, ssl <host>, beacon, verify <id>, retest <id>, poc <id>, msf <mod>, exploit <id>, http, curl, whoami, clear, help\n"
                 "SHARAY Scoped Operator Takeover Console Commands:\n"
+                "  verify <finding-id>            Re-check this one finding (replay its PoC, confirm only if reproduced)\n"
                 "  poc <finding-id>               Replay research-grade PoC with live oracle verification & snapshot\n"
-                "  retest <finding-id>            Queue 3x reproducer with negative control canaries\n"
+                "  retest <finding-id>            Queue a full re-scan (3x reproducer with negative control canaries)\n"
                 "  playbook <finding-id>          Display step-by-step WSTG/CWE replication protocol\n"
                 "  msf <module> [check|run] [K=V] Execute Metasploit module via container runner\n"
                 "  exploit <finding-id>           Run targeted exploit verification against pinned target\n"
@@ -859,6 +860,7 @@ class InteractiveSession:
         playbook: Callable[[str], str] | None = None,
         poc: Callable[[str], str] | None = None,
         exploit: Callable[[str], str] | None = None,
+        verify: Callable[[str], str] | None = None,
     ) -> str:
         parts = shlex.split(command)
         if not parts:
@@ -894,6 +896,10 @@ class InteractiveSession:
             if exploit:
                 return exploit(parts[1])
             return f"Targeted exploit verification for finding {parts[1]} dispatched."
+        if name == "verify" and len(parts) == 2:
+            if verify:
+                return verify(parts[1])
+            return f"Targeted re-verification for finding {parts[1]} dispatched."
 
         target = check_execution_url(policy, self.target_url, owned=owned)
 

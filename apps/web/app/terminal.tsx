@@ -507,11 +507,11 @@ export default function OperatorTerminal({ target, finding, initialSession, init
                 <div className="focus-triage">
                   <span className="eyebrow">OPERATOR VERIFICATION DECISION</span>
                   <div className="triage-buttons">
-                    <button className="primary compact" disabled={triageBusy || status !== "connected" || busy} onClick={() => insertCommand(`retest ${finding.id}`, true)}>Verify to Confirm (retest)</button>
+                    <button className="primary compact" disabled={triageBusy || status !== "connected" || busy} onClick={() => insertCommand(`verify ${finding.id}`, true)}>Verify to Confirm</button>
                     <button className="secondary compact" disabled={triageBusy} onClick={() => void triageFinding("false_positive")}>Mark False Positive</button>
                     <button className="secondary compact" disabled={triageBusy} onClick={() => void triageFinding("inconclusive")}>Mark Inconclusive</button>
                   </div>
-                  <p className="triage-hint">Confirmation is earned by evidence: a retest re-runs the verification and the finding is confirmed automatically only if the reproducer reproduces it. It cannot be set by hand.</p>
+                  <p className="triage-hint">Confirmation is earned by evidence: &quot;Verify to Confirm&quot; replays exactly how this one vulnerability was detected (3× byte-identical replays + a negative-control canary) against the live target and confirms it only if it reproduces. It cannot be set by hand.</p>
                   {triageNotice && <p className="triage-notice">{triageNotice}</p>}
                 </div>
               </div>
