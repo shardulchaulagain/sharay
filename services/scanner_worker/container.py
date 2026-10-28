@@ -1158,7 +1158,17 @@ def run_with_egress(
     try:
         applied = _machine_ssh(up, timeout=min(15.0, max_seconds))
         if applied.returncode != 0:
-            raise IsolationError("Could not apply the egress allowlist; nothing was run.")
+            err = (applied.stderr or "").strip()
+            if "not running" in err.lower():
+                raise IsolationError(
+                    "Egress enforcement needs the podman VM running. Start it with "
+                    "'podman machine start', then re-run the scan."
+                )
+            raise IsolationError(
+                f"Could not apply the egress allowlist; nothing was run. ({err[:300]})"
+                if err
+                else "Could not apply the egress allowlist; nothing was run."
+            )
         remaining = max_seconds - (time.monotonic() - started)
         if remaining > 0:
             try:
