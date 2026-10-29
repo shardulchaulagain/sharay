@@ -23,6 +23,8 @@ from packages.security_policies import Destination
 _MAX_PAGE_BYTES = 512 * 1024  # 512 KB per page
 _MAX_DEPTH = 5
 _MAX_PAGES_CAP = 300  # large-surface ceiling for authorized big-site scopes (Sector O9)
+# Fetching these while authenticated ends the session; skip them so the scan stays logged in.
+_SESSION_DESTROYING = re.compile(r"(?:^|/)(?:logout|signout|logoff|signoff|log-out|sign-out)\b", re.I)
 
 _SENSITIVE_PROBES = [
     ("/robots.txt", "robots"),
@@ -540,6 +542,12 @@ def crawl(
         discovered_endpoints.add(endpoint_path)
         spider_extracted_endpoints.add(endpoint_path)
         discovered_urls.add(clean_url)
+
+        # Never fetch a logout/sign-out link while authenticated: visiting it destroys the session, so
+        # every later authenticated probe (crawl + active audit) would silently revert to anonymous.
+        # The endpoint is still recorded above; we just don't trigger it.
+        if (session_cookies or active_auth_headers) and _SESSION_DESTROYING.search(endpoint_path):
+            continue
 
         try:
             status, headers, body = _fetch_page(
