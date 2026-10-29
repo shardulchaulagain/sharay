@@ -50,5 +50,24 @@ class AuthenticatedInjectionTests(unittest.TestCase):
         )
 
 
+    def test_destructive_endpoints_are_not_fuzzed(self):
+        probed = []
+
+        def fake(destination, allow_ip, method, path, headers=None, body=None, timeout=3.5, auth=None):
+            probed.append(path.split("?")[0])
+            return 200, {}, "<html>ok</html>", 1.0
+
+        with mock.patch.object(vuln_scanner, "_request_endpoint", side_effect=fake):
+            vuln_scanner.audit_deep_vulnerabilities(
+                self.dest, "127.0.0.1",
+                discovered_endpoints=["/setup.php", "/logout.php", "/vulnerabilities/sqli/"],
+                discovered_parameters=["id"], timeout=2,
+            )
+        # setup/logout are destructive (reset DB / end session); they must never be actively fuzzed.
+        self.assertFalse(any("/setup.php" in p for p in probed), "setup.php must not be fuzzed")
+        self.assertFalse(any("/logout.php" in p for p in probed), "logout.php must not be fuzzed")
+        self.assertTrue(any("/vulnerabilities/sqli/" in p for p in probed), "the real endpoint is fuzzed")
+
+
 if __name__ == "__main__":
     unittest.main()

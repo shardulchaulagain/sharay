@@ -19,6 +19,11 @@ from urllib.parse import urlencode, urlsplit
 
 from packages.security_policies import Destination
 
+# Endpoints whose active fuzzing is destructive (resets the app DB / config) or ends the session.
+_DESTRUCTIVE_ENDPOINT = re.compile(
+    r"(?:^|/)(?:setup|install|reset|configure|config\.php|logout|signout|logoff)\b", re.I
+)
+
 _SENSITIVE_FILES_DATABASE = [
     ("/.git/HEAD", "Exposed .git Repository Directory", "critical", "CWE-538", r"ref:\s*refs/heads/"),
     ("/.git/config", "Exposed .git Repository Configuration", "critical", "CWE-538", r"\[core\]|\[remote "),
@@ -421,7 +426,13 @@ def audit_deep_vulnerabilities(
         )
     )[:15]
     dest_path = urlsplit(destination.url).path or "/"
-    clean_endpoints = [ep for ep in discovered_endpoints if ep not in ("/", "/robots.txt", "/sitemap.xml")]
+    # Never actively fuzz install/reset/logout endpoints: POSTing payloads to them resets the app's
+    # database or ends the session, which is destructive and silently breaks every later probe.
+    clean_endpoints = [
+        ep
+        for ep in discovered_endpoints
+        if ep not in ("/", "/robots.txt", "/sitemap.xml") and not _DESTRUCTIVE_ENDPOINT.search(ep)
+    ]
     if dest_path and dest_path not in clean_endpoints:
         clean_endpoints.insert(0, dest_path)
     test_endpoints = clean_endpoints[:25] if clean_endpoints else ["/"]
