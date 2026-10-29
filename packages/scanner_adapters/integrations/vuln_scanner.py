@@ -450,8 +450,9 @@ def audit_deep_vulnerabilities(
 
     test_endpoints = sorted(clean_endpoints, key=_rank)[:25] if clean_endpoints else ["/"]
 
-    canary_nonce = f"sharayxss{hashlib.md5(destination.host.encode()).hexdigest()[:6]}"
-    xss_payload = f'"><sharay_canary_{canary_nonce}>'
+    # Random per-run nonce: a canary stored by a PRIOR scan must not make this scan's reflected-XSS
+    # check fire (which would mislabel persisted data as a fresh reflection).
+    canary_nonce = f"sharayxss{os.urandom(4).hex()}"
 
     lab_sec = os.environ.get("SHARAY_DVWA_SECURITY", os.environ.get("SHARAY_LAB_SECURITY_LEVEL", "high"))
 
@@ -461,6 +462,10 @@ def audit_deep_vulnerabilities(
         curl_hdrs = f' -H "Cookie: security={lab_sec}"' if lab_hdrs else ""
         for param in test_params:
             try:
+                # Per-(endpoint,param) canary so a value stored by one param (e.g. a guestbook) can
+                # never be mistaken for a reflection of another param's probe (false-positive cascade).
+                tag = hashlib.md5(f"{ep}:{param}".encode()).hexdigest()[:6]
+                xss_payload = f'"><sharay_canary_{canary_nonce}_{tag}>'
                 # A. Reflected Cross-Site Scripting (XSS)
                 xss_dict = {param: xss_payload}
                 if is_lab_endpoint or param == "id":
@@ -504,6 +509,48 @@ def audit_deep_vulnerabilities(
                             ],
                         }
                     )
+                elif is_lab_endpoint or len(test_params) > 1:
+                    # A2. Stored XSS: POST the canary (filling the other discovered params + common
+                    # submit buttons so the form actually stores), then GET the page back; if the canary
+                    # survives unencoded on re-fetch it was persisted. Only when it did not reflect
+                    # inline above (that was the reflected case).
+                    stored_body = {param: xss_payload}
+                    for other in test_params:
+                        if other != param:
+                            stored_body.setdefault(other, "sharay")
+                    for submit in ("Submit", "btnSign", "Sign Guestbook", "Save"):
+                        stored_body.setdefault(submit, submit)
+                    _req(
+                        destination, allow_ip, "POST", ep,
+                        body=urlencode(stored_body),
+                        headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=timeout,
+                    )
+                    _, _, back, _ = _req(destination, allow_ip, "GET", ep, timeout=timeout)
+                    if xss_payload in back:
+                        aff_url = f"{destination.origin}{ep}"
+                        findings.append(
+                            {
+                                "category": "cross_site_scripting",
+                                "severity": "high",
+                                "title": f"Stored Cross-Site Scripting (XSS) in Parameter '{param}'",
+                                "description": f"A canary payload submitted to {ep} via '{param}' was persisted and returned unencoded on a later page load, confirming stored XSS.",
+                                "target_url": aff_url,
+                                "affected_url": aff_url,
+                                "fingerprint": hashlib.sha256(
+                                    f"storedxss_{destination.host}_{ep}_{param}".encode()
+                                ).hexdigest(),
+                                "cwe_id": "CWE-79",
+                                "status": "suspected",
+                                "lifecycle_state": "CANDIDATE",
+                                "remediation": "Encode stored user input on output and enforce a strict Content-Security-Policy.",
+                                "poc": {
+                                    "method": "POST", "url": aff_url, "parameter": param,
+                                    "payload": xss_payload, "canary": xss_payload, "headers": lab_hdrs,
+                                    "reproduction_steps": f"POST '{param}={xss_payload}' to {aff_url}, then reload the page and confirm the payload renders unencoded.",
+                                },
+                                "evidence": [{"endpoint": ep, "parameter": param, "payload": xss_payload, "stored": True}],
+                            }
+                        )
 
                 # B. Active SQL Injection (Error-Based MariaDB/MySQL/PostgreSQL/SQLite)
                 sql_regex = r"(?i)(SQL syntax.*(?:MySQL|MariaDB)|Warning.*(?:mysql_|mysqli_)|valid (?:MySQL|MariaDB) result|MySqlClient\.|PostgreSQL.*ERROR|Warning.*\Wpg_|valid PostgreSQL result|Npgsql\.|Driver.*SQL[\-\_\ ]*Server|OLE DB.*SQL Server|\bORA-\d{5}|Oracle error|SQLite/JDBCDriver|SQLite\.Exception|System\.Data\.SQLite\.SQLiteException|syntax error.*mariadb|check the manual that corresponds to your (?:MySQL|MariaDB)|unclosed quotation mark|quoted string not properly terminated)"

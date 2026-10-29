@@ -50,6 +50,30 @@ class AuthenticatedInjectionTests(unittest.TestCase):
         )
 
 
+    def test_stored_xss_detected_without_false_reflected_cascade(self):
+        # A guestbook that persists input and shows it back: the stored canary must be reported as
+        # Stored XSS, and must NOT make every other param's reflected check fire (per-param canary).
+        import urllib.parse as _up
+
+        stored = {"value": ""}
+
+        def fake(destination, allow_ip, method, path, headers=None, body=None, timeout=3.5, auth=None):
+            if method == "POST" and body:
+                stored["value"] = _up.unquote_plus(body)  # persist the full submitted payload
+                return 200, {}, "saved", 1.0
+            # GET returns whatever was stored (the guestbook), reflecting nothing from the query.
+            return 200, {}, f"<div>{stored['value']}</div>", 1.0
+
+        with mock.patch.object(vuln_scanner, "_request_endpoint", side_effect=fake):
+            res = vuln_scanner.audit_deep_vulnerabilities(
+                self.dest, "127.0.0.1", discovered_endpoints=["/vulnerabilities/xss_s/"],
+                discovered_parameters=["txtName", "mtxMessage"], timeout=2,
+                auth={"cookies": {"PHPSESSID": "x"}, "headers": {}},
+            )
+        xss = [f for f in res["findings"] if "XSS" in f.get("title", "")]
+        self.assertTrue(any("Stored" in f["title"] for f in xss), "stored XSS must be detected")
+        self.assertFalse(any("Reflected" in f["title"] for f in xss), "no reflected false positives")
+
     def test_destructive_endpoints_are_not_fuzzed(self):
         probed = []
 
