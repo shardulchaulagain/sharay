@@ -2376,6 +2376,7 @@ def scan_comprehensive(
                 discovered_endpoints=discovered_endpoints,
                 discovered_parameters=discovered_parameters,
                 timeout=3.5,
+                auth=auth if isinstance(auth, dict) else None,
             )
             result["observations"].extend(vuln_res.get("observations", []))
             result["findings"].extend(vuln_res.get("findings", []))

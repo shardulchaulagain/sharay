@@ -6,6 +6,7 @@ and technology risk verification across all endpoints discovered by the crawler.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import http.client
 import os
@@ -92,8 +93,13 @@ def _request_endpoint(
     headers: dict[str, str] | None = None,
     body: str | None = None,
     timeout: float = 3.5,
+    auth: dict | None = None,
 ) -> tuple[int, dict[str, str], str, float]:
-    """Execute raw HTTP request pinned to allow_ip, returning (status, headers, body, elapsed_ms)."""
+    """Execute raw HTTP request pinned to allow_ip, returning (status, headers, body, elapsed_ms).
+
+    `auth` carries authenticated-testing cookies/headers (e.g. a login session). Without the session
+    cookie, a login-gated app redirects every injection probe to its login page and no vulnerability
+    is ever reached -- so the session is merged into every request here, not just the crawl."""
     is_https = destination.scheme == "https"
     target_host = destination.host
     target_port = destination.port
@@ -104,16 +110,26 @@ def _request_endpoint(
         "Accept": "*/*",
         "Connection": "close",
     }
+    cookie_bits: list[str] = []
+    auth_cookies = (auth.get("cookies") or {}) if auth else {}
+    # Only inject the env default DVWA security level when the caller's auth did not already provide a
+    # 'security' cookie -- otherwise a duplicate (e.g. security=high + security=low) makes PHP pick the
+    # wrong level and the lab's injection never triggers.
     if (
         "vulnerabilities" in destination.url
         or "dvwa" in destination.host.lower()
         or "vulnerabilities" in path
         or target_port == 4280
-    ):
+    ) and "security" not in auth_cookies:
         sec_level = os.environ.get(
             "SHARAY_DVWA_SECURITY", os.environ.get("SHARAY_LAB_SECURITY_LEVEL", "high")
         )
-        req_headers["Cookie"] = f"security={sec_level}"
+        cookie_bits.append(f"security={sec_level}")
+    cookie_bits += [f"{k}={v}" for k, v in auth_cookies.items()]
+    if auth:
+        req_headers.update(auth.get("headers") or {})
+    if cookie_bits:
+        req_headers["Cookie"] = "; ".join(cookie_bits)
     if headers:
         req_headers.update(headers)
 
@@ -338,15 +354,22 @@ def audit_deep_vulnerabilities(
     discovered_endpoints: list[str],
     discovered_parameters: list[str],
     timeout: float = 3.5,
+    auth: dict | None = None,
 ) -> dict[str, Any]:
-    """Execute active security audits and parameter fuzzing across all discovered endpoints."""
+    """Execute active security audits and parameter fuzzing across all discovered endpoints.
+
+    `auth` (authenticated-testing cookies/headers) is bound to every probe so a login-gated app's
+    vulnerable endpoints are actually reached instead of redirecting to its login page."""
     findings: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
+    # Bind the session onto every probe request made inside this audit. Only pass the kwarg when auth
+    # is set, so the unauthenticated path (and any test double with the old signature) is unchanged.
+    _req = functools.partial(_request_endpoint, auth=auth) if auth else _request_endpoint
 
     fails = 0
     for path, title, severity, cwe, pattern in _SENSITIVE_FILES_DATABASE:
         try:
-            status, _, body, _ = _request_endpoint(
+            status, _, body, _ = _req(
                 destination, allow_ip, "GET", path, timeout=min(timeout, 1.5)
             )
             fails = 0
@@ -420,7 +443,7 @@ def audit_deep_vulnerabilities(
                     xss_dict["Submit"] = "Submit"
                 query = urlencode(xss_dict)
                 fuzz_path = f"{ep}?{query}" if "?" not in ep else f"{ep}&{query}"
-                status, _, body, _ = _request_endpoint(
+                status, _, body, _ = _req(
                     destination, allow_ip, "GET", fuzz_path, timeout=timeout
                 )
                 if xss_payload in body:
@@ -465,7 +488,7 @@ def audit_deep_vulnerabilities(
                     if is_lab_endpoint or param == "id":
                         sql_dict["Submit"] = "Submit"
                     sql_fuzz = f"{ep}?{urlencode(sql_dict)}"
-                    s_status, _, s_body, _ = _request_endpoint(
+                    s_status, _, s_body, _ = _req(
                         destination, allow_ip, "GET", sql_fuzz, timeout=timeout
                     )
                     method_used = "GET"
@@ -474,9 +497,7 @@ def audit_deep_vulnerabilities(
                     if not matched_sql:
                         p_body = urlencode(sql_dict)
                         p_headers = {"Content-Type": "application/x-www-form-urlencoded"}
-                        if lab_hdrs:
-                            p_headers.update(lab_hdrs)
-                        s_status, _, s_body_post, _ = _request_endpoint(
+                        s_status, _, s_body_post, _ = _req(
                             destination, allow_ip, "POST", ep, body=p_body, headers=p_headers, timeout=timeout
                         )
                         if re.search(sql_regex, s_body_post):
@@ -552,7 +573,7 @@ def audit_deep_vulnerabilities(
                         "....//....//....//etc/passwd",
                     ):
                         lfi_fuzz = f"{ep}?{urlencode({param: lfi_payload})}"
-                        l_status, _, l_body, _ = _request_endpoint(
+                        l_status, _, l_body, _ = _req(
                             destination, allow_ip, "GET", lfi_fuzz, timeout=timeout
                         )
                         if re.search(r"root:.*:0:0:", l_body):
@@ -612,10 +633,10 @@ def audit_deep_vulnerabilities(
                     ssrf_payload = "http://127.0.0.1:80/"
                     ssrf_fuzz = f"{ep}?{urlencode({param: ssrf_payload})}"
                     # Baseline request to ensure signatures are not static website text
-                    base_status, _, base_body, _ = _request_endpoint(
+                    base_status, _, base_body, _ = _req(
                         destination, allow_ip, "GET", ep, timeout=timeout
                     )
-                    ss_status, _, ss_body, _ = _request_endpoint(
+                    ss_status, _, ss_body, _ = _req(
                         destination, allow_ip, "GET", ssrf_fuzz, timeout=timeout
                     )
                     # Strict internal loopback connection error traces (explicit connection attempts)
@@ -682,7 +703,7 @@ def audit_deep_vulnerabilities(
                         if is_lab_endpoint or "ping" in ep or "exec" in ep:
                             cmd_dict["Submit"] = "Submit"
                         cmd_fuzz = f"{ep}?{urlencode(cmd_dict)}"
-                        c_status, _, c_body, _ = _request_endpoint(
+                        c_status, _, c_body, _ = _req(
                             destination, allow_ip, "GET", cmd_fuzz, timeout=timeout
                         )
                         method_used = "GET"
@@ -697,9 +718,7 @@ def audit_deep_vulnerabilities(
                         if not body_matched:
                             p_body = urlencode(cmd_dict)
                             p_headers = {"Content-Type": "application/x-www-form-urlencoded"}
-                            if lab_hdrs:
-                                p_headers.update(lab_hdrs)
-                            c_status, _, c_body_post, _ = _request_endpoint(
+                            c_status, _, c_body_post, _ = _req(
                                 destination,
                                 allow_ip,
                                 "POST",
@@ -777,7 +796,7 @@ def audit_deep_vulnerabilities(
                 ):
                     redir_payload = "https://example.com"
                     redir_fuzz = f"{ep}?{urlencode({param: redir_payload})}"
-                    r_status, r_hdrs, _, _ = _request_endpoint(
+                    r_status, r_hdrs, _, _ = _req(
                         destination, allow_ip, "GET", redir_fuzz, timeout=timeout
                     )
                     loc = r_hdrs.get("location", "")
@@ -918,7 +937,7 @@ def audit_deep_vulnerabilities(
 
     # 3. Header Security Audit (CSP, HSTS, X-Frame-Options, Information Leaks)
     try:
-        status, headers, _, _ = _request_endpoint(destination, allow_ip, "GET", "/", timeout=timeout)
+        status, headers, _, _ = _req(destination, allow_ip, "GET", "/", timeout=timeout)
         # Follow one same-origin redirect so posture is audited on the real page, not the 301 stub.
         if status in (301, 302, 303, 307, 308):
             parts = urlsplit(headers.get("location", ""))
@@ -928,7 +947,7 @@ def audit_deep_vulnerabilities(
             )
             if same_origin and parts.path:
                 hop = f"{parts.path}?{parts.query}" if parts.query else parts.path
-                status, headers, _, _ = _request_endpoint(destination, allow_ip, "GET", hop, timeout=timeout)
+                status, headers, _, _ = _req(destination, allow_ip, "GET", hop, timeout=timeout)
         csp = headers.get("content-security-policy")
         hsts = headers.get("strict-transport-security")
         xfo = headers.get("x-frame-options")
