@@ -2134,53 +2134,75 @@ def scan_comprehensive(
                 HeadlessBrowserDriver,
                 SPARouteExtractor,
             )
+            from packages.scanner_adapters.integrations.crawler import _fetch_page
 
             browser = HeadlessBrowserDriver()
             spa_extractor = SPARouteExtractor()
             sink_tracker = DOMSinkTracker()
+            auth_cookies = dict(auth["cookies"]) if isinstance(auth, dict) and auth.get("cookies") else None
+            auth_hdrs = dict(auth["headers"]) if isinstance(auth, dict) and auth.get("headers") else None
             rendered = browser.render_dom(destination.url, timeout_seconds=8)
             dom_html = rendered.get("dom", "")
-            if dom_html:
-                spa_routes = spa_extractor.extract_routes(dom_html, destination.url)
-                for r in spa_routes:
-                    if r not in discovered_endpoints:
-                        discovered_endpoints.append(r)
-                dom_findings = sink_tracker.analyze(dom_html, destination.url)
-                for df in dom_findings:
-                    fp = hashlib.sha256(
-                        f"dom_xss:{destination.host}:{df.get('source')}:{df.get('sink')}".encode()
-                    ).hexdigest()
+            spa_routes = spa_extractor.extract_routes(dom_html, destination.url) if dom_html else []
+            for r in spa_routes:
+                if r not in discovered_endpoints:
+                    discovered_endpoints.append(r)
+            # Analyze the authenticated client source of every crawled page (not just the root): a
+            # headless --dump-dom cannot carry the login session, so fetch each page with the session
+            # and run static source->sink tracking over its inline scripts. This is what surfaces
+            # DOM-based XSS on login-gated, per-page sinks (e.g. location.href -> document.write).
+            dom_sink_total = 0
+            seen_dom = set()
+            dom_targets = [destination.url]
+            for ep in discovered_endpoints[:20]:
+                url = ep if ep.startswith("http") else destination.origin + (ep if ep.startswith("/") else "/" + ep)
+                if _in_scope(url) and url not in dom_targets:
+                    dom_targets.append(url)
+            for url in dom_targets[:20]:
+                if _stop():
+                    break
+                page_html = dom_html if url == destination.url and dom_html else ""
+                if not page_html:
+                    try:
+                        _, _, page_html = _fetch_page(
+                            url, destination.host, destination.port, allow_ip,
+                            destination.scheme == "https", timeout=4.0,
+                            session_cookies=auth_cookies, auth_headers=auth_hdrs,
+                        )
+                    except Exception:
+                        continue
+                for df in sink_tracker.analyze(page_html, url):
+                    key = (url, df.get("source"), df.get("sink"))
+                    if key in seen_dom:
+                        continue
+                    seen_dom.add(key)
+                    dom_sink_total += 1
                     result["findings"].append(
                         {
                             "category": "cross_site_scripting",
                             "severity": "high",
-                            "title": f"DOM-Based XSS Sink Flow Identified ({df.get('source')} -> {df.get('sink')})",
-                            "description": f"Client-side DOM sink tracking identified an untrusted source-to-sink flow at {destination.url}. {df.get('evidence', '')}",
-                            "target_url": destination.url,
-                            "fingerprint": fp,
+                            "title": f"DOM-Based XSS Sink Flow ({df.get('source')} -> {df.get('sink')})",
+                            "description": f"Client-side source-to-sink tracking identified an untrusted DOM flow at {url}. {df.get('evidence', '')}",
+                            "target_url": url,
+                            "fingerprint": hashlib.sha256(
+                                f"dom_xss:{destination.host}:{url}:{df.get('source')}:{df.get('sink')}".encode()
+                            ).hexdigest(),
                             "cwe_id": "CWE-79",
                             "confidence": df.get("confidence", "high"),
                             "status": "suspected",
-                            "remediation": "Sanitize and encode all untrusted client inputs before writing to DOM sinks (innerHTML, eval, document.write).",
-                            "affected_url": destination.url,
-                            "poc": f"{destination.url}#{df.get('source', 'input')}=<script>alert(1)</script>",
+                            "remediation": "Sanitize and encode untrusted client input before writing to DOM sinks (innerHTML, eval, document.write).",
+                            "affected_url": url,
+                            "poc": f"{url}#<script>alert(1)</script>",
                         }
                     )
-                result["checks"].append(
-                    {
-                        "category": "headless_browser",
-                        "status": "completed",
-                        "detail": f"Headless DOM analysis inspected client tree: mapped {len(spa_routes)} dynamic SPA route(s), identified {len(dom_findings)} DOM sink flow(s).",
-                    }
-                )
-            else:
-                result["checks"].append(
-                    {
-                        "category": "headless_browser",
-                        "status": "completed",
-                        "detail": "Headless browser DOM analysis completed (static HTML fallback active).",
-                    }
-                )
+            result["checks"].append(
+                {
+                    "category": "headless_browser",
+                    "status": "completed",
+                    "detail": f"DOM analysis over {len(dom_targets)} authenticated page(s): mapped "
+                    f"{len(spa_routes)} SPA route(s), identified {dom_sink_total} DOM sink flow(s).",
+                }
+            )
         except Exception as exc:
             result["checks"].append(
                 {

@@ -70,6 +70,19 @@ class BrowserDriverAcceptanceTests(unittest.TestCase):
         self.assertEqual(findings[0]["source"], "location.search")
         self.assertEqual(findings[0]["sink"], "eval")
 
+    def test_dom_sink_tracker_detects_dvwa_location_href_to_document_write(self):
+        # DVWA's DOM XSS module: document.location.href -> document.write unencoded.
+        vulnerable_html = """
+        <script>
+        if (document.location.href.indexOf("default=") >= 0) {
+            var lang = document.location.href.substring(document.location.href.indexOf("default=")+8);
+            document.write("<option value='" + decodeURI(lang) + "'>" + decodeURI(lang) + "</option>");
+        }
+        </script>
+        """
+        findings = DOMSinkTracker().analyze(vulnerable_html, base_url="http://127.0.0.1/vulnerabilities/xss_d/")
+        self.assertTrue(any(f["source"] == "location.href" and f["sink"] == "document.write" for f in findings))
+
     def test_dom_sink_tracker_benign_code_produces_no_findings(self):
         safe_html = """
         <script>
