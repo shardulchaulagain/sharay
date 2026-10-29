@@ -139,22 +139,34 @@ class BrowserDriverAcceptanceTests(unittest.TestCase):
         self.assertEqual(mock_run.call_count, 1)
 
     @patch("subprocess.run")
-    def test_headless_browser_driver_xss_validation(self, mock_run):
+    def test_headless_browser_driver_xss_validation_confirms_unescaped_element(self, mock_run):
+        # The canary survives as a real element -> the sink wrote it unescaped -> confirmed.
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="<html><body><div id='target'><span id='sharay_dom_probe_999'></span></div></body></html>",
+            stdout="<html><body><div id='target'><sharay_dom_probe_999></sharay_dom_probe_999></div></body></html>",
             stderr="",
         )
         driver = HeadlessBrowserDriver(browser_binary="/usr/bin/mock-chrome")
         validation = driver.verify_dom_xss(
-            target_url="https://app.example.com/spa",
-            parameter="test",
-            canary="sharay_dom_probe_999",
+            target_url="https://app.example.com/spa", canary="sharay_dom_probe_999",
         )
-
         self.assertEqual(validation["status"], "verified")
-        self.assertEqual(validation["canary"], "sharay_dom_probe_999")
         self.assertTrue(validation["canary_reflected"])
+
+    @patch("subprocess.run")
+    def test_headless_browser_driver_xss_not_confirmed_when_escaped(self, mock_run):
+        # The canary is HTML-escaped (safe output) -> not confirmed.
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="<html><body>&lt;sharay_dom_probe_999&gt;</body></html>",
+            stderr="",
+        )
+        driver = HeadlessBrowserDriver(browser_binary="/usr/bin/mock-chrome")
+        validation = driver.verify_dom_xss(
+            target_url="https://app.example.com/spa", canary="sharay_dom_probe_999",
+        )
+        self.assertEqual(validation["status"], "not_reproduced")
+        self.assertFalse(validation["canary_reflected"])
 
 
 if __name__ == "__main__":

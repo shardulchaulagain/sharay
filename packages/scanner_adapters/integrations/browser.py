@@ -291,22 +291,30 @@ class HeadlessBrowserDriver:
     def verify_dom_xss(
         self,
         target_url: str,
-        parameter: str = "",
-        canary: str = "sharay_dom_xss",
+        parameter: str = "default",
+        canary: str = "",
     ) -> dict[str, Any]:
-        """Probe for DOM XSS using client execution and verify canary reflection."""
-        # Inject canary in fragment and query
-        probe_url = f"{target_url}#{canary}"
-        render_res = self.render_dom(probe_url, timeout_seconds=8)
+        """Confirm DOM XSS live: inject an HTML-element canary via the fragment AND a query parameter,
+        render in a real browser, and confirm the sink wrote it as an *element* (not escaped text).
 
-        dom = render_res.get("dom", "")
-        canary_reflected = canary in dom
-
+        An element tag (e.g. <sharaydomNONCE>) surviving into the rendered DOM proves an untrusted
+        source reached an HTML sink unescaped -- real DOM XSS. If it only appears escaped, or the page
+        redirects to a login (no session in headless), it is not confirmed and the static finding
+        stands as suspected."""
+        if not self.browser_binary:
+            return {"status": "unavailable", "canary_reflected": False}
+        nonce = canary or f"domxss{os.urandom(3).hex()}"
+        tag = f"<{nonce}>"  # a bare custom element; only an HTML sink renders it as a real node
+        sep = "&" if "?" in target_url else "?"
+        probe_url = f"{target_url}{sep}{parameter}={tag}#{tag}"
+        render_res = self.render_dom(probe_url, timeout_seconds=10)
+        dom = (render_res.get("dom", "") or "").lower()
+        rendered_as_element = f"<{nonce}>".lower() in dom and f"&lt;{nonce}&gt;" not in dom
         return {
-            "status": "verified" if canary_reflected else "not_reproduced",
-            "canary": canary,
+            "status": "verified" if rendered_as_element else "not_reproduced",
+            "canary": nonce,
             "target_url": probe_url,
-            "canary_reflected": canary_reflected,
+            "canary_reflected": rendered_as_element,
             "render_status": render_res.get("status"),
         }
 

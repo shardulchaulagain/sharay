@@ -2380,30 +2380,47 @@ def scan_comprehensive(
                         )
                     except Exception:
                         continue
+                page_flows = []
                 for df in sink_tracker.analyze(page_html, url):
                     key = (url, df.get("source"), df.get("sink"))
                     if key in seen_dom:
                         continue
                     seen_dom.add(key)
                     dom_sink_total += 1
-                    result["findings"].append(
-                        {
-                            "category": "cross_site_scripting",
-                            "severity": "high",
-                            "title": f"DOM-Based XSS Sink Flow ({df.get('source')} -> {df.get('sink')})",
-                            "description": f"Client-side source-to-sink tracking identified an untrusted DOM flow at {url}. {df.get('evidence', '')}",
-                            "target_url": url,
-                            "fingerprint": hashlib.sha256(
-                                f"dom_xss:{destination.host}:{url}:{df.get('source')}:{df.get('sink')}".encode()
-                            ).hexdigest(),
-                            "cwe_id": "CWE-79",
-                            "confidence": df.get("confidence", "high"),
-                            "status": "suspected",
-                            "remediation": "Sanitize and encode untrusted client input before writing to DOM sinks (innerHTML, eval, document.write).",
-                            "affected_url": url,
-                            "poc": f"{url}#<script>alert(1)</script>",
-                        }
-                    )
+                    dom_finding = {
+                        "category": "cross_site_scripting",
+                        "severity": "high",
+                        "title": f"DOM-Based XSS Sink Flow ({df.get('source')} -> {df.get('sink')})",
+                        "description": f"Client-side source-to-sink tracking identified an untrusted DOM flow at {url}. {df.get('evidence', '')}",
+                        "target_url": url,
+                        "fingerprint": hashlib.sha256(
+                            f"dom_xss:{destination.host}:{url}:{df.get('source')}:{df.get('sink')}".encode()
+                        ).hexdigest(),
+                        "cwe_id": "CWE-79",
+                        "confidence": df.get("confidence", "high"),
+                        "status": "suspected",
+                        "lifecycle_state": "CANDIDATE",
+                        "remediation": "Sanitize and encode untrusted client input before writing to DOM sinks (innerHTML, eval, document.write).",
+                        "affected_url": url,
+                        "poc": f"{url}#<script>alert(1)</script>",
+                    }
+                    result["findings"].append(dom_finding)
+                    page_flows.append(dom_finding)
+                # Live confirmation: render the page in a real browser with an HTML-element canary; if
+                # the sink writes it unescaped, the flow is proven (upgrade CANDIDATE -> REPRODUCED).
+                if page_flows and browser.browser_binary and not _stop():
+                    try:
+                        v = browser.verify_dom_xss(url)
+                        if v.get("status") == "verified":
+                            for df_f in page_flows:
+                                df_f["status"] = "confirmed"
+                                df_f["lifecycle_state"] = "REPRODUCED"
+                                df_f["description"] += (
+                                    f" Live browser confirmation: an HTML-element canary injected via the "
+                                    f"URL was written unescaped into the DOM (canary {v.get('canary')})."
+                                )
+                    except Exception:
+                        pass
             result["checks"].append(
                 {
                     "category": "headless_browser",
