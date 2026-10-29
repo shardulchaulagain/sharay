@@ -2126,6 +2126,50 @@ def scan_comprehensive(
             }
         )
 
+    # Stage 5a2: Missing CSRF Protection on state-changing forms (analysis only; no requests).
+    if mode != "passive" and discovered_forms and not _stop():
+        _CSRF_FIELD = re.compile(r"csrf|xsrf|token|nonce|authenticity", re.I)
+        csrf_hits = 0
+        for form in discovered_forms:
+            if str(form.get("method", "GET")).upper() != "POST":
+                continue  # only state-changing submissions are CSRF-relevant
+            inputs = form.get("inputs", [])
+            names = [str(i.get("name", "")) for i in inputs]
+            # A login form (has a password field) establishes the session; its own missing token is
+            # login CSRF, lower impact -- report state-changing forms, flag login separately.
+            if any(i.get("type") == "password" for i in inputs):
+                continue
+            if names and not any(_CSRF_FIELD.search(n) for n in names):
+                action = str(form.get("action") or destination.url)
+                if not _in_scope(action):
+                    continue
+                csrf_hits += 1
+                result["findings"].append(
+                    {
+                        "category": "cross_site_request_forgery",
+                        "severity": "medium",
+                        "title": "Missing Anti-CSRF Token on State-Changing Form",
+                        "description": f"A POST form at {action} submits without any anti-CSRF token field ({', '.join(n for n in names if n) or 'no named inputs'}); a cookie-authenticated session can be forced to submit it cross-site.",
+                        "target_url": action,
+                        "affected_url": action,
+                        "fingerprint": hashlib.sha256(f"csrf:{destination.host}:{action}".encode()).hexdigest(),
+                        "cwe_id": "CWE-352",
+                        "status": "suspected",
+                        "confidence": "medium",
+                        "remediation": "Add a per-session, per-request anti-CSRF token (or SameSite=Strict cookies) and validate it server-side on every state-changing request.",
+                        "poc": {"method": "POST", "url": action, "fields": names},
+                        "evidence": [{"action": action, "inputs": names, "has_token": False}],
+                    }
+                )
+        if csrf_hits:
+            result["checks"].append(
+                {
+                    "category": "csrf_assessment",
+                    "status": "completed",
+                    "detail": f"CSRF review flagged {csrf_hits} state-changing form(s) without an anti-CSRF token.",
+                }
+            )
+
     # Stage 5b: Headless Chromium DOM Sink Analysis & SPA Route Discovery
     if "browser" in enabled_tools or mode in ("adaptive", "aggressive"):
         try:
