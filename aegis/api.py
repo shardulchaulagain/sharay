@@ -120,6 +120,11 @@ ANALYST_TRIAGE_STATUSES = frozenset(
         "remediation_in_progress",
     }
 )
+def _finding_evidence_rows(db, finding_id: str) -> list:
+    """Evidence rows for a finding. Finding has no ORM relationship; query finding_evidence directly."""
+    return list(db.scalars(select(FindingEvidence).where(FindingEvidence.finding_id == finding_id)))
+
+
 # Bulk-triage input uses the TriageStatus vocabulary; only these map to a manual finding status.
 # CONFIRMED and RESOLVED require execution evidence and are intentionally absent (rejected).
 BULK_TRIAGE_STATUS_MAP = {
@@ -1443,8 +1448,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 from packages.reporting.reports import _reproduction_playbook, _verification_oracle
 
                 evidence_data = {}
-                if finding.evidence and isinstance(finding.evidence[0].data, dict):
-                    evidence_data = finding.evidence[0].data
+                _ev_rows = _finding_evidence_rows(queue_db, finding.id)
+                if _ev_rows and isinstance(_ev_rows[0].data, dict):
+                    evidence_data = _ev_rows[0].data
                 finding_dict = {
                     "id": finding.id,
                     "title": finding.title,
@@ -1477,8 +1483,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 from packages.reporting.poc_engine import synthesize_research_grade_poc
 
                 evidence_data = {}
-                if finding.evidence and isinstance(finding.evidence[0].data, dict):
-                    evidence_data = finding.evidence[0].data
+                _ev_rows = _finding_evidence_rows(queue_db, finding.id)
+                if _ev_rows and isinstance(_ev_rows[0].data, dict):
+                    evidence_data = _ev_rows[0].data
                 finding_dict = {
                     "id": finding.id,
                     "title": finding.title,
@@ -1545,7 +1552,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if finding.target_id != session.target_id:
                     raise SessionError("Finding belongs to a different session target.")
                 poc: dict = {}
-                for ev in finding.evidence or []:
+                for ev in _finding_evidence_rows(vdb, finding.id):
                     if isinstance(ev.data, dict) and isinstance(ev.data.get("poc"), dict):
                         poc = ev.data["poc"]
                         break
