@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 from packages.security_policies import (
     Destination,
@@ -2244,6 +2244,94 @@ def scan_comprehensive(
                     "category": "file_upload_assessment",
                     "status": "completed",
                     "detail": f"File-upload review: {upload_hits} form(s) accepted a dangerous-extension canary.",
+                }
+            )
+
+    # Stage 5a4: Missing brute-force protection / account lockout on login forms. Active but safe: it
+    # submits a bounded number of attempts with a NON-EXISTENT username, so no real account is locked.
+    login_forms = [
+        f for f in discovered_forms if any(str(i.get("type")) == "password" for i in f.get("inputs", []))
+    ]
+    _CSRF_FIELD_BF = re.compile(r"csrf|xsrf|token|nonce|authenticity", re.I)
+    if mode == "aggressive" and login_forms and not _stop():
+        from packages.scanner_adapters.integrations.vuln_scanner import _request_endpoint as _probe
+
+        _LOCKOUT = ("locked", "too many", "try again later", "temporarily disabled", "rate limit", "captcha", "blocked")
+        bf_nonce = os.urandom(3).hex()
+        bf_hits = 0
+        for form in login_forms[:3]:
+            if _stop():
+                break
+            action = str(form.get("action") or destination.url)
+            inputs = form.get("inputs", [])
+            names = [str(i.get("name") or "") for i in inputs]
+            # A per-request CSRF token would reject every attempt before any lockout logic runs, so the
+            # test could not observe lockout -- skip those forms rather than report a false result.
+            if any(_CSRF_FIELD_BF.search(n) for n in names):
+                continue
+            if not _in_scope(action):
+                continue
+            pwd_field = next((str(i.get("name")) for i in inputs if str(i.get("type")) == "password"), None)
+            user_field = next(
+                (str(i.get("name")) for i in inputs
+                 if str(i.get("type")) in ("text", "email", "") and str(i.get("name")) and str(i.get("type")) != "password"),
+                None,
+            )
+            if not pwd_field or not user_field:
+                continue
+            method = str(form.get("method", "GET")).upper()
+            path = urlparse(action).path or "/"
+            lockout_seen = False
+            attempts = 0
+            for n in range(6):
+                if _stop():
+                    break
+                fields = {nm: (str(i.get("value")) or "1") for nm, i in zip(names, inputs) if nm}
+                fields[user_field] = f"sharay_probe_{bf_nonce}"  # non-existent account
+                fields[pwd_field] = f"wrong_{n}"
+                try:
+                    if method == "POST":
+                        st, _, body, _ = _probe(
+                            destination, allow_ip, "POST", path, body=urlencode(fields),
+                            headers={"Content-Type": "application/x-www-form-urlencoded"},
+                            timeout=5.0, auth=auth if isinstance(auth, dict) else None,
+                        )
+                    else:
+                        st, _, body, _ = _probe(
+                            destination, allow_ip, "GET", f"{path}?{urlencode(fields)}",
+                            timeout=5.0, auth=auth if isinstance(auth, dict) else None,
+                        )
+                except Exception:
+                    break
+                attempts += 1
+                if st == 429 or any(k in body.lower() for k in _LOCKOUT):
+                    lockout_seen = True
+                    break
+            if attempts >= 5 and not lockout_seen:
+                bf_hits += 1
+                result["findings"].append(
+                    {
+                        "category": "broken_authentication",
+                        "severity": "medium",
+                        "title": "Missing Brute-Force Protection on Login",
+                        "description": f"The login form at {action} accepted {attempts} rapid failed attempts with no lockout, rate limit or CAPTCHA, so credentials can be guessed at scale.",
+                        "target_url": action,
+                        "affected_url": action,
+                        "fingerprint": hashlib.sha256(f"bruteforce:{destination.host}:{action}".encode()).hexdigest(),
+                        "cwe_id": "CWE-307",
+                        "status": "suspected",
+                        "confidence": "medium",
+                        "remediation": "Add progressive delays, per-account and per-IP rate limiting, and account lockout or CAPTCHA after repeated failures.",
+                        "poc": {"method": method, "url": action, "attempts": attempts, "username_field": user_field},
+                        "evidence": [{"action": action, "failed_attempts": attempts, "lockout_observed": False}],
+                    }
+                )
+        if bf_hits:
+            result["checks"].append(
+                {
+                    "category": "auth_hardening",
+                    "status": "completed",
+                    "detail": f"Brute-force review: {bf_hits} login form(s) showed no lockout after repeated failures.",
                 }
             )
 
