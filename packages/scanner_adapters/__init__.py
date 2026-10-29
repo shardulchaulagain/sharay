@@ -2170,6 +2170,83 @@ def scan_comprehensive(
                 }
             )
 
+    # Stage 5a3: Unrestricted File Upload. Upload a benign canary with a dangerous (.php) extension to
+    # each discovered upload form and see whether the app accepts it. The canary only echoes a marker
+    # (no shell / no payload), so this is active but non-destructive.
+    upload_forms = [
+        f for f in discovered_forms
+        if any(str(i.get("type")) == "file" for i in f.get("inputs", []))
+    ]
+    if mode != "passive" and upload_forms and not _stop():
+        from packages.scanner_adapters.integrations.vuln_scanner import _request_endpoint as _probe
+
+        nonce = os.urandom(4).hex()
+        marker = f"SHARAY_UPLOAD_{nonce}"
+        upload_hits = 0
+        for form in upload_forms[:5]:
+            if _stop():
+                break
+            action = str(form.get("action") or destination.url)
+            if not _in_scope(action):
+                continue
+            file_field = next(
+                (str(i.get("name")) for i in form.get("inputs", []) if str(i.get("type")) == "file"), "file"
+            )
+            boundary = f"----sharay{nonce}"
+            parts = [
+                f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; '
+                f'filename="sharay_{nonce}.php"\r\nContent-Type: application/x-php\r\n\r\n'
+                f"<?php echo '{marker}'; ?>\r\n"
+            ]
+            for i in form.get("inputs", []):
+                name = str(i.get("name") or "")
+                if not name or str(i.get("type")) == "file":
+                    continue
+                val = str(i.get("value") or ("100000" if "max_file" in name.lower() else "Upload"))
+                parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{val}\r\n')
+            parts.append(f"--{boundary}--\r\n")
+            body = "".join(parts)
+            path = urlparse(action).path or "/"
+            try:
+                auth_ctx = auth if isinstance(auth, dict) else None
+                status, _, resp_body, _ = _probe(
+                    destination, allow_ip, "POST", path, body=body,
+                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                    timeout=6.0, auth=auth_ctx,
+                )
+            except Exception:
+                continue
+            accepted = status == 200 and any(
+                k in resp_body.lower() for k in ("succesfully uploaded", "successfully uploaded", "upload", nonce)
+            )
+            if accepted and "not allowed" not in resp_body.lower() and "invalid" not in resp_body.lower():
+                upload_hits += 1
+                result["findings"].append(
+                    {
+                        "category": "unrestricted_file_upload",
+                        "severity": "high",
+                        "title": "Unrestricted File Upload (dangerous extension accepted)",
+                        "description": f"The upload form at {action} accepted a file with a .php extension; if the upload directory is web-served, this is remote code execution.",
+                        "target_url": action,
+                        "affected_url": action,
+                        "fingerprint": hashlib.sha256(f"upload:{destination.host}:{action}".encode()).hexdigest(),
+                        "cwe_id": "CWE-434",
+                        "status": "suspected",
+                        "confidence": "medium",
+                        "remediation": "Validate uploads by content type and a server-side allowlist of extensions, store them outside the web root, and never execute user-uploaded files.",
+                        "poc": {"method": "POST", "url": action, "field": file_field, "filename": f"sharay_{nonce}.php"},
+                        "evidence": [{"action": action, "status": status, "canary": marker}],
+                    }
+                )
+        if upload_hits:
+            result["checks"].append(
+                {
+                    "category": "file_upload_assessment",
+                    "status": "completed",
+                    "detail": f"File-upload review: {upload_hits} form(s) accepted a dangerous-extension canary.",
+                }
+            )
+
     # Stage 5b: Headless Chromium DOM Sink Analysis & SPA Route Discovery
     if "browser" in enabled_tools or mode in ("adaptive", "aggressive"):
         try:
