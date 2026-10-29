@@ -187,17 +187,19 @@ def _time_based_blind_injection(
     payloads: list[str],
     timeout: float,
     delay_seconds: int = _BLIND_SLEEP_SECONDS,
+    auth: dict | None = None,
 ) -> str | None:
     """Return the first payload whose induced delay clears `mean + 3σ + delay` on 3 consecutive
     trials, else None. Baseline mean/σ are calibrated from 3 benign requests, so ordinary network
     jitter cannot confirm a finding; a single sub-threshold trial rejects the payload."""
     delay_ms = delay_seconds * 1000
     probe_timeout = max(timeout, delay_seconds + 5)
+    _req = functools.partial(_request_endpoint, auth=auth) if auth else _request_endpoint
 
     def _elapsed(value: str) -> float:
         query = {param: value, **(extra or {})}
         try:
-            _, _, _, ms = _request_endpoint(
+            _, _, _, ms = _req(
                 destination, allow_ip, "GET", f"{ep}?{urlencode(query)}", timeout=probe_timeout
             )
             return ms
@@ -238,6 +240,7 @@ def _evaluate_boolean_blind_sqli(
     is_lab_endpoint: bool,
     timeout: float,
     sql_regex: str,
+    auth: dict | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate boolean-based blind SQL injection using statistical differential analysis.
 
@@ -250,6 +253,7 @@ def _evaluate_boolean_blind_sqli(
     - Absence of raw SQL error syntax in responses (ensuring genuine boolean blind differential)
     - Negative-control canary confirmation (1' AND 1337=1337-- vs 1' AND 1337=1338--).
     """
+    _req = functools.partial(_request_endpoint, auth=auth) if auth else _request_endpoint
     candidate_pairs = [
         ("1' OR '1'='1", "1' AND '1'='2"),
         ("1 AND 1=1", "1 AND 1=2"),
@@ -261,10 +265,10 @@ def _evaluate_boolean_blind_sqli(
             true_dict["Submit"] = "Submit"
             false_dict["Submit"] = "Submit"
 
-        t_status, _, t_body, _ = _request_endpoint(
+        t_status, _, t_body, _ = _req(
             destination, allow_ip, "GET", f"{ep}?{urlencode(true_dict)}", timeout=timeout
         )
-        f_status, _, f_body, _ = _request_endpoint(
+        f_status, _, f_body, _ = _req(
             destination, allow_ip, "GET", f"{ep}?{urlencode(false_dict)}", timeout=timeout
         )
 
@@ -288,10 +292,10 @@ def _evaluate_boolean_blind_sqli(
                 c_true_dict["Submit"] = "Submit"
                 c_false_dict["Submit"] = "Submit"
 
-            _, _, c_t_body, _ = _request_endpoint(
+            _, _, c_t_body, _ = _req(
                 destination, allow_ip, "GET", f"{ep}?{urlencode(c_true_dict)}", timeout=timeout
             )
-            _, _, c_f_body, _ = _request_endpoint(
+            _, _, c_f_body, _ = _req(
                 destination, allow_ip, "GET", f"{ep}?{urlencode(c_false_dict)}", timeout=timeout
             )
 
@@ -435,7 +439,16 @@ def audit_deep_vulnerabilities(
     ]
     if dest_path and dest_path not in clean_endpoints:
         clean_endpoints.insert(0, dest_path)
-    test_endpoints = clean_endpoints[:25] if clean_endpoints else ["/"]
+    # Deterministic coverage: fuzz the most injection-likely endpoints first so a larger crawl never
+    # pushes the real vulnerable pages out of the window. An endpoint scores higher when it already
+    # carries a query/parameter or looks dynamic (php/asp/jsp/api/action/search/query), so parameter
+    # sinks are always covered regardless of alphabetical order.
+    _DYNAMIC = re.compile(r"(?:\?|=|\.(?:php|asp|aspx|jsp|do|cgi)\b|/(?:api|action|search|query|cmd)\b)", re.I)
+
+    def _rank(ep: str) -> tuple[int, str]:
+        return (0 if _DYNAMIC.search(ep) else 1, ep)
+
+    test_endpoints = sorted(clean_endpoints, key=_rank)[:25] if clean_endpoints else ["/"]
 
     canary_nonce = f"sharayxss{hashlib.md5(destination.host.encode()).hexdigest()[:6]}"
     xss_payload = f'"><sharay_canary_{canary_nonce}>'
@@ -571,6 +584,7 @@ def audit_deep_vulnerabilities(
                     is_lab_endpoint=is_lab_endpoint,
                     timeout=timeout,
                     sql_regex=sql_regex,
+                    auth=auth,
                 )
                 if sqli_bool_finding:
                     findings.append(sqli_bool_finding)
@@ -849,7 +863,7 @@ def audit_deep_vulnerabilities(
                     f"1';WAITFOR DELAY '0:0:{n}'-- -",
                 ]
                 sqli_hit = _time_based_blind_injection(
-                    destination, allow_ip, ep, param, time_extra, sqli_time_payloads, timeout
+                    destination, allow_ip, ep, param, time_extra, sqli_time_payloads, timeout, auth=auth
                 )
                 if sqli_hit:
                     time_fuzz = f"{ep}?{urlencode({param: sqli_hit, **(time_extra or {})})}"
@@ -906,7 +920,7 @@ def audit_deep_vulnerabilities(
                         f"127.0.0.1`sleep {n}`",
                     ]
                     cmd_hit = _time_based_blind_injection(
-                        destination, allow_ip, ep, param, time_extra, cmd_time_payloads, timeout
+                        destination, allow_ip, ep, param, time_extra, cmd_time_payloads, timeout, auth=auth
                     )
                     if cmd_hit:
                         time_fuzz = f"{ep}?{urlencode({param: cmd_hit, **(time_extra or {})})}"
