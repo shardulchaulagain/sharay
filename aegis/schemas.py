@@ -63,10 +63,13 @@ class ScanConfig(Input):
     depth: int = Field(
         default=2, strict=True, ge=1, le=5, validation_alias=AliasChoices("depth", "crawler_depth")
     )
-    crawler_max_pages: int = Field(default=30, strict=True, ge=5, le=100)
+    # Default stays small so ordinary targets are quick; the ceiling is high so an operator can opt into
+    # full coverage of a large app (e.g. a 2740-endpoint benchmark) without the request being rejected.
+    crawler_max_pages: int = Field(default=30, strict=True, ge=5, le=5000)
     # Per-stage execution budget (seconds). Each scan stage gets its own timeout — not a slice of a
-    # shared pool — so stages never starve each other. Raise it for large sites; 0/unset = default.
-    stage_timeout_seconds: int = Field(default=0, strict=True, ge=0, le=1800)
+    # shared pool — so stages never starve each other. Capped at 600s so a single hung stage can never
+    # wedge the whole scan for longer than 10 minutes; 0/unset = default.
+    stage_timeout_seconds: int = Field(default=0, strict=True, ge=0, le=600)
     severities: str = Field(default="medium,high,critical", max_length=64)
     tags: str | None = Field(
         default=None, max_length=512, pattern=r"^[a-z0-9_][a-z0-9_-]*(?:,[a-z0-9_][a-z0-9_-]*)*$"

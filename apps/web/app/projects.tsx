@@ -151,7 +151,9 @@ function Launch({ target, done, cancel, reload }: { target: Target; done: (asses
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<Error>();
   const [idempotency, setIdempotency] = useState(() => crypto.randomUUID());
-  const live = target.verification_status === "operator_authorized";
+  // Comprehensive/approved-templates run on the backend for approved loopback lab targets too
+  // (the worker handles 127.0.0.1/::1); lab targets like DVWA/OWASP Benchmark are the main use case.
+  const live = ["operator_authorized", "verified_lab"].includes(target.verification_status);
   const [profile, setProfile] = useState<"safe_http" | "approved_templates" | "comprehensive">(live ? "comprehensive" : "safe_http");
   const [mode, setMode] = useState<"adaptive" | "standard" | "aggressive" | "passive">("adaptive");
   const [depth, setDepth] = useState<number>(2);

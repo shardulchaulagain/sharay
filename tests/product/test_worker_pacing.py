@@ -264,7 +264,7 @@ finally:
         jobs = [self.enqueue(origin="https://127.0.0.1:8766", categories=["tls"]) for _ in range(2)]
         with patch(
             "packages.scanner_adapters._tls_observation",
-            side_effect=lambda connection, destination: {
+            side_effect=lambda connection, destination, verified=True: {
                 "kind": "tls_handshake",
                 "url": destination.url,
                 "fixture": "Synthetic TLS observation; no real handshake",
@@ -416,7 +416,7 @@ finally:
             self.assertEqual(pacing, {})
             locked.rollback()
         with self.sessions() as db:
-            self.assertEqual(db.scalar(text("PRAGMA busy_timeout")), 10000)
+            self.assertEqual(db.scalar(text("PRAGMA busy_timeout")), 30000)
 
     def test_cancellation_during_reservation_sends_no_request(self):
         cancelled = self.enqueue()

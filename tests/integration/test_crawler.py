@@ -9,9 +9,40 @@ from packages.scanner_adapters.integrations.crawler import (
     _HTMLStructureExtractor,
     _is_in_scope,
     crawl,
+    parse_js_assets,
     parse_robots_txt,
     parse_sitemap_xml,
 )
+
+
+class JsAssetExtractionTests(unittest.TestCase):
+    """P1.4: JS endpoint/param/secret mining."""
+
+    def test_extracts_same_origin_endpoints_and_param_names(self):
+        js = """
+        const base = fetch("/api/v2/users?role=admin&active=1");
+        axios.get('/internal/report');
+        xhr.open("POST", `/orders/${id}/submit`);  // template literal -> skipped
+        var ext = "https://evil.example.com/steal";  // cross-origin -> not a relative path
+        """
+        eps, params, secrets = parse_js_assets(js, "https://app.test")
+        self.assertIn("/api/v2/users", eps)
+        self.assertIn("/internal/report", eps)
+        self.assertIn("role", params)
+        self.assertIn("active", params)
+        self.assertNotIn("https://evil.example.com/steal", eps)
+
+    def test_extracts_and_redacts_secrets(self):
+        js = 'const k = "AKIAIOSFODNN7EXAMPLE"; const api_key = "abcd1234efgh5678ijkl";'
+        _, _, secrets = parse_js_assets(js, "https://app.test")
+        types = {s["type"] for s in secrets}
+        self.assertIn("aws_access_key", types)
+        # the full secret value is never echoed back
+        self.assertFalse(any("AKIAIOSFODNN7EXAMPLE" == s["match"] for s in secrets))
+
+    def test_benign_js_yields_nothing(self):
+        eps, params, secrets = parse_js_assets("function add(a,b){return a+b;}\nconsole.log('hi');", "https://app.test")
+        self.assertEqual((eps, params, secrets), ([], [], []))
 
 
 class CrawlerStructureTests(unittest.TestCase):

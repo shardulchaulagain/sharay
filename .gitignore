@@ -1,32 +1,41 @@
-.engineering/
+# Python
 __pycache__/
 *.py[cod]
 .venv/
+
+# Node / web build
 node_modules/
+apps/web/.next/
+apps/web/out/
+*.tsbuildinfo
+
+# Secrets & environment
 .env
 .env.*
 !.env.example
 *.pem
 *.key
-.DS_Store
+
+# Runtime data dirs & databases -- created per-install, NEVER committed. The operator's own
+# assessments/findings live here and must not ship with the source on GitHub.
 .aegis/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-apps/web/.next/
-apps/web/out/
-*.tsbuildinfo
+.sharay/
+aegis.db*
 *.db
 *.db-wal
 *.db-shm
-tmp/
-# Unreviewed Gemini draft tests and one review note hold token-shaped test strings; they stay local.
-drafts/gemini/attack-tests/
-drafts/gemini/test_*.py
-drafts/gemini/review-of-codex-file-changes.md
+*.sqlite
+*.sqlite3
 
 # Downloaded third-party tools and the update ledger: never committed.
 tools/
 
-# Throwaway dev capture scripts
+# Caches & local dev state
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.serena/
+.engineering/
 scratch/
+tmp/
+.DS_Store

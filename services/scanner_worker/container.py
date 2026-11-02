@@ -1009,6 +1009,35 @@ def _machine_ssh(script: str, timeout: float = 60.0) -> subprocess.CompletedProc
     )
 
 
+def ensure_podman_machine_running(timeout: float = 90.0) -> bool:
+    """Fail-safe: if the podman VM that enforces egress isolation is down, start it ONCE so a scan can
+    actually run instead of every container stage failing closed. Returns True if the machine is (now)
+    running. Never sends target traffic itself; egress stages still fail-closed individually if this is
+    False, so the isolation guarantee is preserved either way."""
+    runtime = container_runtime()
+    if not runtime or Path(runtime).name != "podman":
+        return False  # non-podman runtimes manage their own daemon; nothing to start here
+    try:
+        if _machine_ssh("true", timeout=8.0).returncode == 0:
+            return True  # already up
+    except Exception:
+        pass
+    machine = _get_podman_machine_name(runtime)
+    try:
+        proc = subprocess.run(
+            [runtime, "machine", "start", machine],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except Exception:
+        return False
+    if proc.returncode != 0 and "already running" not in (proc.stderr or "").lower():
+        return False
+    try:
+        return _machine_ssh("true", timeout=10.0).returncode == 0
+    except Exception:
+        return False
+
+
 def run_with_egress(
     image: str,
     tool_argv: Sequence[str],

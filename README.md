@@ -1,176 +1,140 @@
-# SHARAY — Security Assessment Platform
+# SHARAY
 
-**SHARAY** is a local-first, defensive security-assessment platform and penetration-testing
-workspace built around one rule: **no verified evidence → no confirmed vulnerability.** Every
-candidate finding is treated as a hypothesis and only promoted to *confirmed* after a cold,
-deterministic re-execution with a negative-control canary, or an isolated executable proof.
+A scope-controlled, egress-locked security assessment platform. SHARAY performs authorized web
+application and infrastructure testing — recon, crawling, DAST vulnerability detection, and bounded
+exploitation — behind a hard authorization boundary: nothing is probed until the operator records
+the target scope, and all third-party tooling runs inside a single-destination network jail.
 
-Around that verification core it provides verified target scoping, rootless-container scanner
-engines with single-destination egress locking, a cryptographically hash-linked audit ledger,
-protocol-accurate reporting, an AI attack-graph reasoning layer, and an interactive
-human-in-the-loop operator console.
+It runs entirely on the operator's machine: a loopback-only API, a local worker, a SQLite database,
+and a bundled web UI. There is no telemetry and no cloud dependency.
 
-> A finding is a hypothesis until a cold replay proves it.
+## Safety model (read this first)
 
-A full technical write-up — architecture, every major feature, code walkthrough, and honest
-limitations — is in **[docs/research-paper/SHARAY.md](docs/research-paper/SHARAY.md)** (with UI
-screenshots in [docs/research-paper/screenshots/](docs/research-paper/screenshots/)).
+- **No default credentials.** The first owner is created explicitly with `init-owner`.
+- **Authorization precedes execution.** A target's scope must be recorded and approved before any
+  active probe is sent. A live (non-loopback) target additionally requires the operator to assert
+  ownership (`--authorized` on the CLI).
+- **Egress is jailed.** Containerized tools (nuclei, ZAP, nmap, …) run under a single-destination
+  firewall via Podman. If the isolation layer cannot be established, those stages **fail closed** —
+  SHARAY sends no uncontained traffic.
+- **Findings are verified.** Candidate findings are re-tested with a deterministic reproducer and a
+  negative control before they are reported, which keeps false positives low.
 
-By Shardul · <https://shardulchaulagain.com>
+## Requirements
 
----
+- Python 3.13
+- [Podman](https://podman.io/) (for egress-isolated container tools). On macOS: `podman machine init && podman machine start`.
+- Nuclei templates on disk (for the Nuclei stage).
 
-## Quick start
+Optional system tools are auto-detected; run `python -m aegis preflight` to see what is available.
 
-Requires Python 3.11+ and Node.js (for building the frontend once).
+## Install
 
-```sh
-# 1. Python environment
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-dev.txt -r requirements-desktop.txt
+Quickest path — one script sets up a virtualenv, installs dependencies, and creates **this install's
+own fresh database**:
 
-# 2. Build the static frontend
-npm --prefix apps/web ci --ignore-scripts
-npm --prefix apps/web run build
-
-# 3. Database + preflight
-.venv/bin/python -m sharay migrate
-.venv/bin/python -m sharay preflight     # reports scanner availability; runs nothing
-
-# 4. Create the first owner (no default credentials exist; password ≥ 12 chars)
-.venv/bin/python -m sharay init-owner
-
-# 5. Launch
-.venv/bin/python -m sharay desktop       # native window
-#   or
-.venv/bin/python -m sharay desktop --browser
+```bash
+./install.sh
 ```
 
-On macOS, double-clicking `SHARAY.app` or `SHARAY.command` also launches the desktop app.
+Or manually:
 
----
-
-## Run modes
-
-| Command | Purpose |
-| --- | --- |
-| `sharay desktop` *(default)* | Native window + loopback API + worker |
-| `sharay desktop --browser` | Same, opened in the system browser |
-| `sharay serve` | Headless loopback API + worker (`http://127.0.0.1:8765`) |
-| `sharay migrate` | Apply forward-only database migrations |
-| `sharay init-owner` | Provision the first owner account |
-| `sharay issue-recovery` / `reset-password` | Local-OS single-use account recovery |
-| `sharay backup <dest>` / `restore <snap>` | Consistent private database snapshots |
-| `sharay preflight` | Report scanner availability without executing |
-
-**Decoupled web mode** (teams / headless nodes): run `sharay serve` in one terminal and
-`npm --prefix apps/web run dev` in another (`http://localhost:3000`, proxies to the API).
-Host, port and data dir are configurable via `SHARAY_PORT` / `SHARAY_DATA_DIR`.
-
-**CLI automation** (`aegis/cli.py`): `scan`, `probe`, `status`, `findings` — e.g.
-`.venv/bin/python -m sharay scan https://example.com/ --profile comprehensive --mode adaptive`.
-
----
-
-## How it works
-
-1. **Scope** — Register a target and define a typed scope (allowed origins, included/excluded
-   paths, rate and concurrency ceilings, validity window ≤ 24 h). SHARAY shows the exact,
-   reproducible resolved scope before anything runs.
-2. **Authorize** — An operator must explicitly record authorization within the displayed scope.
-   Live execution is refused without it; private/internal address ranges are refused outright.
-3. **Assess** — Choose a profile:
-   - `safe_http` — bounded, in-process header/TLS analysis for approved loopback labs.
-   - `approved_templates` — containerized Nuclei over locked single-destination egress.
-   - `comprehensive` — the full ten-stage pipeline (recon, TLS, DNS, ports, crawler, DOM/SPA,
-     schema ingestion, adaptive strategy, active differential/fuzzing/IDOR, external engines),
-     with the verification gate between native and external stages.
-4. **Verify** — Candidates are replayed 3× with a negative-control canary; survivors can be
-   proven by a synthesized, sandboxed AutoPyVerifier script. Only reproduced or exit-code-0
-   findings become `confirmed`. Demoted candidates are marked `demoted`/`false_positive`.
-5. **Report** — Export PDF / HTML / Markdown / JSON. Reports separate verified vulnerabilities
-   from hardening posture, carry CWE/CVSS and protocol-accurate PoCs, and redact secrets.
-
-Every authorization and execution decision is recorded in an append-only, hash-linked audit
-ledger. An interactive operator console (`probe`, `dns`, `ssl`, `beacon`, `retest`, `whoami`, …)
-runs scoped diagnostics over the same egress-locked path.
-
----
-
-## Offline demonstration
-
-No internet target is needed. Start the synthetic vulnerable fixture and point SHARAY at it:
-
-```sh
-.venv/bin/python -m fixtures.safe_targets.server --port 8766
-```
-
-Register `http://127.0.0.1:8766/`, approve scope, run a **Standard** or **Comprehensive**
-assessment, review the findings, then restart the fixture with `--secure-headers` and use
-**Review retest** to watch findings resolve. For a one-command throwaway UI with a disposable
-test account, use `scripts/ui_fixture.py`.
-
----
-
-## Verification
-
-```sh
+```bash
+python3.13 -m venv .venv
 source .venv/bin/activate
-python3 -m pytest -q
-python3 engineering/check.py --run-gates
-ruff check aegis sharay packages services engineering scripts tests
-ruff format --check aegis sharay packages services engineering scripts tests
-mypy --explicit-package-bases aegis sharay packages services
-npm --prefix apps/web run test
-npm --prefix apps/web run typecheck
-npm --prefix apps/web run lint
-npm --prefix apps/web run build
+pip install -r requirements.txt          # core runtime
+# pip install -r requirements-desktop.txt  # native desktop app
+# pip install -r requirements-dev.txt      # tests / development
+python -m aegis migrate                   # creates + migrates the database
 ```
 
-Tests use temporary databases, synthetic accounts, ephemeral TLS certificates and loopback
-fixtures; they need local socket permission and scan no real target. `engineering/check.py`
-runs the reviewed gates from `engineering/gates.json` with `shell=False`, a timeout, and no
-inherited credentials, and writes local reports under `.engineering/` (gitignored). The gate
-runner is not an OS sandbox — use an externally sandboxed environment for untrusted repositories.
+### Your database is per-install and never shipped
+
+Each install creates its own SQLite database (`aegis.db`) inside the data directory — the default is
+`.aegis/`, configurable via `SHARAY_DATA_DIR` (and `SHARAY_PORT` for the port; see `.env.example`).
+The data directory and all database files are **gitignored**, so cloning this repository never brings
+anyone else's assessments or findings, and your own data is never committed when you push. The
+database is created and migrated automatically the first time you run any command that needs it.
+
+## First run
+
+```bash
+python -m aegis init-owner        # create the first operator (no default credentials)
+python -m aegis status            # platform + scanner integration status
+```
+
+## Running
+
+Server + worker (loopback API and web UI on port 8765 by default):
+
+```bash
+python -m aegis serve
+```
+
+Native desktop app:
+
+```bash
+python -m sharay desktop          # or launch SHARAY.command
+```
+
+Run an assessment from the command line (same pipeline the UI uses):
+
+```bash
+# a verified lab on loopback needs no ownership assertion:
+python -m aegis scan http://127.0.0.1:8080/
+
+# a live target you own requires --authorized:
+python -m aegis scan https://example.com/ --authorized --profile comprehensive
+```
+
+Profiles: `comprehensive` (full pipeline), `safe_http` (headers/TLS only), `approved_templates`
+(Nuclei only). See `python -m aegis scan --help` for mode, rate, depth, and severity options.
+
+List recorded findings:
+
+```bash
+python -m aegis findings
+```
+
+## Capabilities
+
+- **Recon & enumeration** — passive inventory, DNS/email-spoofing posture, subdomains, port/service
+  scanning (native + nmap), TLS/certificate inspection, security-header and cookie audit, secret and
+  dependency (SCA) scanning.
+- **Attack-surface discovery** — in-scope crawler, headless DOM analysis, OpenAPI/GraphQL/WSDL schema
+  ingestion, per-endpoint parameter association, parameter mining, and JS endpoint/parameter/secret
+  extraction; inputs are fuzzed across query, form, cookie, header, and JSON-body vectors.
+- **Vulnerability detection (DAST)** — SQLi, XSS (reflected/DOM), command injection, path traversal /
+  LFI, SSRF (incl. out-of-band), LDAP/XPath/NoSQL/SSTI/XXE injection, open redirect, CSRF, insecure
+  TLS/headers, and more — each confirmed by a reproducer + negative control.
+- **Bounded exploitation** — operator-authorized active exploitation (e.g. sqlmap) pinned to the
+  approved target, under the egress jail.
+- **Reporting** — PDF/HTML/Markdown/JSON reports with formal CVSS v3.1 vectoring and runnable PoCs.
+
+## Architecture
+
+```
+aegis/      core app: CLI, loopback FastAPI, auth, worker supervisor, database, config
+packages/   scanner engines, security policies, reporting, CVSS, offensive capability
+  scanner_adapters/   the assessment pipeline + tool integrations
+services/   out-of-process workers (scanner, source analysis, AI analysis, updates)
+sharay/     native desktop entry point
+apps/       web UI (served by the API)
+migrations/ Alembic database migrations
+tests/      test suite
+```
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+pytest                      # full suite
+pytest tests/integration    # a subset
+```
+
+Some tests exercise containerized tools and require Podman running.
 
 ---
 
-## Account recovery
-
-The local OS owner can issue a ten-minute, single-use recovery token with
-`sharay issue-recovery USERNAME`, then run `sharay reset-password`. The reset revokes existing
-sessions. There is no email or MFA recovery workflow.
-
----
-
-## Limitations
-
-SHARAY states its own boundaries plainly (full list in the research paper):
-
-- Single-destination egress enforcement is **podman-specific and IPv4-only**; other runtimes are
-  no-network only.
-- The in-process `safe_http` profile is **loopback-only** (no DNS, no authenticated testing, no
-  external scanners).
-- Live execution requires manually-verified ownership and a **public** address.
-- Authenticated and intrusive testing are **off by contract**.
-- Throughput is a **single serialized worker** — no distributed scanning.
-- The audit ledger is local tamper-**evidence**, not external tamper-protection.
-- Evidence retention is indefinite; automatic deletion is not implemented.
-- The native window and egress backend are developed and tested on macOS + the podman machine.
-
----
-
-## Repository layout
-
-| Path | Purpose |
-| --- | --- |
-| `sharay/`, `aegis/` | Launcher and backend (API, worker, auth, models, audit, reporting glue) |
-| `packages/scanner_adapters/` | Safe-HTTP adapter, pipeline orchestrator, reproducer, integrations |
-| `packages/security_policies/` | Scope policy, target normalization, DNS-pinning resolver |
-| `packages/reporting/` | PDF/HTML/Markdown/JSON report rendering and PoC engine |
-| `services/scanner_worker/` | Rootless container runner and single-destination egress firewall |
-| `services/ai_analysis_worker/` | Attack-graph reasoning, AutoPyVerifier, consensus/entropy |
-| `apps/web/` | Next.js operator workspace (static export) |
-| `fixtures/`, `tests/` | Synthetic targets and the unit/integration/product/eval suites |
-| `engineering/` | Reviewed test/lint/format/type gates and local dashboard |
-| `docs/research-paper/` | Full technical write-up and UI screenshots |
+SHARAY is for **authorized** security testing only. The scope and egress controls are the operator's
+tools for staying inside their authorization — they are not a substitute for it.

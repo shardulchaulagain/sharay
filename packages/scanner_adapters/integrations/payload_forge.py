@@ -7,10 +7,13 @@ vendor-specific WAF evasion profiles (Cloudflare, AWS WAF, ModSecurity).
 
 from __future__ import annotations
 
+import base64
 import random
 import re
+import time
 import urllib.parse
 from dataclasses import dataclass
+from typing import Any, Callable, Sequence, TypeVar
 
 
 class CFGPayloadGenerator:
@@ -230,12 +233,148 @@ class WAFTransformProfile:
         return [m for m in mutated if m]
 
 
+T = TypeVar("T")
+
+
+@dataclass
+class EvasionProfile:
+    """Opt-in evasion and WAF-bypass profile (P5.3).
+
+    Executes syntax-preserving AST payload mutation, multi-encoding pipelines,
+    and timing jitter controls to route around modern WAF rulesets and rate limits.
+    """
+
+    enabled: bool = False
+    vendor_target: str = "generic"
+    encoding_chain: tuple[str, ...] = ("url", "double_url")
+    min_jitter_ms: float = 50.0
+    max_jitter_ms: float = 250.0
+    seed: int = 42
+
+    def __post_init__(self) -> None:
+        self._rng = random.Random(self.seed)
+
+    def apply_mutation(self, payload: str, vuln_type: str = "sqli", count: int = 5) -> list[str]:
+        """Apply syntax-preserving AST mutation operators."""
+        return mutate_ast(payload, count=count, seed=self.seed)
+
+    def apply_encoding(self, payload: str, encoding: str) -> str:
+        """Apply a single encoding transformation."""
+        enc = encoding.lower().strip()
+        if enc in ("url", "percent"):
+            return urllib.parse.quote(payload)
+        elif enc in ("double_url", "double_percent"):
+            return urllib.parse.quote(urllib.parse.quote(payload))
+        elif enc == "hex":
+            # Character hex encoding %xx
+            return "".join(f"%{ord(c):02x}" for c in payload)
+        elif enc == "unicode":
+            # IIS / Web Unicode %u00xx
+            return "".join(f"%u00{ord(c):02x}" if ord(c) < 256 else f"%u{ord(c):04x}" for c in payload)
+        elif enc in ("html_entity", "html"):
+            # Hex HTML entity &#x..;
+            return "".join(f"&#x{ord(c):x};" for c in payload)
+        elif enc == "html_entity_dec":
+            # Decimal HTML entity &#..;
+            return "".join(f"&#{ord(c)};" for c in payload)
+        elif enc == "base64":
+            return base64.b64encode(payload.encode("utf-8")).decode("ascii")
+        elif enc == "overlong_utf8":
+            # Overlong 2-byte UTF-8 encoding for ASCII chars
+            res: list[str] = []
+            for c in payload:
+                code = ord(c)
+                if code < 128:
+                    byte1 = 0xC0 | (code >> 6)
+                    byte2 = 0x80 | (code & 0x3F)
+                    res.append(f"%{byte1:02x}%{byte2:02x}")
+                else:
+                    res.append(urllib.parse.quote(c))
+            return "".join(res)
+        else:
+            return urllib.parse.quote(payload)
+
+    def multi_encode(self, payload: str, chain: Sequence[str] | None = None) -> str:
+        """Apply a sequence of multiple encodings."""
+        active_chain = chain if chain is not None else self.encoding_chain
+        current = payload
+        for enc in active_chain:
+            current = self.apply_encoding(current, enc)
+        return current
+
+    def get_timing_jitter(self) -> float:
+        """Compute jitter delay in seconds within [min_jitter_ms, max_jitter_ms]."""
+        if self.max_jitter_ms <= self.min_jitter_ms:
+            return self.min_jitter_ms / 1000.0
+        return self._rng.uniform(self.min_jitter_ms, self.max_jitter_ms) / 1000.0
+
+    def execute_with_jitter(
+        self,
+        fn: Callable[[], T],
+        sleep_fn: Callable[[float], None] | None = None,
+        force_jitter: bool = False,
+    ) -> T:
+        """Execute a callable with timing jitter if profile is enabled or forced."""
+        if self.enabled or force_jitter:
+            delay = self.get_timing_jitter()
+            if sleep_fn is not None:
+                sleep_fn(delay)
+            else:
+                time.sleep(delay)
+        return fn()
+
+    def transform_payload(
+        self,
+        base_payload: str,
+        vuln_type: str = "sqli",
+        include_raw: bool = False,
+    ) -> list[str]:
+        """Produce mutated, multi-encoded variants from a base payload."""
+        variants: set[str] = set()
+        if include_raw:
+            variants.add(base_payload)
+
+        # 1. AST mutations
+        mutated = self.apply_mutation(base_payload, vuln_type=vuln_type, count=6)
+        variants.update(mutated)
+
+        # 2. Multi-encoding on mutations and base
+        all_candidates = list(variants)
+        for m in all_candidates:
+            # Configured multi-encoding chain
+            variants.add(self.multi_encode(m, self.encoding_chain))
+            # Individual core encodings
+            for enc in ("url", "double_url", "hex"):
+                variants.add(self.apply_encoding(m, enc))
+
+        return sorted(v for v in variants if v.strip())
+
+
 class DeterministicPayloadForge:
     """Orchestrator combining CFG generation, AST mutation matrices, and PRNG seed reproducibility (E1–E5)."""
 
-    def __init__(self, seed: int = 42) -> None:
+    def __init__(self, seed: int = 42, evasion_profile: EvasionProfile | None = None) -> None:
         self.seed = seed
         self.generator = CFGPayloadGenerator(seed=seed)
+        self.evasion_profile = evasion_profile or EvasionProfile(enabled=False, seed=seed)
+
+    def enable_evasion(
+        self,
+        vendor: str = "generic",
+        min_jitter_ms: float = 50.0,
+        max_jitter_ms: float = 250.0,
+        encoding_chain: Sequence[str] = ("url", "double_url"),
+    ) -> EvasionProfile:
+        """Opt-in to evasion/WAF-bypass profile with mutation, encoding, and timing jitter."""
+        self.evasion_profile = EvasionProfile(
+            enabled=True,
+            vendor_target=vendor,
+            min_jitter_ms=min_jitter_ms,
+            max_jitter_ms=max_jitter_ms,
+            encoding_chain=tuple(encoding_chain),
+            seed=self.seed,
+        )
+        return self.evasion_profile
 
     def get_transform_profile(self, vendor: str) -> WAFTransformProfile:
         """Select targeted transform profile based on detected WAF vendor."""
@@ -246,6 +385,7 @@ class DeterministicPayloadForge:
         vuln_type: str = "sqli",
         count: int = 50,
         waf_vendor: str | None = None,
+        use_evasion: bool | None = None,
     ) -> list[str]:
         """Generate a 100% deterministic, seed-reproducible sequence of mutated payloads."""
         if vuln_type == "cmdi":
@@ -254,6 +394,17 @@ class DeterministicPayloadForge:
             base_vectors = self.generator.generate_ssrf(count=count)
         else:
             base_vectors = self.generator.generate_sqli(count=count)
+
+        should_evade = use_evasion if use_evasion is not None else (
+            self.evasion_profile is not None and self.evasion_profile.enabled
+        )
+
+        if should_evade and self.evasion_profile is not None:
+            evasive_fuzzed: list[str] = []
+            for vec in base_vectors:
+                variants = self.evasion_profile.transform_payload(vec, vuln_type=vuln_type)
+                evasive_fuzzed.extend(variants)
+            return evasive_fuzzed[:count]
 
         if waf_vendor:
             profile = self.get_transform_profile(waf_vendor)
@@ -274,6 +425,7 @@ class DeterministicPayloadForge:
 __all__ = [
     "CFGPayloadGenerator",
     "DeterministicPayloadForge",
+    "EvasionProfile",
     "WAFTransformProfile",
     "mutate_ast",
 ]

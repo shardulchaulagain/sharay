@@ -151,8 +151,10 @@ class InteractiveApiTests(unittest.TestCase):
                     "operator_confirmed": True,
                 },
             )
-            self.assertEqual(res_gate.status_code, 403, res_gate.text)
-            self.assertIn("does not permit active exploits", res_gate.text)
+            # W5 (no gate): operator-confirmed + authorized + in-scope -> ALLOW_ACTIVE_EXPLOIT granted.
+            self.assertEqual(res_gate.status_code, 200, res_gate.text)
+            self.assertEqual(res_gate.json()["status"], "authorized")
+            self.assertTrue(res_gate.json()["allow_active_exploit"])
 
         finally:
             # Cleanup session
@@ -175,7 +177,7 @@ class InteractiveApiTests(unittest.TestCase):
             ({"auto_proceed": True}, 403),
             ({"target_id": "different-target"}, 422),
             ({"target_url": "https://example.com/excluded"}, 422),
-            ({}, 403),
+            # NB: the all-checks-pass case now returns 200 "authorized" (W5, no gate) -- see the happy-path test.
         ]:
             response = self.client.post(path, json={**payload, **change})
             self.assertEqual(response.status_code, expected, response.text)

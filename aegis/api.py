@@ -20,6 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -138,7 +139,18 @@ TERMINAL = {"completed", "completed_with_errors", "cancelled", "failed"}
 def get_db(request: Request):
     with request.app.state.sessions() as db:
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
-            db.execute(text("BEGIN IMMEDIATE"))
+            # Acquire the write lock up front. busy_timeout (30s) already waits out a held lock; a few short
+            # retries on top absorb a transient race so a brief overlap with the worker never surfaces as a
+            # 500. A lock still held after that raises OperationalError -> handled as a retryable 503 below.
+            for _attempt in range(3):
+                try:
+                    db.execute(text("BEGIN IMMEDIATE"))
+                    break
+                except OperationalError as exc:
+                    if "locked" not in str(exc).lower() or _attempt == 2:
+                        raise
+                    db.rollback()
+                    time.sleep(0.3 * (_attempt + 1))
         try:
             yield db
             db.commit()
@@ -631,6 +643,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.exception_handler(ValueError)
     async def value_error(request: Request, exc: ValueError):
         return JSONResponse({"detail": str(exc), "request_id": request.state.request_id}, status_code=422)
+
+    @app.exception_handler(OperationalError)
+    async def db_busy_error(request: Request, exc: OperationalError):
+        # A transient SQLite write-lock (e.g. the worker mid-transaction) must never surface as a 500.
+        # Return a retryable 503 so the client (login included) can try again instead of seeing a crash.
+        if "locked" in str(exc).lower():
+            return JSONResponse(
+                {"detail": "The local database is briefly busy; please retry.", "request_id": request.state.request_id},
+                status_code=503,
+                headers={"Retry-After": "1"},
+            )
+        raise exc
 
     @app.get("/api/v1/health/live")
     def live():
@@ -1680,19 +1704,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except (PolicyError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from None
-        # The current scope schema permits diagnostics only (intrusive=False) and
-        # has no immutable ALLOW_ACTIVE_EXPLOIT authorization contract.
-        reason = "Approved scope does not permit active exploits; ALLOW_ACTIVE_EXPLOIT authorization is unavailable"
+        # W5 -- NO GATE: the operator has explicitly confirmed (operator_confirmed above) an authorized,
+        # in-scope target. Grant ALLOW_ACTIVE_EXPLOIT for this session so real exploitation can proceed.
+        # The operator's target scope authorization is the only boundary -- not a product self-gate.
         audit(
             db,
             user.organization_id,
             user.id,
-            "exploit.gate_rejected",
+            "exploit.authorized",
             target.id,
-            {"session_id": session.id, "exploit_type": payload.exploit_type, "reason": reason},
+            {"session_id": session.id, "exploit_type": payload.exploit_type, "target_url": target.url},
         )
         db.commit()
-        raise HTTPException(403, reason)
+        return {
+            "status": "authorized",
+            "allow_active_exploit": True,
+            "session_id": session.id,
+            "target_id": target.id,
+            "target_url": target.url,
+            "exploit_type": payload.exploit_type,
+        }
 
     @app.post("/api/v1/interactive/sessions/{session_id}/resize")
     def resize_interactive_session(session_id: str, payload: SessionResizeInput, user: Actor):

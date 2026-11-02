@@ -32,6 +32,10 @@ from packages.payload_engine import (
     VulnClass,
     WAFProbeLearner,
 )
+from packages.scanner_adapters.integrations.payload_forge import (
+    EvasionProfile,
+    mutate_ast,
+)
 from packages.scanner_adapters.integrations.oob import (
     OOBCollector,
     OOBInteractionServer,
@@ -117,12 +121,59 @@ class SSTITemplateMathOracle(PostconditionOracle):
 # --- Sector 2B.1: Payload Forge Evaluator ---
 
 
+@dataclass
+class WAFBypassEvasionProfile(EvasionProfile):
+    """Offensive & purple-team WAF evasion profile with operational telemetry (P5.3)."""
+
+    probes_attempted: int = 0
+    probes_bypassed: int = 0
+    probes_blocked: int = 0
+    jitter_delays_recorded: list[float] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.jitter_delays_recorded is None:
+            self.jitter_delays_recorded = []
+
+    def record_attempt(self, bypassed: bool, jitter_seconds: float = 0.0) -> None:
+        self.probes_attempted += 1
+        if bypassed:
+            self.probes_bypassed += 1
+        else:
+            self.probes_blocked += 1
+        if jitter_seconds > 0.0:
+            self.jitter_delays_recorded.append(jitter_seconds)
+
+    def get_telemetry(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "vendor_target": self.vendor_target,
+            "probes_attempted": self.probes_attempted,
+            "probes_bypassed": self.probes_bypassed,
+            "probes_blocked": self.probes_blocked,
+            "bypass_rate": (
+                round(self.probes_bypassed / max(1, self.probes_attempted), 2)
+            ),
+            "total_jitter_time_seconds": round(sum(self.jitter_delays_recorded), 4),
+            "average_jitter_ms": (
+                round((sum(self.jitter_delays_recorded) / len(self.jitter_delays_recorded)) * 1000, 2)
+                if self.jitter_delays_recorded
+                else 0.0
+            ),
+        }
+
+
 class PayloadForgeEvaluator:
     """Fires synthesized CFG payloads through the reproducer and confirms differential impact."""
 
-    def __init__(self, reproducer: DeterministicReproducer | None = None) -> None:
+    def __init__(
+        self,
+        reproducer: DeterministicReproducer | None = None,
+        evasion_profile: EvasionProfile | None = None,
+    ) -> None:
         self.reproducer = reproducer or DeterministicReproducer()
         self.grammar = CFGGrammarEngine()
+        self.evasion_profile = evasion_profile
 
     def evaluate_payload_sequence(
         self,
@@ -131,6 +182,8 @@ class PayloadForgeEvaluator:
         vuln_type: str = "sqli",
         count: int = 5,
         canary: str = "sharay_cfg_canary",
+        evasion_profile: EvasionProfile | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
     ) -> list[dict[str, Any]]:
         """Synthesize compositional grammar payloads and fire them through the differential oracle."""
         try:
@@ -139,14 +192,35 @@ class PayloadForgeEvaluator:
             vclass = VulnClass.SQLI
         candidates = self.grammar.generate(vclass, count=count)
 
+        profile = evasion_profile or self.evasion_profile
+
+        # If evasion profile is provided and enabled, expand candidates with mutations and multi-encoding
+        test_payloads: list[str] = []
+        if profile and profile.enabled:
+            for base_p in candidates:
+                variants = profile.transform_payload(base_p, vuln_type=vuln_type, include_raw=True)
+                test_payloads.extend(variants[:3])
+        else:
+            test_payloads = candidates
+
         verified_vectors: list[dict[str, Any]] = []
-        for payload in candidates:
-            res = self.reproducer.verify_finding(
-                base_url=base_url,
-                fuzz_param=fuzz_param,
-                active_payload=payload,
-                canary=canary if canary in payload else None,
-            )
+        for payload in test_payloads[:count * 2]:
+            def _execute() -> Any:
+                return self.reproducer.verify_finding(
+                    base_url=base_url,
+                    fuzz_param=fuzz_param,
+                    active_payload=payload,
+                    canary=canary if canary in payload else None,
+                )
+
+            if profile and profile.enabled:
+                delay = profile.get_timing_jitter()
+                res = profile.execute_with_jitter(_execute, sleep_fn=sleep_fn)
+                if isinstance(profile, WAFBypassEvasionProfile):
+                    profile.record_attempt(bypassed=res.confirmed, jitter_seconds=delay)
+            else:
+                res = _execute()
+
             if res.confirmed and res.differential_score >= 35.0:
                 verified_vectors.append(
                     {
@@ -156,6 +230,8 @@ class PayloadForgeEvaluator:
                         "replays_passed": res.replays_passed,
                     }
                 )
+                if len(verified_vectors) >= count:
+                    break
         return verified_vectors
 
 
@@ -736,6 +812,68 @@ class WAFEfficacyAnalyzer:
             "waf_posture": "Strict" if raw_block_rate >= 0.8 else "Permissive",
         }
 
+    def evaluate_evasion_profile(
+        self,
+        probe_http_fn: Callable[[str], tuple[int, bytes, float]],
+        base_payloads: Sequence[str],
+        evasion_profile: EvasionProfile | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate raw vs evasive (mutated, multi-encoded, jittered) payloads against a WAF."""
+        profile = evasion_profile or WAFBypassEvasionProfile(enabled=True)
+        raw_blocked = 0
+        raw_passed = 0
+        evasive_blocked = 0
+        evasive_passed = 0
+        jitter_delays: list[float] = []
+
+        for p in base_payloads:
+            st, _, _ = probe_http_fn(p)
+            if st in (403, 406, 429):
+                raw_blocked += 1
+            else:
+                raw_passed += 1
+
+            variants = profile.transform_payload(p)
+            # Sample up to 2 variants per base payload
+            for variant in variants[:2]:
+                def _probe() -> tuple[int, bytes, float]:
+                    return probe_http_fn(variant)
+
+                delay = profile.get_timing_jitter()
+                jitter_delays.append(delay)
+                m_st, _, _ = profile.execute_with_jitter(_probe, sleep_fn=sleep_fn)
+
+                if m_st in (403, 406, 429):
+                    evasive_blocked += 1
+                    if isinstance(profile, WAFBypassEvasionProfile):
+                        profile.record_attempt(bypassed=False, jitter_seconds=delay)
+                else:
+                    evasive_passed += 1
+                    if isinstance(profile, WAFBypassEvasionProfile):
+                        profile.record_attempt(bypassed=True, jitter_seconds=delay)
+
+        raw_total = max(1, raw_blocked + raw_passed)
+        evasive_total = max(1, evasive_blocked + evasive_passed)
+        raw_block_rate = round(raw_blocked / raw_total, 2)
+        evasive_block_rate = round(evasive_blocked / evasive_total, 2)
+        bypass_efficacy = round(max(0.0, raw_block_rate - evasive_block_rate), 2)
+
+        return {
+            "raw_total": raw_total,
+            "raw_blocked": raw_blocked,
+            "raw_passed": raw_passed,
+            "raw_block_rate": raw_block_rate,
+            "evasive_total": evasive_total,
+            "evasive_blocked": evasive_blocked,
+            "evasive_passed": evasive_passed,
+            "evasive_block_rate": evasive_block_rate,
+            "waf_bypass_delta": bypass_efficacy,
+            "average_jitter_ms": round((sum(jitter_delays) / max(1, len(jitter_delays))) * 1000, 2),
+            "applied_encodings": list(profile.encoding_chain),
+            "telemetry": profile.get_telemetry() if isinstance(profile, WAFBypassEvasionProfile) else None,
+        }
+
 
 # --- Sector 2B.8: MITRE ATT&CK Mapping & Purple-Team Matrix ---
 
@@ -854,5 +992,7 @@ __all__ = [
     "PayloadForgeEvaluator",
     "SQLiRowExtractionOracle",
     "SSTITemplateMathOracle",
+    "WAFBypassEvasionProfile",
     "WAFEfficacyAnalyzer",
+    "EvasionProfile",
 ]

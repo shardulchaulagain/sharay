@@ -36,11 +36,12 @@ MAX_REQUESTS = 5
 MAX_SECONDS = 15
 REQUEST_TIMEOUT = 3
 MAX_HEADER_BYTES = 65536
-# Per-stage execution budget (seconds). Each containerized stage gets its own timeout, not a slice of
-# a shared pool, so stages never starve each other. _STAGE_TIMEOUT_CAP matches the container runtime's
-# hard ceiling; the operator sets a value up to it per scan (generous default for ordinary sites).
+# Per-stage execution budget (seconds). Each stage gets its own timeout, not a slice of a shared pool,
+# so stages never starve each other. The ceiling is deliberately 10 min: a single stage that genuinely
+# hangs (e.g. a container runtime stall) is then bounded to 10 min instead of wedging the whole scan for
+# half an hour. The operator sets a value up to it per scan (generous default for ordinary sites).
 _DEFAULT_STAGE_TIMEOUT = 300.0
-_STAGE_TIMEOUT_CAP = 1800.0
+_STAGE_TIMEOUT_CAP = 600.0
 
 
 class ScanStopped(Exception):
@@ -208,6 +209,31 @@ def _connection(
         connection.close()
         raise PolicyError("The connected peer does not match the pinned destination.")
     return connection
+
+
+def _connection_resilient(
+    destination: Destination, timeout: float
+) -> tuple[http.client.HTTPConnection, str | None]:
+    """Reach the host for assessment even when its certificate does not validate.
+
+    A security scanner must still inspect a target that presents a self-signed, expired or
+    hostname-mismatched certificate -- the broken certificate is a *finding*, not a reason to abort
+    the whole assessment. We first try a fully verified handshake; only when the chain/hostname fails
+    do we retry on a connection pinned to the already scope-verified peer IP with verification off, so
+    this is not an MITM risk. Returns (connection, cert_issue) where cert_issue is the human-readable
+    verification failure, or None when the certificate validated normally.
+
+    This keeps behaviour *consistent* across targets: every reachable host gets scanned, and the only
+    difference a bad certificate makes is one extra finding -- never a different hard error per target.
+    """
+    if destination.scheme != "https":
+        return _connection(destination, timeout), None
+    try:
+        # Default (verify=True); kept as the bare 2-arg call so existing callers/mocks are unaffected.
+        return _connection(destination, timeout), None
+    except ssl.SSLCertVerificationError as exc:
+        reason = getattr(exc, "verify_message", None) or str(exc).split("] ", 1)[-1] or "certificate verification failed"
+        return _connection(destination, timeout, verify=False), reason
 
 
 def _cookie_flags(values: list[str]) -> list[dict]:
@@ -532,10 +558,14 @@ def _findings(observation: dict) -> list[dict]:
     ]
 
 
-def _tls_observation(connection: http.client.HTTPConnection, destination: Destination) -> dict:
+def _tls_observation(
+    connection: http.client.HTTPConnection, destination: Destination, verified: bool = True
+) -> dict:
     sock = connection.sock
     if not isinstance(sock, ssl.SSLSocket):
-        raise ssl.SSLError("TLS observations require a verified TLS connection.")
+        raise ssl.SSLError("TLS observations require a TLS connection.")
+    # getpeercert() returns {} when the peer was not verified (CERT_NONE); the binary DER is still
+    # presented by the peer either way, so certificate evidence survives the insecure fallback.
     certificate = sock.getpeercert() or {}
     binary = sock.getpeercert(binary_form=True)
     cipher = sock.cipher()
@@ -547,8 +577,8 @@ def _tls_observation(connection: http.client.HTTPConnection, destination: Destin
         "url": destination.url,
         "captured_at": datetime.now(UTC).isoformat(),
         "destination_ip": destination.ip,
-        "certificate_verified": True,
-        "hostname_verified": True,
+        "certificate_verified": verified,
+        "hostname_verified": verified,
         "certificate_sha256": hashlib.sha256(binary).hexdigest(),
         "not_before": certificate.get("notBefore"),
         "not_after": certificate.get("notAfter"),
@@ -560,7 +590,9 @@ def _tls_observation(connection: http.client.HTTPConnection, destination: Destin
         from packages.scanner_adapters.integrations import tls as tls_parser
 
         observation["certificate"] = tls_parser.parse_peer_certificate(certificate)
-    except (ValueError, KeyError):
+    except Exception:
+        # Best-effort enrichment only; an unverified peer returns an empty cert dict, so never let a
+        # parse failure drop the handshake observation (sha256/protocol/cipher are already captured).
         pass
     return observation
 
@@ -666,16 +698,47 @@ def scan(
                 MAX_SECONDS - (time.monotonic() - started),
                 (policy.expires_at - datetime.now(UTC)).total_seconds(),
             )
-            connection = _connection(destination, timeout)
+            connection, cert_issue = _connection_resilient(destination, timeout)
             performed += 1
             if destination.scheme == "https" and "tls" in policy.categories:
-                record_observation(_tls_observation(connection, destination))
-                record_check(
-                    "tls",
-                    "completed",
-                    "Certificate chain and literal-IP hostname verified by the default TLS trust store.",
-                    destination.url,
-                )
+                record_observation(_tls_observation(connection, destination, verified=cert_issue is None))
+                if cert_issue is None:
+                    record_check(
+                        "tls",
+                        "completed",
+                        "Certificate chain and literal-IP hostname verified by the default TLS trust store.",
+                        destination.url,
+                    )
+                else:
+                    # Untrusted certificate: record it as a finding and keep scanning over the
+                    # IP-pinned connection, rather than aborting with a target-specific TLS error.
+                    result["findings"].append(
+                        {
+                            "category": "security_misconfiguration",
+                            "severity": "medium",
+                            "title": "Untrusted TLS certificate (self-signed or invalid chain)",
+                            "description": (
+                                f"The server certificate did not validate against the system trust store "
+                                f"({cert_issue}). A browser would warn or block. The assessment continued over "
+                                f"a connection pinned to the scope-verified peer IP."
+                            ),
+                            "affected_url": destination.url,
+                            "cwe_id": "CWE-295",
+                            "confidence": "high",
+                            "status": "suspected",
+                            "remediation": "Serve a certificate issued by a trusted CA whose SAN matches the hostname.",
+                            "fingerprint": hashlib.sha256(
+                                f"tlscert_{destination.host}_{destination.port}".encode()
+                            ).hexdigest(),
+                        }
+                    )
+                    record_check(
+                        "tls",
+                        "completed_with_errors",
+                        f"Certificate did not validate ({cert_issue}); recorded as a finding and continued over "
+                        f"the IP-pinned connection.",
+                        destination.url,
+                    )
             if "http_headers" not in policy.categories:
                 connection.close()
                 connection = None
@@ -727,7 +790,8 @@ def scan(
                     "Redirect destination passed scope validation before connection.",
                 )
                 continue
-            result["findings"] = _findings(observation)
+            # extend (not assign): a TLS certificate finding may already be recorded for this scan.
+            result["findings"].extend(_findings(observation))
             record_check(
                 "http_headers",
                 "completed",
@@ -748,10 +812,11 @@ def scan(
         result["outcome"] = "completed_with_errors" if result["observations"] else "failed"
         if isinstance(exc, PolicyError):
             detail = str(exc)
-        elif isinstance(exc, ssl.SSLCertVerificationError):
-            detail = (
-                "TLS certificate chain or hostname validation failed. No insecure fallback was attempted."
-            )
+        elif isinstance(exc, ssl.SSLError):
+            # Reached only when even the IP-pinned insecure retry could not complete the handshake
+            # (e.g. protocol/cipher mismatch), not for ordinary untrusted certificates -- those are
+            # now recorded as findings and the scan continues.
+            detail = "TLS handshake could not be completed with the target (protocol or cipher failure)."
         elif isinstance(exc, (TimeoutError, socket.timeout)):
             detail = "Request or assessment execution timed out."
         elif isinstance(exc, (ValueError, http.client.HTTPException)):
@@ -885,12 +950,14 @@ def scan_live(
         "outcome": "completed",
         "requests_performed": 0,
     }
-    if allow_ip in ("127.0.0.1", "::1", "localhost"):
-        try:
-            import subprocess
+    import subprocess
 
-            proc = subprocess.run(["curl", *argv], capture_output=True, timeout=MAX_SECONDS * 2)
-            res = type(
+    def _curl(extra: list[str]):
+        """Run curl over the right transport (local subprocess for loopback, egress runner otherwise)."""
+        run_argv = [*extra, *argv]
+        if allow_ip in ("127.0.0.1", "::1", "localhost"):
+            proc = subprocess.run(["curl", *run_argv], capture_output=True, timeout=MAX_SECONDS * 2)
+            return type(
                 "IsolatedResult",
                 (),
                 {
@@ -900,39 +967,53 @@ def scan_live(
                     "stderr": proc.stderr,
                 },
             )()
-        except Exception as exc:
-            result["outcome"] = "failed"
-            result["checks"].append(
-                {
-                    "category": "http_headers",
-                    "status": "failed",
-                    "url": url,
-                    "detail": f"Local laboratory probe did not complete ({type(exc).__name__}: {exc}).",
-                }
-            )
-            result["duration_ms"] = round((time.monotonic() - started) * 1000)
-            return result
-    else:
-        try:
-            res = runner(
-                "docker.io/curlimages/curl:8.11.1",
-                argv,
-                allow_ip=allow_ip,
-                allow_port=port,
-                max_seconds=MAX_SECONDS * 2,
-            )
-        except Exception as exc:
-            result["outcome"] = "failed"
-            result["checks"].append(
-                {
-                    "category": "http_headers",
-                    "status": "failed",
-                    "url": url,
-                    "detail": f"Enforced-egress fetch did not complete ({type(exc).__name__}: {exc}).",
-                }
-            )
-            result["duration_ms"] = round((time.monotonic() - started) * 1000)
-            return result
+        return runner(
+            "docker.io/curlimages/curl:8.11.1",
+            run_argv,
+            allow_ip=allow_ip,
+            allow_port=port,
+            max_seconds=MAX_SECONDS * 2,
+        )
+
+    cert_untrusted = False
+    try:
+        res = _curl([])
+        # curl exit 60 = the peer certificate could not be authenticated. Reach the host anyway and
+        # record the broken certificate as a finding, so an untrusted cert yields the same stage outcome
+        # (completed, one extra finding) as every other target instead of a target-specific hard error.
+        if getattr(res, "exit_code", 0) == 60:
+            cert_untrusted = True
+            res = _curl(["--insecure"])
+    except Exception as exc:
+        result["outcome"] = "failed"
+        result["checks"].append(
+            {
+                "category": "http_headers",
+                "status": "failed",
+                "url": url,
+                "detail": f"HTTP header fetch did not complete ({type(exc).__name__}: {exc}).",
+            }
+        )
+        result["duration_ms"] = round((time.monotonic() - started) * 1000)
+        return result
+    if cert_untrusted:
+        result["findings"].append(
+            {
+                "category": "security_misconfiguration",
+                "severity": "medium",
+                "title": "Untrusted TLS certificate (self-signed or invalid chain)",
+                "description": (
+                    "The server certificate did not validate against the trust store; the header scan "
+                    "continued over an IP-pinned insecure connection."
+                ),
+                "affected_url": url,
+                "cwe_id": "CWE-295",
+                "confidence": "high",
+                "status": "suspected",
+                "remediation": "Serve a certificate issued by a trusted CA whose SAN matches the hostname.",
+                "fingerprint": hashlib.sha256(f"tlscert_{host}_{port}".encode()).hexdigest(),
+            }
+        )
     result["requests_performed"] = 1
     raw_bytes = getattr(res, "stdout", b"") or b""
     if len(raw_bytes) > MAX_HEADER_BYTES:
@@ -995,7 +1076,8 @@ def scan_live(
         "body_retained": False,
     }
     result["observations"].append(observation)
-    result["findings"] = _findings(observation)
+    # extend (not assign): an untrusted-certificate finding may already be recorded above.
+    result["findings"].extend(_findings(observation))
     if detect_cve:
         cve_findings, component_count = _detect_cves_from_headers(headers, url)
         result["findings"].extend(cve_findings)
@@ -1965,6 +2047,7 @@ def scan_comprehensive(
     discovered_parameters: list[str] = []
     discovered_urls: list[str] = []
     discovered_forms: list[dict[str, Any]] = []
+    endpoint_parameters: dict[str, list[str]] = {}
     if "crawler" in enabled_tools and not _stop():
         _report("Web crawl & endpoint discovery")
         try:
@@ -1989,6 +2072,7 @@ def scan_comprehensive(
             discovered_parameters = crawl_res.get("parameters", [])
             discovered_urls = crawl_res.get("urls", [])
             discovered_forms = crawl_res.get("forms", [])
+            endpoint_parameters = crawl_res.get("endpoint_parameters", {})
 
             # Big-site coverage honesty: if the crawl hit its page cap with URLs still queued, say so
             # explicitly so partial coverage is never mistaken for a fully-explored surface.
@@ -2623,8 +2707,11 @@ def scan_comprehensive(
                 allow_ip,
                 discovered_endpoints=discovered_endpoints,
                 discovered_parameters=discovered_parameters,
+                discovered_forms=discovered_forms,
+                endpoint_parameters=endpoint_parameters,
                 timeout=3.5,
                 auth=auth if isinstance(auth, dict) else None,
+                max_seconds=per_stage_timeout,
             )
             result["observations"].extend(vuln_res.get("observations", []))
             result["findings"].extend(vuln_res.get("findings", []))

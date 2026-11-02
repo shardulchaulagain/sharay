@@ -30,21 +30,21 @@ class StageBudgetAndProgressTests(unittest.TestCase):
 
     def test_stage_honors_full_operator_timeout_no_300_clamp(self):
         # Before the redesign every stage was clamped to 300s; now a stage honors the full per-stage
-        # value (up to the 1800s ceiling), so a large site is not silently truncated.
+        # value (up to the 600s ceiling), so a large site is not silently truncated.
         got = self._capture_timeout(
             lambda r: scan_live_nuclei(self.dest, "203.0.113.10", run=r, max_seconds=600)
         )
         self.assertEqual(got, 600.0)
         got_zap = self._capture_timeout(
-            lambda r: scan_live_zap(self.dest, "203.0.113.10", run=r, max_seconds=900)
+            lambda r: scan_live_zap(self.dest, "203.0.113.10", run=r, max_seconds=450)
         )
-        self.assertEqual(got_zap, 900.0)
+        self.assertEqual(got_zap, 450.0)
 
     def test_stage_timeout_bounded_by_ceiling(self):
         got = self._capture_timeout(
             lambda r: scan_live_nuclei(self.dest, "203.0.113.10", run=r, max_seconds=5000)
         )
-        self.assertEqual(got, 1800.0)  # clamped to _STAGE_TIMEOUT_CAP, not unbounded
+        self.assertEqual(got, 600.0)  # clamped to _STAGE_TIMEOUT_CAP, not unbounded
 
     def test_progress_reports_live_stage_names(self):
         stages: list[str] = []

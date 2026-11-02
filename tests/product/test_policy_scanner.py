@@ -304,7 +304,7 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(tools[0]["runnable"])
         self.assertTrue(all(not tool["runnable"] and tool["version"] is None for tool in tools[1:]))
 
-    def test_real_tls_trust_and_literal_hostname_verification_without_insecure_fallback(self):
+    def test_untrusted_tls_certificate_is_reported_as_finding_and_scan_continues(self):
         openssl = shutil.which("openssl")
         if not openssl:
             self.skipTest("OpenSSL unavailable for ephemeral local test certificates.")
@@ -346,11 +346,18 @@ class ScannerTests(unittest.TestCase):
                 url = f"https://127.0.0.1:{server.server_port}/"
                 scope = scope_for(url)
                 try:
-                    # With the real default trust store, the synthetic issuer is rejected.
+                    # With the real default trust store the synthetic issuer is untrusted. Instead of
+                    # aborting with a target-specific TLS error, the scan now reaches the IP-pinned host,
+                    # records the broken certificate as a CWE-295 finding, and still collects evidence.
                     untrusted = scan(scope, url, lambda: False, lambda event: None)
-                    self.assertEqual(untrusted["outcome"], "failed")
-                    self.assertEqual(untrusted["observations"], [])
-                    self.assertIn("No insecure fallback", untrusted["checks"][-1]["detail"])
+                    self.assertNotEqual(untrusted["outcome"], "failed")
+                    self.assertTrue(
+                        any(f.get("cwe_id") == "CWE-295" for f in untrusted["findings"]),
+                        "An untrusted certificate must be surfaced as a finding, not silently dropped.",
+                    )
+                    tls_obs = next(o for o in untrusted["observations"] if o["kind"] == "tls_handshake")
+                    self.assertFalse(tls_obs["certificate_verified"])
+                    self.assertEqual(len(tls_obs["certificate_sha256"]), 64)
 
                     def trust_test_issuer():
                         client_context = original_context()
@@ -360,6 +367,7 @@ class ScannerTests(unittest.TestCase):
                     with patch("packages.scanner_adapters.ssl.create_default_context", trust_test_issuer):
                         checked = scan(scope, url, lambda: False, lambda event: None)
                     if certificate_ip == "127.0.0.1":
+                        # Trusted issuer + matching SAN: clean verification, no certificate finding.
                         self.assertEqual(checked["outcome"], "completed")
                         tls_observation = next(
                             o for o in checked["observations"] if o["kind"] == "tls_handshake"
@@ -367,6 +375,7 @@ class ScannerTests(unittest.TestCase):
                         self.assertTrue(tls_observation["certificate_verified"])
                         self.assertTrue(tls_observation["hostname_verified"])
                         self.assertEqual(len(tls_observation["certificate_sha256"]), 64)
+                        self.assertFalse(any(f.get("cwe_id") == "CWE-295" for f in checked["findings"]))
                         self.assertTrue(
                             any(
                                 f["title"] == "Strict-Transport-Security header is absent"
@@ -374,8 +383,11 @@ class ScannerTests(unittest.TestCase):
                             )
                         )
                     else:
-                        self.assertEqual(checked["outcome"], "failed")
-                        self.assertEqual(checked["observations"], [])
+                        # Trusted issuer but the SAN is 127.0.0.2 while we connect to 127.0.0.1: the
+                        # hostname mismatch is still a certificate failure, so it is reported and the
+                        # scan continues rather than failing with an empty result.
+                        self.assertNotEqual(checked["outcome"], "failed")
+                        self.assertTrue(any(f.get("cwe_id") == "CWE-295" for f in checked["findings"]))
                 finally:
                     server.shutdown()
                     server.server_close()

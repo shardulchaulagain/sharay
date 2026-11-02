@@ -22,7 +22,7 @@ from packages.security_policies import Destination
 
 _MAX_PAGE_BYTES = 512 * 1024  # 512 KB per page
 _MAX_DEPTH = 5
-_MAX_PAGES_CAP = 300  # large-surface ceiling for authorized big-site scopes (Sector O9)
+_MAX_PAGES_CAP = 3000  # large-surface ceiling for authorized big-site scopes (Sector O9)
 # Fetching these while authenticated ends the session; skip them so the scan stays logged in.
 _SESSION_DESTROYING = re.compile(r"(?:^|/)(?:logout|signout|logoff|signoff|log-out|sign-out)\b", re.I)
 
@@ -309,6 +309,49 @@ def parse_graphql_introspection(content: str, base_endpoint: str = "/graphql") -
     return sorted(set(endpoints)), sorted(set(operations))
 
 
+# P1.4: JS endpoint/param/secret extraction (katana/jsluice/linkfinder-style). Static-analyses JS (and
+# inline <script> bodies) for same-origin request paths, their query-param names, and leaked credentials.
+_JS_URL_RE = re.compile(r"""["'`](/[A-Za-z0-9_][A-Za-z0-9_\-./]{0,120}(?:\?[A-Za-z0-9_\-=&%.]{0,120})?)["'`]""")
+_JS_SECRET_RES = (
+    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")),
+    ("github_token", re.compile(r"\bgh[pousr]_[0-9A-Za-z]{36,}\b")),
+    ("slack_token", re.compile(r"\bxox[baprs]-[0-9A-Za-z\-]{10,}\b")),
+    ("stripe_key", re.compile(r"\bsk_live_[0-9A-Za-z]{24,}\b")),
+    ("generic_secret", re.compile(r"""(?i)(?:api[_-]?key|secret|access[_-]?token|auth[_-]?token|password)["'\s:=]{1,4}["']([A-Za-z0-9_\-]{16,})["']""")),
+)
+
+
+def parse_js_assets(content: str, base_url: str = "") -> tuple[list[str], list[str], list[dict[str, str]]]:
+    """Extract same-origin request paths, their query-param names, and leaked secrets from JS/inline-script
+    text. Returns (endpoints, parameters, secrets). Endpoints are relative paths only (same-origin, safe to
+    probe); secrets are {'type','match'} with the value truncated so the finding never echoes a full key."""
+    endpoints: set[str] = set()
+    parameters: set[str] = set()
+    secrets: list[dict[str, str]] = []
+    if not content:
+        return [], [], []
+    for m in _JS_URL_RE.finditer(content):
+        raw = m.group(1)
+        if raw.startswith("//") or "${" in raw:  # protocol-relative or a template literal fragment
+            continue
+        path, _, query = raw.partition("?")
+        endpoints.add(path)
+        for pair in query.split("&"):
+            key = pair.split("=", 1)[0]
+            if key and len(key) <= 40:
+                parameters.add(key)
+    seen: set[str] = set()
+    for stype, rex in _JS_SECRET_RES:
+        for sm in rex.finditer(content):
+            token = sm.group(1) if sm.groups() else sm.group(0)
+            if token in seen:
+                continue
+            seen.add(token)
+            secrets.append({"type": stype, "match": token[:4] + "..." + token[-2:] if len(token) > 8 else "***"})
+    return sorted(endpoints), sorted(parameters), secrets
+
+
 def parse_wsdl(content: str, base_url: str = "") -> tuple[list[str], list[str]]:
     """Extract SOAP operations from WSDL XML document."""
     endpoints: list[str] = []
@@ -428,8 +471,10 @@ def crawl(
 
     discovered_endpoints: set[str] = {dest_path} if dest_path and dest_path != "/" else set()
     discovered_parameters: set[str] = set()
+    endpoint_parameters: dict[str, set[str]] = {}  # P1.1: params observed AT each endpoint (not just global)
     discovered_forms: list[dict[str, Any]] = []
     discovered_scripts: set[str] = set()
+    discovered_secrets: list[dict[str, str]] = []
     discovered_urls: set[str] = {base_url, destination.url}
     spider_extracted_endpoints: set[str] = set()
     pages_crawled: list[dict[str, Any]] = []
@@ -533,6 +578,7 @@ def crawl(
                     k = param.split("=")[0]
                     if k:
                         discovered_parameters.add(k)
+                        endpoint_parameters.setdefault(parsed.path or "/", set()).add(k)
 
         if clean_url in visited:
             continue
@@ -592,15 +638,31 @@ def crawl(
                 discovered_forms.append(form)
                 discovered_urls.add(form_action)
                 spider_extracted_endpoints.add(urlparse(form_action).path or "/")
+                _fpath = urlparse(form_action).path or "/"
                 for inp in form.get("inputs", []):
                     name = inp.get("name")
                     if name:
                         discovered_parameters.add(name)
+                        endpoint_parameters.setdefault(_fpath, set()).add(name)
 
         for script in extractor.scripts:
             if _is_in_scope(script, target_host, destination.scheme):
                 discovered_scripts.add(script)
                 discovered_urls.add(script)
+
+        # P1.4: mine inline <script> bodies (already in `body`, no extra request) for same-origin request
+        # paths, their param names, and leaked secrets.
+        try:
+            _js_eps, _js_params, _js_secrets = parse_js_assets(body, clean_url)
+            for _e in _js_eps:
+                discovered_endpoints.add(_e)
+                discovered_urls.add(urljoin(base_url, _e))
+            discovered_parameters.update(_js_params)
+            for _s in _js_secrets:
+                _s["source"] = clean_url
+                discovered_secrets.append(_s)
+        except Exception:
+            pass
 
         if depth < depth_limit:
             for link in extractor.links:
@@ -609,10 +671,35 @@ def crawl(
                     clean_link = f"{parsed_link.scheme}://{parsed_link.netloc}{parsed_link.path}"
                     if parsed_link.query:
                         clean_link = f"{clean_link}?{parsed_link.query}"
+                        for _lp in parsed_link.query.split("&"):
+                            _lk = _lp.split("=")[0]
+                            if _lk:
+                                discovered_parameters.add(_lk)
+                                endpoint_parameters.setdefault(parsed_link.path or "/", set()).add(_lk)
                     discovered_urls.add(clean_link)
                     spider_extracted_endpoints.add(parsed_link.path or "/")
                     if clean_link not in visited:
                         queue.append((clean_link, depth + 1))
+
+    # P1.4: fetch external scripts (bounded, in-scope, read-only) and mine them for endpoints/params/secrets.
+    for _js_url in sorted(discovered_scripts)[:20]:
+        try:
+            _js_status, _, _js_body = _fetch_page(
+                _js_url, target_host, target_port, allow_ip, is_https, timeout=min(timeout, 3.0),
+                session_cookies=session_cookies, auth_headers=active_auth_headers,
+            )
+            if _js_status != 200 or not _js_body:
+                continue
+            _je, _jp, _js = parse_js_assets(_js_body, _js_url)
+            for _e in _je:
+                discovered_endpoints.add(_e)
+                discovered_urls.add(urljoin(base_url, _e))
+            discovered_parameters.update(_jp)
+            for _s in _js:
+                _s["source"] = _js_url
+                discovered_secrets.append(_s)
+        except Exception:
+            continue
 
     # Calculate Schema vs Dynamic Spider Coverage (B4)
     spider_norm = {ep.rstrip("/") or "/" for ep in spider_extracted_endpoints}
@@ -650,8 +737,10 @@ def crawl(
         "endpoints": sorted(discovered_endpoints),
         "urls": sorted(discovered_urls),
         "parameters": sorted(discovered_parameters),
+        "endpoint_parameters": {k: sorted(v) for k, v in endpoint_parameters.items()},
         "forms": discovered_forms[:50],
         "scripts": sorted(discovered_scripts)[:50],
+        "js_secrets": discovered_secrets[:50],
         "robots_disallowed": sorted(set(robots_disallowed)),
         "sitemap_urls_count": len(sitemap_urls_discovered),
         "exposed_sensitive_files": exposed_files,
@@ -663,4 +752,4 @@ def crawl(
     }
 
 
-__all__ = ["crawl", "parse_openapi_spec", "parse_graphql_introspection", "parse_wsdl"]
+__all__ = ["crawl", "parse_openapi_spec", "parse_graphql_introspection", "parse_wsdl", "parse_js_assets"]

@@ -22,14 +22,18 @@ def create_database(settings: Settings, migrate: bool = True) -> tuple[Engine, s
     is_sqlite = settings.database_url.startswith("sqlite")
     if is_sqlite:
         engine = create_engine(
-            settings.database_url, connect_args={"check_same_thread": False, "timeout": 10}
+            settings.database_url, connect_args={"check_same_thread": False, "timeout": 30}
         )
 
         @event.listens_for(engine, "connect")
         def setup(connection, _record):
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA busy_timeout=10000")
+            # 30s so an interactive write (e.g. operator login) waits out a running scan's write burst
+            # instead of erroring with "database is locked"; synchronous=NORMAL is WAL-safe and keeps each
+            # write short so the lock is held briefly -- together these stop a scan from starving the UI.
+            connection.execute("PRAGMA busy_timeout=30000")
+            connection.execute("PRAGMA synchronous=NORMAL")
     else:
         engine = create_engine(settings.database_url, pool_pre_ping=True, pool_size=10, max_overflow=20)
 

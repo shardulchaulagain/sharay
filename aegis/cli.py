@@ -321,6 +321,16 @@ def cmd_scan(
         if tags:
             print(f"[*] Custom Tags  : {tags}")
         print(f"[*] Assessment   : {assessment_id} (authorization recorded before execution)")
+        # Fail-safe: egress-isolated stages (nmap/nuclei/zap) need the podman VM up, else they fail closed.
+        # Auto-start it once here so the scan actually runs; if it can't start, those stages still fail
+        # closed individually (no uncontained traffic), and the scan proceeds with the in-process stages.
+        if profile != "safe_http" and not pinned_ip.startswith("127.") and pinned_ip != "::1":
+            from services.scanner_worker.container import ensure_podman_machine_running
+
+            if ensure_podman_machine_running():
+                print("[*] Egress isolation : podman VM running")
+            else:
+                print("[!] Egress isolation : podman VM unavailable -- container stages will be skipped (fail-closed)")
         print("[*] Launching multi-stage automated assessment pipeline...\n")
 
         started_mono = time.monotonic()
