@@ -1,0 +1,407 @@
+[
+  {
+    "rule": "alt-text",
+    "jsx": "<img src=\"fixture.png\" />",
+    "denied": true
+  },
+  {
+    "rule": "alt-text",
+    "jsx": "<img src=\"fixture.png\" alt=\"Tree\" />",
+    "denied": false
+  },
+  {
+    "rule": "anchor-has-content",
+    "jsx": "<a href=\"/\" />",
+    "denied": true
+  },
+  {
+    "rule": "anchor-has-content",
+    "jsx": "<a href=\"/\">Home</a>",
+    "denied": false
+  },
+  {
+    "rule": "anchor-is-valid",
+    "jsx": "<a href=\"#\">Home</a>",
+    "denied": true
+  },
+  {
+    "rule": "anchor-is-valid",
+    "jsx": "<a href=\"/\">Home</a>",
+    "denied": false
+  },
+  {
+    "rule": "aria-activedescendant-has-tabindex",
+    "jsx": "<div aria-activedescendant=\"item\" />",
+    "denied": true
+  },
+  {
+    "rule": "aria-activedescendant-has-tabindex",
+    "jsx": "<div aria-activedescendant=\"item\" tabIndex={0} />",
+    "denied": false
+  },
+  {
+    "rule": "aria-props",
+    "jsx": "<div aria-not-a-property=\"true\" />",
+    "denied": true
+  },
+  {
+    "rule": "aria-props",
+    "jsx": "<div aria-label=\"Example\" />",
+    "denied": false
+  },
+  {
+    "rule": "aria-proptypes",
+    "jsx": "<div aria-hidden=\"maybe\" />",
+    "denied": true
+  },
+  {
+    "rule": "aria-proptypes",
+    "jsx": "<div aria-hidden=\"true\" />",
+    "denied": false
+  },
+  {
+    "rule": "aria-role",
+    "jsx": "<div role=\"invalid-role\" />",
+    "denied": true
+  },
+  {
+    "rule": "aria-role",
+    "jsx": "<div role=\"region\" />",
+    "denied": false
+  },
+  {
+    "rule": "aria-unsupported-elements",
+    "jsx": "<meta aria-label=\"Title\" />",
+    "denied": true
+  },
+  {
+    "rule": "aria-unsupported-elements",
+    "jsx": "<div aria-label=\"Title\" />",
+    "denied": false
+  },
+  {
+    "rule": "autocomplete-valid",
+    "jsx": "<input autoComplete=\"banana\" aria-label=\"Name\" />",
+    "denied": true
+  },
+  {
+    "rule": "autocomplete-valid",
+    "jsx": "<input autoComplete=\"name\" aria-label=\"Name\" />",
+    "denied": false
+  },
+  {
+    "rule": "click-events-have-key-events",
+    "jsx": "<div role=\"button\" tabIndex={0} onClick={() => {}} />",
+    "denied": true
+  },
+  {
+    "rule": "click-events-have-key-events",
+    "jsx": "<button onClick={() => {}}>Open</button>",
+    "denied": false
+  },
+  {
+    "rule": "heading-has-content",
+    "jsx": "<h1 />",
+    "denied": true
+  },
+  {
+    "rule": "heading-has-content",
+    "jsx": "<h1>Title</h1>",
+    "denied": false
+  },
+  {
+    "rule": "html-has-lang",
+    "jsx": "<html />",
+    "denied": true
+  },
+  {
+    "rule": "html-has-lang",
+    "jsx": "<html lang=\"en\" />",
+    "denied": false
+  },
+  {
+    "rule": "iframe-has-title",
+    "jsx": "<iframe src=\"about:blank\" />",
+    "denied": true
+  },
+  {
+    "rule": "iframe-has-title",
+    "jsx": "<iframe src=\"about:blank\" title=\"Fixture\" />",
+    "denied": false
+  },
+  {
+    "rule": "img-redundant-alt",
+    "jsx": "<img src=\"fixture.png\" alt=\"Image of a tree\" />",
+    "denied": true
+  },
+  {
+    "rule": "img-redundant-alt",
+    "jsx": "<img src=\"fixture.png\" alt=\"Tree\" />",
+    "denied": false
+  },
+  {
+    "rule": "interactive-supports-focus",
+    "jsx": "<span role=\"button\" onClick={() => {}} />",
+    "denied": true
+  },
+  {
+    "rule": "interactive-supports-focus",
+    "jsx": "<span role=\"button\" tabIndex={0} onClick={() => {}} />",
+    "denied": false
+  },
+  {
+    "rule": "label-has-associated-control",
+    "jsx": "<label>Name</label>",
+    "denied": true
+  },
+  {
+    "rule": "label-has-associated-control",
+    "jsx": "<label htmlFor=\"name\">Name</label>",
+    "denied": false
+  },
+  {
+    "rule": "media-has-caption",
+    "jsx": "<video src=\"fixture.webm\" />",
+    "denied": true
+  },
+  {
+    "rule": "media-has-caption",
+    "jsx": "<video src=\"fixture.webm\"><track kind=\"captions\" /></video>",
+    "denied": false
+  },
+  {
+    "rule": "mouse-events-have-key-events",
+    "jsx": "<div onMouseOver={() => {}} />",
+    "denied": true
+  },
+  {
+    "rule": "mouse-events-have-key-events",
+    "jsx": "<div onMouseOver={() => {}} onFocus={() => {}} />",
+    "denied": false
+  },
+  {
+    "rule": "no-access-key",
+    "jsx": "<button accessKey=\"h\">Help</button>",
+    "denied": true
+  },
+  {
+    "rule": "no-access-key",
+    "jsx": "<button>Help</button>",
+    "denied": false
+  },
+  {
+    "rule": "no-autofocus",
+    "jsx": "<input autoFocus aria-label=\"Name\" />",
+    "denied": true
+  },
+  {
+    "rule": "no-autofocus",
+    "jsx": "<input aria-label=\"Name\" />",
+    "denied": false
+  },
+  {
+    "rule": "no-distracting-elements",
+    "jsx": "<marquee>Notice</marquee>",
+    "denied": true
+  },
+  {
+    "rule": "no-distracting-elements",
+    "jsx": "<div>Notice</div>",
+    "denied": false
+  },
+  {
+    "rule": "no-interactive-element-to-noninteractive-role",
+    "jsx": "<button role=\"heading\">Title</button>",
+    "denied": true
+  },
+  {
+    "rule": "no-interactive-element-to-noninteractive-role",
+    "jsx": "<button>Open</button>",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-element-interactions",
+    "jsx": "<h1 onClick={() => {}}>Title</h1>",
+    "denied": true
+  },
+  {
+    "rule": "no-noninteractive-element-interactions",
+    "jsx": "<h1>Title</h1>",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-element-to-interactive-role",
+    "jsx": "<h1 role=\"button\">Title</h1>",
+    "denied": true
+  },
+  {
+    "rule": "no-noninteractive-element-to-interactive-role",
+    "jsx": "<h1>Title</h1>",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-tabindex",
+    "jsx": "<div tabIndex={0} />",
+    "denied": true
+  },
+  {
+    "rule": "no-noninteractive-tabindex",
+    "jsx": "<div tabIndex={-1} />",
+    "denied": false
+  },
+  {
+    "rule": "no-redundant-roles",
+    "jsx": "<button role=\"button\">Open</button>",
+    "denied": true
+  },
+  {
+    "rule": "no-redundant-roles",
+    "jsx": "<button>Open</button>",
+    "denied": false
+  },
+  {
+    "rule": "no-static-element-interactions",
+    "jsx": "<div onKeyDown={() => {}} />",
+    "denied": true
+  },
+  {
+    "rule": "no-static-element-interactions",
+    "jsx": "<button onKeyDown={() => {}}>Open</button>",
+    "denied": false
+  },
+  {
+    "rule": "role-has-required-aria-props",
+    "jsx": "<div role=\"checkbox\" />",
+    "denied": true
+  },
+  {
+    "rule": "role-has-required-aria-props",
+    "jsx": "<div role=\"checkbox\" aria-checked=\"false\" />",
+    "denied": false
+  },
+  {
+    "rule": "role-supports-aria-props",
+    "jsx": "<div role=\"button\" aria-checked=\"false\" />",
+    "denied": true
+  },
+  {
+    "rule": "role-supports-aria-props",
+    "jsx": "<div role=\"checkbox\" aria-checked=\"false\" />",
+    "denied": false
+  },
+  {
+    "rule": "scope",
+    "jsx": "<div scope=\"row\" />",
+    "denied": true
+  },
+  {
+    "rule": "scope",
+    "jsx": "<th scope=\"row\">Name</th>",
+    "denied": false
+  },
+  {
+    "rule": "tabindex-no-positive",
+    "jsx": "<button tabIndex={1}>Open</button>",
+    "denied": true
+  },
+  {
+    "rule": "tabindex-no-positive",
+    "jsx": "<button tabIndex={0}>Open</button>",
+    "denied": false
+  },
+  {
+    "rule": "interactive-supports-focus",
+    "jsx": "<div role=\"button\" onClick={() => {}} tabIndex={-1} />",
+    "denied": false
+  },
+  {
+    "rule": "no-interactive-element-to-noninteractive-role",
+    "jsx": "<tr role=\"presentation\" />",
+    "denied": false
+  },
+  {
+    "rule": "no-interactive-element-to-noninteractive-role",
+    "jsx": "<canvas role=\"img\" />",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-element-interactions",
+    "jsx": "<div role=\"alert\" onKeyDown={() => {}} />",
+    "denied": true
+  },
+  {
+    "rule": "no-noninteractive-element-interactions",
+    "jsx": "<body onLoad={() => {}} />",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-element-interactions",
+    "jsx": "<div role=\"dialog\" onKeyDown={() => {}} />",
+    "denied": true
+  },
+  {
+    "rule": "no-noninteractive-element-interactions",
+    "jsx": "<iframe title=\"Frame\" onLoad={() => {}} />",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-element-interactions",
+    "jsx": "<img alt=\"Tree\" src=\"fixture.png\" onError={() => {}} />",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-element-interactions",
+    "jsx": "<h1 onError={() => {}}>Title</h1>",
+    "denied": true
+  },
+  {
+    "rule": "no-noninteractive-element-to-interactive-role",
+    "jsx": "<ul role=\"listbox\" />",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-element-to-interactive-role",
+    "jsx": "<ol role=\"tree\" />",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-element-to-interactive-role",
+    "jsx": "<li role=\"option\" />",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-element-to-interactive-role",
+    "jsx": "<table role=\"grid\" />",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-element-to-interactive-role",
+    "jsx": "<td role=\"gridcell\" />",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-element-to-interactive-role",
+    "jsx": "<fieldset role=\"presentation\" />",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-tabindex",
+    "jsx": "<div role=\"tabpanel\" tabIndex={0} />",
+    "denied": false
+  },
+  {
+    "rule": "no-noninteractive-tabindex",
+    "jsx": "<div role={role} tabIndex={0} />",
+    "denied": false
+  },
+  {
+    "rule": "no-static-element-interactions",
+    "jsx": "<div role={role} onClick={() => {}} />",
+    "denied": false
+  },
+  {
+    "rule": "no-static-element-interactions",
+    "jsx": "<div onMouseOver={() => {}} />",
+    "denied": false
+  }
+]

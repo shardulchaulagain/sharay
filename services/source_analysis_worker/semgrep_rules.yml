@@ -1,0 +1,33 @@
+rules:
+  - id: python-eval-use
+    patterns:
+      - pattern: eval(...)
+    message: Use of eval() on dynamic input can lead to code injection.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: "CWE-95"
+  - id: python-exec-use
+    patterns:
+      - pattern: exec(...)
+    message: Use of exec() on dynamic input can lead to code injection.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: "CWE-95"
+  - id: python-subprocess-shell-true
+    patterns:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+    message: subprocess with shell=True can lead to command injection.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: "CWE-78"
+  - id: python-yaml-unsafe-load
+    patterns:
+      - pattern: yaml.load($X)
+    message: yaml.load without SafeLoader can execute arbitrary objects.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: "CWE-502"

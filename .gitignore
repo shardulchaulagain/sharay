@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Node / web build
+node_modules/
+apps/web/.next/
+apps/web/out/
+*.tsbuildinfo
+
+# Secrets & environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime data dirs & databases -- created per-install, NEVER committed. The operator's own
+# assessments/findings live here and must not ship with the source on GitHub.
+.aegis/
+.sharay/
+aegis.db*
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Downloaded third-party tools and the update ledger: never committed.
+tools/
+
+# Caches & local dev state
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.serena/
+.engineering/
+scratch/
+tmp/
+.DS_Store

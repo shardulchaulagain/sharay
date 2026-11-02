@@ -1,0 +1,74 @@
+{
+  "gates": [
+    {
+      "name": "python-unit-and-integration-tests",
+      "command": [
+        "{python}",
+        "engineering/run_tests.py"
+      ],
+      "timeout_seconds": 600
+    },
+    {
+      "name": "python-lint",
+      "command": [
+        "{python}",
+        "-m",
+        "ruff",
+        "check",
+        "aegis",
+        "sharay",
+        "packages",
+        "migrations",
+        "fixtures",
+        "tests/product",
+        "scripts",
+        "services",
+        "tests/integration",
+        "tests/evaluation",
+        "engineering",
+        "tests/test_engineering.py"
+      ],
+      "timeout_seconds": 60
+    },
+    {
+      "name": "python-format",
+      "command": [
+        "{python}",
+        "-m",
+        "ruff",
+        "format",
+        "--check",
+        "aegis",
+        "sharay",
+        "packages",
+        "migrations",
+        "fixtures",
+        "tests/product",
+        "scripts",
+        "services",
+        "tests/integration",
+        "tests/evaluation",
+        "engineering",
+        "tests/test_engineering.py"
+      ],
+      "timeout_seconds": 60
+    },
+    {
+      "name": "python-types",
+      "command": [
+        "{python}",
+        "-m",
+        "mypy",
+        "--explicit-package-bases",
+        "aegis",
+        "sharay",
+        "packages",
+        "services",
+        "engineering",
+        "scripts/log_view.py",
+        "scripts/session_log.py"
+      ],
+      "timeout_seconds": 60
+    }
+  ]
+}

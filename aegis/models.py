@@ -1,0 +1,216 @@
+"""Relational records for the implemented desktop workflow."""
+
+import time
+import uuid
+from typing import Any
+
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+def identifier() -> str:
+    return str(uuid.uuid4())
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Organization(Base):
+    __tablename__ = "organizations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    name: Mapped[str] = mapped_column(String(160))
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    username: Mapped[str] = mapped_column(String(80), unique=True)
+    password_hash: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(30))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Opt-in TOTP MFA. A stored secret is pending until totp_enabled; login is gated only for
+    # enrolled users, so accounts without MFA are unaffected.
+    totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    totp_backup_hashes: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+
+
+class LoginAttempt(Base):
+    __tablename__ = "login_attempts"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    window_started: Mapped[float] = mapped_column(Float, default=time.time)
+
+
+class SessionRecord(Base):
+    __tablename__ = "sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    csrf: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+    expires_at: Mapped[float] = mapped_column(Float)
+
+
+class RecoveryToken(Base):
+    __tablename__ = "recovery_tokens"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    expires_at: Mapped[float] = mapped_column(Float)
+    used: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Project(Base):
+    __tablename__ = "projects"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text, default="")
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
+class Credential(Base):
+    """An approved test credential, encrypted at rest. The plaintext value is never stored or
+    returned; a scope references it by name via credential_refs for authenticated testing."""
+
+    __tablename__ = "credentials"
+    __table_args__ = (UniqueConstraint("organization_id", "name"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    kind: Mapped[str] = mapped_column(String(20))  # cookie | header | bearer | basic
+    header_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    encrypted_value: Mapped[str] = mapped_column(Text)
+    # Optional grouping for dual-identity (IDOR/BOLA) testing: credentials sharing an `identity` form
+    # one authenticated operator; `subject_id` is the resource id that identity owns (for cross-tenant
+    # targeting). Credentials with no identity fold into the single default auth context.
+    identity: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    subject_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
+class ProjectMember(Base):
+    """A user's membership in a project. Non-admin roles (analyst, viewer) only access projects they
+    belong to; org admins (owner, security_administrator) see every project without a row here."""
+
+    __tablename__ = "project_members"
+    __table_args__ = (UniqueConstraint("project_id", "user_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    added_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
+class Target(Base):
+    __tablename__ = "targets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    url: Mapped[str] = mapped_column(Text)
+    scope: Mapped[dict[str, Any]] = mapped_column(JSON)
+    scope_version: Mapped[int] = mapped_column(Integer, default=1)
+    verification_status: Mapped[str] = mapped_column(String(40), default="awaiting_authorization")
+    authorized_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    approved_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
+class Assessment(Base):
+    __tablename__ = "assessments"
+    __table_args__ = (UniqueConstraint("organization_id", "idempotency_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    target_id: Mapped[str] = mapped_column(ForeignKey("targets.id"))
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    idempotency_key: Mapped[str] = mapped_column(String(100))
+    profile: Mapped[str] = mapped_column(String(30), default="safe_http")
+    status: Mapped[str] = mapped_column(String(40), default="queued", index=True)
+    stage: Mapped[str] = mapped_column(String(100), default="Waiting for worker")
+    scope_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
+    scope_version: Mapped[int] = mapped_column(Integer)
+    retest_of: Mapped[str | None] = mapped_column(ForeignKey("assessments.id"), nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+    started_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    finished_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checks: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    # Persisted AI investigation result (provider narrative/usage included) so it survives restart
+    # and is not recomputed or re-billed on every view.
+    ai_investigation: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+
+
+class OriginCooldown(Base):
+    __tablename__ = "origin_cooldowns"
+    origin: Mapped[str] = mapped_column(Text, primary_key=True)
+    interval: Mapped[float] = mapped_column(Float, default=0.5)
+    active_worker_id: Mapped[str | None] = mapped_column(String(100), nullable=True, default=None)
+    acquired_at: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    last_completed_at: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+
+
+class Observation(Base):
+    __tablename__ = "observations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    assessment_id: Mapped[str] = mapped_column(ForeignKey("assessments.id"), index=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON)
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+    observed_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
+class Finding(Base):
+    __tablename__ = "findings"
+    __table_args__ = (UniqueConstraint("target_id", "fingerprint"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    target_id: Mapped[str] = mapped_column(ForeignKey("targets.id"))
+    fingerprint: Mapped[str] = mapped_column(String(200))
+    title: Mapped[str] = mapped_column(String(250))
+    category: Mapped[str] = mapped_column(String(80))
+    severity: Mapped[str] = mapped_column(String(30))
+    confidence: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(40))
+    description: Mapped[str] = mapped_column(Text)
+    remediation: Mapped[str] = mapped_column(Text)
+    affected_url: Mapped[str] = mapped_column(Text)
+    first_seen: Mapped[float] = mapped_column(Float, default=time.time)
+    last_seen: Mapped[float] = mapped_column(Float, default=time.time)
+
+
+class FindingEvidence(Base):
+    __tablename__ = "finding_evidence"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    finding_id: Mapped[str] = mapped_column(ForeignKey("findings.id"), index=True)
+    assessment_id: Mapped[str] = mapped_column(ForeignKey("assessments.id"), index=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON)
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+
+
+class FindingHistory(Base):
+    __tablename__ = "finding_history"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=identifier)
+    finding_id: Mapped[str] = mapped_column(ForeignKey("findings.id"), index=True)
+    status: Mapped[str] = mapped_column(String(40))
+    actor: Mapped[str] = mapped_column(String(80))
+    reason: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    actor: Mapped[str] = mapped_column(String(80))
+    action: Mapped[str] = mapped_column(String(100))
+    resource_id: Mapped[str] = mapped_column(String(80))
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+    previous_hash: Mapped[str] = mapped_column(String(64))
+    event_hash: Mapped[str] = mapped_column(String(64))
